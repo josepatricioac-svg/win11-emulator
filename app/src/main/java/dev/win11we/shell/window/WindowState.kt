@@ -20,6 +20,12 @@ class WindowState(
     initialSize: DpSize,
     val minSize: DpSize = DpSize(340.dp, 220.dp),
 ) {
+    /**
+     * Per-window app state (Explorer's navigation state today). Created by
+     * [WindowManager.open] so the caption and the body share one instance.
+     */
+    var payload: Any? = null
+
     var mode by mutableStateOf(WindowMode.NORMAL)
     var minimized by mutableStateOf(false)
     var zIndex by mutableIntStateOf(0)

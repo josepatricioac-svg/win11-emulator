@@ -22,12 +22,20 @@ Updated at every step. Nothing here is a Microsoft asset.
 
 No new external binaries, no GPL code, no WebView.
 
+### N2 additions (Explorer)
+
+No new libraries. The Explorer is plain `java.io.File` + Compose Foundation/Material 3,
+plus `androidx.core.content.ContextCompat` for the runtime permission check
+(`READ_EXTERNAL_STORAGE`, `maxSdkVersion 32`).
+
 ## Assets
 
 | Asset | Origin | Licence |
 | --- | --- | --- |
 | `ic_search` | Material Symbols / Material Design Icons path data | Apache-2.0 |
 | Window caption glyphs (`ic_minimize`, `ic_maximize`, `ic_restore`, `ic_close`), tray glyphs (`ic_wifi`, `ic_volume`, `ic_battery`, `ic_chevron_up`, `ic_power`, `ic_person`, `ic_all_apps`) | Original, drawn for this project | Project licence |
+| Explorer chrome (`ic_arrow_left/right/up/down`, `ic_refresh`, `ic_view_list`, `ic_view_grid`, `ic_new_folder`, `ic_home`, `ic_desktop`) | Original, drawn for this project | Project licence |
+| File-type icons (`ic_file_generic`, `ic_file_text`, `ic_file_app`, `ic_file_shortcut`, `ic_picture`, `ic_archive`, `ic_drive`, `ic_drive_wine`) | Original, drawn for this project | Project licence |
 | App tiles (`ic_app_explorer`, `ic_app_notepad`, `ic_app_settings`, `ic_app_terminal`, `ic_app_taskmgr`, `ic_app_container`) | Original, drawn for this project | Project licence |
 | `ic_start` (four-petal mark), `ic_launcher_foreground` (bloom) | Original, drawn for this project | Project licence |
 | Desktop wallpaper (`BloomWallpaper.kt`) | Original, drawn procedurally at runtime | Project licence |

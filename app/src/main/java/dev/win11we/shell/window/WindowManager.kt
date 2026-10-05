@@ -11,11 +11,26 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import android.os.Environment
 import dev.win11we.shell.R
+import dev.win11we.shell.ui.explorer.ExplorerState
+import java.io.File
 
 /** Every app the shell knows about. Order == taskbar / Start menu order. */
 val ShellApps: List<AppSpec> = listOf(
-    AppSpec("explorer", "File Explorer", R.drawable.ic_app_explorer),
+    AppSpec(
+        id = "explorer",
+        label = "File Explorer",
+        iconRes = R.drawable.ic_app_explorer,
+        title = { window ->
+            val current = window.explorerState()?.current
+            when {
+                current == null -> "File Explorer"
+                current.name.isBlank() -> "Phone (C:)"
+                else -> current.name
+            }
+        },
+    ),
     AppSpec("notepad", "Notepad", R.drawable.ic_app_notepad),
     AppSpec("settings", "Settings", R.drawable.ic_app_settings),
     AppSpec("terminal", "Terminal", R.drawable.ic_app_terminal),
@@ -25,7 +40,13 @@ val ShellApps: List<AppSpec> = listOf(
 
 /** Owns the window list, the z-order and which window is on top. */
 @Stable
-class WindowManager {
+class WindowManager(
+    /**
+     * Creates the per-window app state. Injected so the manager stays testable on
+     * the JVM (no android.os.Environment); the shell wires Explorer's root here.
+     */
+    private val payloadFactory: (AppSpec) -> Any? = { null },
+) {
     val windows: SnapshotStateList<WindowState> = mutableStateListOf()
     var focusedId by mutableStateOf<Int?>(null)
         private set
@@ -51,6 +72,7 @@ class WindowManager {
             ),
             initialSize = size,
         )
+        window.payload = payloadFactory(app)
         window.zIndex = nextZ++
         windows.add(window)
         focusedId = window.id
@@ -88,4 +110,19 @@ class WindowManager {
 }
 
 @Composable
-fun rememberWindowManager(): WindowManager = remember { WindowManager() }
+fun rememberWindowManager(): WindowManager = remember {
+    val root = Environment.getExternalStorageDirectory()
+    WindowManager { app ->
+        if (app.id == "explorer") {
+            ExplorerState(root = if (root.isDirectory) root else File(root.parent ?: "/"))
+        } else {
+            null
+        }
+    }
+}
+
+/**
+ * Explorer's navigation state, rooted at shared storage ("Phone (C:)").
+ * The Wine prefix (Z:) is mounted here in R1/R3, SAF drives in P1.
+ */
+fun WindowState.explorerState(): ExplorerState? = payload as? ExplorerState

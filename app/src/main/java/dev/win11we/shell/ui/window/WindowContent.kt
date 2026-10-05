@@ -32,14 +32,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.win11we.shell.R
+import dev.win11we.shell.ui.explorer.ExplorerScreen
+import dev.win11we.shell.window.WindowState
+import dev.win11we.shell.window.explorerState
 
 /**
  * N1 window bodies. Only Notepad does something real (an editable buffer);
  * the rest are honest placeholders until N2 ports each screen.
  */
 @Composable
-fun WindowContent(appId: String, label: String, enabled: Boolean) {
-    when (appId) {
+fun WindowContent(window: WindowState, label: String, enabled: Boolean) {
+    when (window.app.id) {
+        "explorer" -> {
+            val state = window.explorerState()
+            if (state == null) ComingSoon(label = label, enabled = enabled) else ExplorerScreen(state = state)
+        }
         "notepad" -> NotepadPlaceholder()
         else -> ComingSoon(label = label, enabled = enabled)
     }

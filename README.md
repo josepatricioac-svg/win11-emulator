@@ -14,7 +14,7 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | --- | --- | --- |
 | N0 | Gradle project + Compose shell screen (wallpaper + taskbar), CI debug APK | done |
 | N1 | Native taskbar (Start menu, tray, clock) + window manager (drag/resize/snap/z-order) | done |
-| N2 | Apps: Explorer, Notepad, Settings, Task Manager, Terminal, Container Manager | next |
+| N2 | Apps: Explorer (done), Notepad, Settings, Task Manager, Terminal, Container Manager | in progress |
 | R1–R4 | proot/box64 in `jniLibs`, ContainerService, rootfs download, self-test | — |
 | D1–D2 | In-app X server (fullscreen surface, then one surface per top-level window) | — |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | — |
@@ -45,11 +45,18 @@ app/src/main/java/dev/win11we/shell/
   ui/window/WindowLayer.kt     z-ordered rendering + snap preview overlay
   ui/window/WindowFrame.kt     frame, caption, drag-to-move/snap, 8 resize handles
   ui/window/WindowControlButton.kt  minimize / maximize-restore / close
-  ui/window/WindowContent.kt   N1 window bodies (Notepad edits text, others are placeholders)
+  ui/window/WindowContent.kt   routes a window to its app body
+  ui/explorer/FileEntry.kt     file model, listing, filtering, sorting, size/type formatting
+  ui/explorer/ExplorerState.kt navigation + selection + create/rename/delete (all pure JVM)
+  ui/explorer/ExplorerScreen.kt toolbar, breadcrumb, nav pane, status bar, dialogs, menus
+  ui/explorer/ExplorerViews.kt details rows and tiles grid
+  ui/explorer/ExplorerIcons.kt extension -> icon mapping, sidebar locations
 ```
 
-Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric): snap zones, maximize/restore,
-halves snapping, edge/corner resize with minimums, on-screen clamping, z-order/focus,
-taskbar toggle open-minimize-restore.
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 35 tests): snap zones,
+maximize/restore, halves snapping, edge/corner resize with minimums, on-screen clamping,
+z-order/focus, taskbar toggle open-minimize-restore, Explorer listing/filtering/sorting,
+Windows-style size and type labels, back/forward/up/trail navigation, selection,
+create/rename/delete and the revision counter that refreshes the list.
 
 See `docs/THIRD_PARTY.md` for third-party components and licences.

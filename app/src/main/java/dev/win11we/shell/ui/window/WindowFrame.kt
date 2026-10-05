@@ -110,7 +110,7 @@ fun WindowFrame(
                     .clip(RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp))
                     .background(if (lightContent) Color(0xFFF7F9FC) else WindowContentDark),
             ) {
-                WindowContent(appId = window.app.id, label = window.app.label, enabled = window.app.enabled)
+                WindowContent(window = window, label = window.app.label, enabled = window.app.enabled)
             }
         }
 
@@ -167,8 +167,9 @@ private fun TitleBar(
             tint = Color.Unspecified,
         )
         Spacer(Modifier.width(10.dp))
+        val title = window.app.title
         Text(
-            text = window.app.label,
+            text = if (title != null) title(window) else window.app.label,
             color = if (focused) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 12.5.sp,
             fontWeight = if (focused) FontWeight.SemiBold else FontWeight.Normal,
