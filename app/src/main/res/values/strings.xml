@@ -2,16 +2,5 @@
 <resources>
     <string name="app_name">Win11 WE</string>
     <string name="app_name_long">Win11 Winlator Edition</string>
-
-    <!-- Taskbar / shell -->
-    <string name="taskbar_start">Start</string>
-    <string name="taskbar_search">Search</string>
-    <string name="taskbar_explorer">File Explorer</string>
-    <string name="taskbar_settings">Settings</string>
-    <string name="taskbar_terminal">Terminal</string>
-    <string name="taskbar_not_implemented">%1$s arrives in a later step.</string>
-    <string name="taskbar_network">Network</string>
-    <string name="taskbar_volume">Volume</string>
-    <string name="taskbar_battery">Battery</string>
-    <string name="cd_clock">Date and time</string>
+    <!-- Shell copy is still inline in Compose (N1); string resources move in with N2 localisation. -->
 </resources>

@@ -13,11 +13,22 @@ Updated at every step. Nothing here is a Microsoft asset.
 | AndroidX core-ktx / activity-compose / lifecycle-runtime-ktx | 1.15.0 / 1.10.1 / 2.8.7 | Apache-2.0 | Activity, edge-to-edge, lifecycle |
 | JUnit 4 | 4.13.2 | EPL-1.0 | Unit tests (test scope only) |
 
+### N1 additions
+
+| Component | Version | Licence | Used for |
+| --- | --- | --- | --- |
+| Compose Material 3 tooltips (`TooltipBox`, `PlainTooltip`) | from the BOM above | Apache-2.0 | Taskbar/tray/clock tooltips |
+| Compose Foundation `combinedClickable` | from the BOM above | Apache-2.0 | Long-press tooltip anchors |
+
+No new external binaries, no GPL code, no WebView.
+
 ## Assets
 
 | Asset | Origin | Licence |
 | --- | --- | --- |
-| Taskbar glyphs (`ic_search`, `ic_folder`, `ic_settings`, `ic_terminal`) | Material Symbols / Material Design Icons path data | Apache-2.0 |
+| `ic_search` | Material Symbols / Material Design Icons path data | Apache-2.0 |
+| Window caption glyphs (`ic_minimize`, `ic_maximize`, `ic_restore`, `ic_close`), tray glyphs (`ic_wifi`, `ic_volume`, `ic_battery`, `ic_chevron_up`, `ic_power`, `ic_person`, `ic_all_apps`) | Original, drawn for this project | Project licence |
+| App tiles (`ic_app_explorer`, `ic_app_notepad`, `ic_app_settings`, `ic_app_terminal`, `ic_app_taskmgr`, `ic_app_container`) | Original, drawn for this project | Project licence |
 | `ic_start` (four-petal mark), `ic_launcher_foreground` (bloom) | Original, drawn for this project | Project licence |
 | Desktop wallpaper (`BloomWallpaper.kt`) | Original, drawn procedurally at runtime | Project licence |
 | Palette, strings, app name | Original — "Windows 11-style", no Microsoft trademarks or artwork | Project licence |

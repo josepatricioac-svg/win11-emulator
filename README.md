@@ -13,8 +13,8 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | Step | Scope | Status |
 | --- | --- | --- |
 | N0 | Gradle project + Compose shell screen (wallpaper + taskbar), CI debug APK | done |
-| N1 | Native taskbar (Start menu, tray, clock) + window manager (drag/resize/snap/z-order) | next |
-| N2 | Apps: Explorer, Notepad, Settings, Task Manager, Terminal, Container Manager | — |
+| N1 | Native taskbar (Start menu, tray, clock) + window manager (drag/resize/snap/z-order) | done |
+| N2 | Apps: Explorer, Notepad, Settings, Task Manager, Terminal, Container Manager | next |
 | R1–R4 | proot/box64 in `jniLibs`, ContainerService, rootfs download, self-test | — |
 | D1–D2 | In-app X server (fullscreen surface, then one surface per top-level window) | — |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | — |
@@ -35,11 +35,21 @@ APK as the `win11we-debug-apk` artifact.
 ```
 app/src/main/java/dev/win11we/shell/
   MainActivity.kt              single Activity, hosts Compose
+  window/                      AppSpec, WindowState (geometry), WindowManager (z-order/focus), SnapZone
   ui/theme/Color.kt            Windows 11-style dark palette
-  ui/desktop/DesktopScreen.kt  wallpaper + (N1) window layer + taskbar
+  ui/desktop/DesktopScreen.kt  wallpaper + window layer + Start panel + taskbar
   ui/desktop/BloomWallpaper.kt procedurally drawn original wallpaper
-  ui/taskbar/Taskbar.kt        centred pins, tray glyphs, clock
-  ui/taskbar/TaskbarItem.kt    pinned-item model + N0 list
+  ui/taskbar/Taskbar.kt        bar layout: widgets chip, centred pins, tray, clock
+  ui/taskbar/TaskbarParts.kt   button/indicator, tooltips, tray, clock
+  ui/start/StartMenuPanel.kt   scrim + animated Start menu (search, pinned, all apps, recommended)
+  ui/window/WindowLayer.kt     z-ordered rendering + snap preview overlay
+  ui/window/WindowFrame.kt     frame, caption, drag-to-move/snap, 8 resize handles
+  ui/window/WindowControlButton.kt  minimize / maximize-restore / close
+  ui/window/WindowContent.kt   N1 window bodies (Notepad edits text, others are placeholders)
 ```
+
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric): snap zones, maximize/restore,
+halves snapping, edge/corner resize with minimums, on-screen clamping, z-order/focus,
+taskbar toggle open-minimize-restore.
 
 See `docs/THIRD_PARTY.md` for third-party components and licences.

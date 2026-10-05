@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Original app tile: activity bars. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#FF1B2A44" android:pathData="M3.6,3.6h16.8a1.4,1.4 0 0,1 1.4,1.4v14a1.4,1.4 0 0,1 -1.4,1.4H3.6a1.4,1.4 0 0,1 -1.4,-1.4V5a1.4,1.4 0 0,1 1.4,-1.4z" />
+    <path android:fillColor="#FF4CC2FF" android:pathData="M5.6,12.4h2.6v5.6H5.6z" />
+    <path android:fillColor="#FF7A5CFF" android:pathData="M10.7,8.4h2.6v9.6h-2.6z" />
+    <path android:fillColor="#FF2ED0C8" android:pathData="M15.8,10.8h2.6v7.2h-2.6z" />
+</vector>
