@@ -1,0 +1,3 @@
+# Copy to local.properties (git-ignored) for a local build, e.g.:
+# sdk.dir=/home/you/Android/Sdk
+# On CI the ANDROID_HOME / ANDROID_SDK_ROOT env var is used instead.
