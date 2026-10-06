@@ -65,6 +65,7 @@ fun WindowFrame(
 ) {
     val bounds = remember(window.mode, window.offset, window.size, desktopSize) { window.bounds(desktopSize) }
     val lightContent = window.app.id == "notepad"
+    val consoleContent = window.app.id == "terminal"
 
     BoxWithConstraints(
         modifier = Modifier
@@ -85,7 +86,13 @@ fun WindowFrame(
                 ambientColor = Color.Black,
             )
             .clip(FrameShape)
-            .background(if (lightContent) Color(0xFFF7F9FC) else ShellSurfaces.window)
+            .background(
+                when {
+                    lightContent -> Color(0xFFF7F9FC)
+                    consoleContent -> Color(0xFF0B0F16)
+                    else -> ShellSurfaces.window
+                },
+            )
             .border(1.dp, if (focused) Color(0x594CC2FF) else ShellSurfaces.stroke, FrameShape)
             .pointerInput(window.id) { detectTapGestures(onTap = { manager.focus(window) }) },
     ) {
@@ -117,12 +124,20 @@ fun WindowFrame(
                 modifier = Modifier
                     .fillMaxSize()
                     .clip(RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp))
-                    .background(if (lightContent) Color(0xFFF7F9FC) else ShellSurfaces.windowContent),
+                    .background(
+                        when {
+                            lightContent -> Color(0xFFF7F9FC)
+                            consoleContent -> Color(0xFF0B0F16)
+                            else -> ShellSurfaces.windowContent
+                        },
+                    ),
             ) {
                 WindowContent(
                     window = window,
                     label = window.app.label,
                     enabled = window.app.enabled,
+                    manager = manager,
+                    desktopSize = desktopSize,
                     onCloseWindow = { id -> manager.windows.firstOrNull { it.id == id }?.let(manager::close) },
                 )
             }

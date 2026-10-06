@@ -28,9 +28,18 @@ import dev.win11we.shell.R
 import dev.win11we.shell.settings.ShellSettings
 import dev.win11we.shell.ui.browser.BrowserApp
 import dev.win11we.shell.ui.browser.BrowserState
+import dev.win11we.shell.ui.containers.ContainerManagerScreen
+import dev.win11we.shell.ui.containers.ContainerManagerState
 import dev.win11we.shell.ui.explorer.ExplorerScreen
+import dev.win11we.shell.ui.explorer.ExplorerState
 import dev.win11we.shell.ui.settings.SettingsScreen
 import dev.win11we.shell.ui.taskmanager.TaskManagerScreen
+import dev.win11we.shell.ui.terminal.LocalCommandExecutor
+import dev.win11we.shell.ui.terminal.TerminalScreen
+import dev.win11we.shell.ui.terminal.TerminalState
+import dev.win11we.shell.window.WindowManager
+import androidx.compose.ui.unit.DpSize
+import java.io.File
 import dev.win11we.shell.ui.settings.SettingsState
 import dev.win11we.shell.ui.notepad.NotepadScreen
 import dev.win11we.shell.ui.notepad.NotepadState
@@ -43,6 +52,8 @@ fun WindowContent(
     window: WindowState,
     label: String,
     enabled: Boolean,
+    manager: WindowManager,
+    desktopSize: DpSize,
     onCloseWindow: (Int) -> Unit,
 ) {
     when (window.app.id) {
@@ -71,6 +82,14 @@ fun WindowContent(
             val state = window.payload as? SettingsState ?: SettingsState()
             SettingsScreen(state = state, store = ShellSettings.get().store)
         }
+        "terminal" -> {
+            val state = window.payload as? TerminalState ?: TerminalState(
+                executor = LocalCommandExecutor(startDirectory = File("/"), appVersion = ""),
+                startDirectory = File("/"),
+            )
+            state.onClose = { onCloseWindow(window.id) }
+            TerminalScreen(state = state)
+        }
         "taskmgr" -> {
             val manager = window.payload as? dev.win11we.shell.window.WindowManager
             if (manager == null) {
@@ -82,9 +101,26 @@ fun WindowContent(
                 )
             }
         }
+        "containers" -> {
+            val state = window.payload as? ContainerManagerState
+            if (state == null) {
+                ComingSoon(label = label, enabled = enabled)
+            } else {
+                ContainerManagerScreen(
+                    state = state,
+                    onOpenPath = { path ->
+                        // Hand the prefix to a new Explorer window rooted at that folder.
+                        val explorerApp = dev.win11we.shell.window.ShellApps.first { it.id == "explorer" }
+                        val newWindow = manager.open(explorerApp, desktopSize)
+                        (newWindow.payload as? ExplorerState)?.navigateTo(File(path))
+                    },
+                )
+            }
+        }
         else -> ComingSoon(label = label, enabled = enabled)
     }
 }
+
 
 @Composable
 private fun ComingSoon(label: String, enabled: Boolean) {

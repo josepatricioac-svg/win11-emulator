@@ -11,7 +11,9 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import android.os.Build
 import android.os.Environment
+import dev.win11we.shell.BuildConfig
 import dev.win11we.shell.R
 import dev.win11we.shell.settings.SettingsStore
 import android.content.Context
@@ -20,6 +22,11 @@ import dev.win11we.shell.ui.browser.Browsers
 import dev.win11we.shell.ui.explorer.ExplorerState
 import dev.win11we.shell.ui.notepad.NotepadState
 import dev.win11we.shell.ui.settings.SettingsState
+import dev.win11we.shell.container.ContainerStore
+import dev.win11we.shell.container.NotInstalledRuntime
+import dev.win11we.shell.ui.containers.ContainerManagerState
+import dev.win11we.shell.ui.terminal.LocalCommandExecutor
+import dev.win11we.shell.ui.terminal.TerminalState
 import java.io.File
 
 /** Every app the shell knows about. Order == taskbar / Start menu order. */
@@ -53,9 +60,9 @@ val ShellApps: List<AppSpec> = listOf(
         },
     ),
     AppSpec("settings", "Settings", R.drawable.ic_app_settings),
-    AppSpec("terminal", "Terminal", R.drawable.ic_app_terminal),
+    AppSpec("terminal", "Terminal", R.drawable.ic_app_terminal2),
     AppSpec("taskmgr", "Task Manager", R.drawable.ic_app_taskmgr),
-    AppSpec("containers", "Container Manager", R.drawable.ic_app_container, enabled = false),
+    AppSpec("containers", "Container Manager", R.drawable.ic_app_container),
 )
 
 /** Owns the window list, the z-order and which window is on top. */
@@ -155,6 +162,8 @@ class WindowManager(
 fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager = remember(store) {
     val appContext = context.applicationContext
     val root = Environment.getExternalStorageDirectory()
+    val deviceLine = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) " +
+        Build.SUPPORTED_ABIS.joinToString(",")
     lateinit var manager: WindowManager
     manager = WindowManager { app ->
         when (app.id) {
@@ -168,6 +177,18 @@ fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager
             "settings" -> SettingsState()
             // Task Manager observes the window list, so it gets the manager itself.
             "taskmgr" -> manager
+            "containers" -> ContainerManagerState(
+                store = ContainerStore(File(appContext.filesDir, "containers")),
+                runtime = NotInstalledRuntime(),
+            )
+            "terminal" -> TerminalState(
+                executor = LocalCommandExecutor(
+                    startDirectory = if (root.isDirectory) root else appContext.filesDir,
+                    appVersion = BuildConfig.VERSION_NAME,
+                    deviceLine = deviceLine,
+                ),
+                startDirectory = if (root.isDirectory) root else appContext.filesDir,
+            )
             else -> null
         }
     }
