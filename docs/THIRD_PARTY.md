@@ -22,7 +22,7 @@ Updated at every step. Nothing here is a Microsoft asset.
 
 No new external binaries, no GPL code, no WebView.
 
-### N2 additions (Explorer, Notepad, Settings, Browser, Task Manager)
+### N2 additions (Explorer, Notepad, Settings, Browser, Task Manager, Terminal, Container Manager)
 
 No new libraries and no new binaries. Explorer is plain `java.io.File` + Compose
 Foundation/Material 3, plus `androidx.core.content.ContextCompat` for the runtime
@@ -31,6 +31,18 @@ Storage Access Framework (`OpenDocument` / `CreateDocument`) and a bundled
 windows-1252 codec (`ui/notepad/Windows1252.kt`, written for this project, because
 the platform charset registry is not guaranteed to ship cp1252). Settings uses
 `SharedPreferences` behind a testable `ShellPreferences` interface; no new libraries.
+
+The Container Manager adds **no dependency**: `containers.list` is a hand-written
+`key=value` format (no JSON library), and the Wine/Box64 environment is built from
+strings only. No Wine, Box64, proot or rootfs bytes ship in the APK yet - they are
+downloaded in R3 with pinned SHA-256 and will be listed here with their licences
+(Wine: LGPL-2.1+, Box64: MIT, proot: GPL-2.0 invoked as a separate process, Ubuntu
+rootfs: mixed per-package licences). GPL components will be discussed before R1.
+
+The Terminal is a built-in interpreter over `java.io.File` plus `/proc` reads for
+`free`/`uname`; no shell binary, no pty library and no third-party code is used yet.
+A pty (for R2's proot session) will need a native helper - its licence will be recorded
+here before it lands, and GPL options will be discussed first.
 
 Task Manager reads `/proc/stat`, `/proc/self/stat` and `/proc/self/status` and uses
 `ActivityManager.MemoryInfo` - no new libraries, no third-party code.

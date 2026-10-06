@@ -14,7 +14,7 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | --- | --- | --- |
 | N0 | Gradle project + Compose shell screen (wallpaper + taskbar), CI debug APK | done |
 | N1 | Native taskbar (Start menu, tray, clock) + window manager (drag/resize/snap/z-order) | done |
-| N2 | Apps: Explorer, Notepad, Settings, Browser, Task Manager (done) · Terminal, Container Manager | in progress |
+| N2 | Apps: Explorer, Notepad, Settings, Browser, Task Manager, Terminal, Container Manager | **done** |
 | R1–R4 | proot/box64 in `jniLibs`, ContainerService, rootfs download, self-test | — |
 | D1–D2 | In-app X server (fullscreen surface, then one surface per top-level window) | — |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | — |
@@ -26,6 +26,43 @@ plays the reverse and only then leaves the window list, minimizing/restoring shr
 and grows in place (140 ms), and the snap preview cross-fades. One frame loop in
 `WindowLayer` drives every window - no per-window coroutines. Settings ▸
 Personalisation ▸ *Window animations* turns all of it off.
+
+## Container Manager
+
+A container = a Wine prefix + its Box64 preset + drive mappings + environment. The
+manager creates/renames/deletes them (`<files>/containers/<id>/{container,prefix}`),
+records them in a hand-rolled `containers.list` line format (atomic temp-file + rename,
+no new dependency), picks a default, edits the preset (General/Office/.NET/Electron),
+architecture (WoW64 / 64-bit), DPI, and drive letters (C: = prefix and Z: = guest root
+are implicit), and shows the **exact environment map R2 will exec with**, sorted for
+diffing.
+
+`WineEnvironment.build()` is the R2 contract already implemented and unit-tested: fully
+explicit `DISPLAY`, `WINEPREFIX`, `WINEARCH`, `WINEDEBUG`, `WINEDLLOVERRIDES`
+(`mscoree,mshtml=` so Wine never auto-downloads Gecko/Mono), `PATH`, `LD_LIBRARY_PATH`,
+locale, PulseAudio socket, `PROOT_ROOTFS`/`PROOT_LOADER`, plus per-preset `BOX64_*`
+tuning, with the container's `extraEnv` applied last so a user can override anything.
+`GuestPaths` converts host↔Windows paths (longest mapping wins) for the P1 "open with"
+plumbing.
+
+Start/Stop/Restart go through a `ContainerRuntime` interface; today's
+`NotInstalledRuntime` answers with exactly which step is missing (R1 binaries, R2
+service, R3 rootfs) instead of failing silently, and the container is marked
+"Not ready" with that message.
+
+## Terminal
+
+N2's Terminal is an honest local console, not a fake Windows prompt: `help`, `pwd`,
+`ls`/`dir [-a]`, `cd`, `cat`/`type`, `echo`, `date`, `free`, `env`, `log`, `clear`,
+`version`, `uname`, `whoami`, with quote/escape-aware argument splitting, command history
+on the arrow keys, exit codes, and quick-command chips. `wine`, `wine64`, `box64`, `proot`,
+`cmd`, `container` and `start` all answer "not available yet" and name the step that
+delivers them - they never pretend to work.
+
+Execution sits behind a `CommandExecutor` interface, so **R2 swaps in a container
+executor** (`proot -> box64 -> wine` over a pty) without touching this UI, and the
+transcript is mirrored into a bounded `LogBuffer` that R2's ContainerService and R4's
+Diagnostics screen read from.
 
 ## Task Manager
 
@@ -54,8 +91,10 @@ See `docs/BROWSER_ENGINES.md` for the feasibility write-up, the licensing constr
 
 ## UI tests
 
-`./gradlew testDebugUnitTest` runs the 121 pure-JVM tests (window geometry, snap zones,
-Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing).
+`./gradlew testDebugUnitTest` runs the 171 pure-JVM tests (window geometry, snap zones,
+Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing, argv
+splitting, the log buffer, the built-in commands, the terminal transcript/history, the
+container codec/store, guest<->host path mapping and the Wine environment builder).
 
 Compose tests that actually **compose** the taskbar (Robolectric) are opt-in because they
 need a couple of GB of RAM:
@@ -115,6 +154,13 @@ app/src/main/java/dev/win11we/shell/
   ui/browser/BrowserEngine.kt  Android vs desktop engines, catalogue, resolver
   ui/taskmanager/ProcessList.kt  /proc parsing, CPU maths, sampler, history ring
   ui/taskmanager/TaskManagerScreen.kt Processes + Performance tabs, End task
+  ui/terminal/LogBuffer.kt     bounded shared log sink + shell-style argv splitting
+  ui/terminal/CommandExecutor.kt CommandResult, executor interface, built-in local commands
+  ui/terminal/TerminalState.kt transcript, prompt, cwd, history, exit/clear handling
+  ui/terminal/TerminalScreen.kt console transcript, quick commands, input row
+  container/Container.kt       container model, drives, guest<->host paths, wine env builder
+  container/ContainerStore.kt  containers.list codec + on-disk store + runtime interface
+  ui/containers/…              Container Manager state and screen (presets, drives, env preview)
 ```
 
 Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 121 tests): snap zones,
