@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <!-- Original palette: dark "bloom" desktop, no Microsoft assets. -->
-    <color name="desktop_deep">#FF050B1C</color>
-    <color name="accent_blue">#FF4CC2FF</color>
-    <color name="accent_violet">#FF7A5CFF</color>
-    <color name="ic_launcher_background">#FF0A1A33</color>
-</resources>

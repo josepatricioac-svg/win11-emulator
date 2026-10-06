@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">Win11 WE</string>
-    <string name="app_name_long">Win11 Winlator Edition</string>
-    <!-- Shell copy is still inline in Compose (N1); string resources move in with N2 localisation. -->
-</resources>
