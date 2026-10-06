@@ -13,7 +13,7 @@ android {
         minSdk = 28
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1.0-n2"
+        versionName = "0.1.0-n2.1"
 
         // arm64-v8a only: proot/box64 are 64-bit ARM (R1).
         ndk {
