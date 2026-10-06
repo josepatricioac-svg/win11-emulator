@@ -91,20 +91,20 @@ fun WindowLayer(
     var snapPreview by remember { mutableStateOf(SnapZone.NONE) }
     val lifecycles = remember { SnapshotStateMap<Int, Lifecycle>() }
     val visuals = remember { SnapshotStateMap<Int, WindowVisual>() }
-    val windows = manager.windows.toList()
 
     val animated = ShellSettings.get().store.windowAnimations
     val openCloseMillis = if (animated) OPEN_CLOSE_MILLIS else 1L
     val minimizeMillis = if (animated) MINIMIZE_MILLIS else 1L
-    LaunchedEffect(windows, desktopSize, animated) {
-        val alive = windows.map { it.id }.toSet()
-        // Drop the state of windows that already left.
-        lifecycles.keys.filterNot { it in alive }.forEach { id ->
-            lifecycles.remove(id)
-            visuals.remove(id)
-        }
+    // Keyed on the manager only: the loop reads the live window list every frame,
+    // so a window opened after this composition still gets its enter animation.
+    LaunchedEffect(manager, animated) {
         while (true) {
             val now = System.nanoTime()
+            val alive = manager.windows.map { it.id }
+            lifecycles.keys.filterNot { it in alive }.forEach { id ->
+                lifecycles.remove(id)
+                visuals.remove(id)
+            }
             for (window in manager.windows.toList()) {
                 val visual = visuals.getOrPut(window.id) { WindowVisual(progress = 0f, alpha = 0f, scale = 0.94f, shrink = 1f) }
                 when (val lifecycle = lifecycles[window.id]) {
@@ -152,7 +152,9 @@ fun WindowLayer(
         }
     }
 
-    val ordered = windows.filter { it.id in visuals.keys }.sortedBy { it.zIndex }
+    // Read the live list, not a snapshot taken during composition, otherwise a
+    // window opened by this very recomposition would not be drawn at all.
+    val ordered = manager.windows.filter { visuals.containsKey(it.id) }.sortedBy { it.zIndex }
     Box(modifier = modifier.fillMaxSize()) {
         for (window in ordered) {
             val visual = visuals[window.id] ?: continue

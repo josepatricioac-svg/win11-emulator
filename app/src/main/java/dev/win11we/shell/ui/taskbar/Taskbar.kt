@@ -92,11 +92,9 @@ fun Taskbar(
                     focused = focused,
                     onClick = { manager.toggle(app, desktopSize) },
                     menuEntries = buildList {
-                        instances.filterNot { it.closing }.forEach { window ->
-                            val title = window.app.title?.let { "Window" } ?: app.label
-                            add(
-                                PinMenuEntry(if (window.minimized) "Restore  ·  $title" else title) { manager.focus(window) },
-                            )
+                        instances.filterNot { it.closing }.forEachIndexed { index, window ->
+                            val name = "${app.label}${if (instances.size > 1) " ${index + 1}" else ""}"
+                            add(PinMenuEntry(if (window.minimized) "Restore  ·  $name" else name) { manager.focus(window) })
                         }
                         add(PinMenuEntry("New window") { manager.open(app, desktopSize) })
                         add(PinMenuEntry("Task Manager") { onOpenApp(ShellApps.first { it.id == "taskmgr" }) })
