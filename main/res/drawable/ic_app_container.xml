@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Original app tile: stacked containers. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#FF12303A" android:pathData="M3.6,3.6h16.8a1.4,1.4 0 0,1 1.4,1.4v14a1.4,1.4 0 0,1 -1.4,1.4H3.6a1.4,1.4 0 0,1 -1.4,-1.4V5a1.4,1.4 0 0,1 1.4,-1.4z" />
+    <path android:fillColor="#FF2ED0C8" android:pathData="M5.6,6.2h5.6v5.2H5.6z" />
+    <path android:fillColor="#992ED0C8" android:pathData="M12.8,6.2h5.6v5.2h-5.6z" />
+    <path android:fillColor="#662ED0C8" android:pathData="M5.6,12.8h12.8v5.2H5.6z" />
+</vector>

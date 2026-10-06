@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Original app tile: folder. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:pathData="M2.6,6.6a2,2 0 0,1 2,-2h4.1l1.9,2.2h8.8a2,2 0 0,1 2,2v8.6a2,2 0 0,1 -2,2h-14.8a2,2 0 0,1 -2,-2z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:startX="2.6" android:startY="4.6" android:endX="21.4" android:endY="19.4" android:type="linear">
+                <item android:offset="0" android:color="#FF6FD3FF" />
+                <item android:offset="1" android:color="#FF1E7FD4" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path android:fillColor="#33FFFFFF" android:pathData="M2.6,10.4h18.8v7a2,2 0 0,1 -2,2h-14.8a2,2 0 0,1 -2,-2z" />
+</vector>
