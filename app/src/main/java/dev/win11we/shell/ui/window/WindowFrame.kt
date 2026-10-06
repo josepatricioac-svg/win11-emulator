@@ -110,7 +110,12 @@ fun WindowFrame(
                     .clip(RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp))
                     .background(if (lightContent) Color(0xFFF7F9FC) else WindowContentDark),
             ) {
-                WindowContent(window = window, label = window.app.label, enabled = window.app.enabled)
+                WindowContent(
+                    window = window,
+                    label = window.app.label,
+                    enabled = window.app.enabled,
+                    onCloseWindow = { id -> manager.windows.firstOrNull { it.id == id }?.let(manager::close) },
+                )
             }
         }
 
@@ -182,7 +187,7 @@ private fun TitleBar(
             iconRes = if (window.mode == WindowMode.NORMAL) R.drawable.ic_maximize else R.drawable.ic_restore,
             description = if (window.mode == WindowMode.NORMAL) "Maximize" else "Restore",
         ) { window.toggleMaximize() }
-        WindowControlButton(R.drawable.ic_close, "Close", close = true) { manager.close(window) }
+        WindowControlButton(R.drawable.ic_close, "Close", close = true) { manager.requestClose(window) }
     }
 }
 

@@ -71,3 +71,32 @@ class WindowManagerTest {
         assertTrue(second.offset.y > first.offset.y)
     }
 }
+
+/** The close button must respect an app's unsaved-changes guard (Notepad). */
+class WindowCloseGuardTest {
+
+    private val desktop = DpSize(1200.dp, 700.dp)
+    private val notepad = AppSpec("notepad", "Notepad", R.drawable.ic_app_notepad)
+
+    @Test
+    fun `requestClose without a guard closes immediately`() {
+        val manager = WindowManager()
+        val window = manager.open(notepad, desktop)
+        manager.requestClose(window)
+        assertTrue(manager.windows.isEmpty())
+    }
+
+    @Test
+    fun `requestClose with a guard asks the app instead of closing`() {
+        val manager = WindowManager()
+        val window = manager.open(notepad, desktop)
+        var asked = 0
+        window.closeGuard = { asked++ }
+        manager.requestClose(window)
+        assertEquals(1, asked)
+        assertEquals(1, manager.windows.size)
+        window.closeGuard = null // app decided to close anyway
+        manager.requestClose(window)
+        assertTrue(manager.windows.isEmpty())
+    }
+}

@@ -9,7 +9,7 @@ Updated at every step. Nothing here is a Microsoft asset.
 | Android Gradle Plugin | 8.9.1 | Apache-2.0 | Build |
 | Gradle (wrapper) | 8.11.1 | Apache-2.0 | Build; `gradle/wrapper/gradle-wrapper.jar` is the upstream jar from the `gradle/gradle` v8.11.1 tag (SHA-256 verified against services.gradle.org) |
 | Kotlin + Compose compiler plugin | 2.1.10 | Apache-2.0 | Language |
-| AndroidX Compose BOM | 2025.02.00 | Apache-2.0 | UI (ui, ui-graphics, material3, ui-tooling) |
+| AndroidX Compose BOM | 2025.07.00 (foundation/ui 1.8.3, material3 1.3.1) | Apache-2.0 | UI (ui, ui-graphics, material3, ui-tooling). Bumped in N2 for the new `BasicTextField`/`TextFieldState` + `UndoState` APIs. 1.9+/1.12 were rejected: they require compileSdk 36 / AGP 9.1. |
 | AndroidX core-ktx / activity-compose / lifecycle-runtime-ktx | 1.15.0 / 1.10.1 / 2.8.7 | Apache-2.0 | Activity, edge-to-edge, lifecycle |
 | JUnit 4 | 4.13.2 | EPL-1.0 | Unit tests (test scope only) |
 
@@ -22,11 +22,14 @@ Updated at every step. Nothing here is a Microsoft asset.
 
 No new external binaries, no GPL code, no WebView.
 
-### N2 additions (Explorer)
+### N2 additions (Explorer, Notepad)
 
-No new libraries. The Explorer is plain `java.io.File` + Compose Foundation/Material 3,
-plus `androidx.core.content.ContextCompat` for the runtime permission check
-(`READ_EXTERNAL_STORAGE`, `maxSdkVersion 32`).
+No new libraries and no new binaries. Explorer is plain `java.io.File` + Compose
+Foundation/Material 3, plus `androidx.core.content.ContextCompat` for the runtime
+permission check (`READ_EXTERNAL_STORAGE`, `maxSdkVersion 32`). Notepad uses the
+Storage Access Framework (`OpenDocument` / `CreateDocument`) and a bundled
+windows-1252 codec (`ui/notepad/Windows1252.kt`, written for this project, because
+the platform charset registry is not guaranteed to ship cp1252).
 
 ## Assets
 

@@ -21,10 +21,16 @@ class WindowState(
     val minSize: DpSize = DpSize(340.dp, 220.dp),
 ) {
     /**
-     * Per-window app state (Explorer's navigation state today). Created by
-     * [WindowManager.open] so the caption and the body share one instance.
+     * Per-window app state (Explorer's navigation state, Notepad's document).
+     * Created by [WindowManager.open] so the caption and the body share it.
      */
     var payload: Any? = null
+
+    /**
+     * When set, the close button delegates here instead of closing, so an app
+     * can ask about unsaved work first. The app calls [WindowManager.close].
+     */
+    var closeGuard: (() -> Unit)? = null
 
     var mode by mutableStateOf(WindowMode.NORMAL)
     var minimized by mutableStateOf(false)

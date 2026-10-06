@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import android.os.Environment
 import dev.win11we.shell.R
 import dev.win11we.shell.ui.explorer.ExplorerState
+import dev.win11we.shell.ui.notepad.NotepadState
 import java.io.File
 
 /** Every app the shell knows about. Order == taskbar / Start menu order. */
@@ -31,7 +32,12 @@ val ShellApps: List<AppSpec> = listOf(
             }
         },
     ),
-    AppSpec("notepad", "Notepad", R.drawable.ic_app_notepad),
+    AppSpec(
+        id = "notepad",
+        label = "Notepad",
+        iconRes = R.drawable.ic_app_notepad,
+        title = { window -> (window.payload as? NotepadState)?.caption() ?: "Notepad" },
+    ),
     AppSpec("settings", "Settings", R.drawable.ic_app_settings),
     AppSpec("terminal", "Terminal", R.drawable.ic_app_terminal),
     AppSpec("taskmgr", "Task Manager", R.drawable.ic_app_taskmgr),
@@ -79,6 +85,12 @@ class WindowManager(
         return window
     }
 
+    /** Close button path: honours an app's unsaved-changes guard first. */
+    fun requestClose(window: WindowState) {
+        val guard = window.closeGuard
+        if (guard != null) guard() else close(window)
+    }
+
     fun close(window: WindowState) {
         windows.remove(window)
         if (focusedId == window.id) focusedId = windows.maxByOrNull { it.zIndex }?.id
@@ -113,10 +125,10 @@ class WindowManager(
 fun rememberWindowManager(): WindowManager = remember {
     val root = Environment.getExternalStorageDirectory()
     WindowManager { app ->
-        if (app.id == "explorer") {
-            ExplorerState(root = if (root.isDirectory) root else File(root.parent ?: "/"))
-        } else {
-            null
+        when (app.id) {
+            "explorer" -> ExplorerState(root = if (root.isDirectory) root else File(root.parent ?: "/"))
+            "notepad" -> NotepadState()
+            else -> null
         }
     }
 }

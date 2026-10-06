@@ -14,7 +14,7 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | --- | --- | --- |
 | N0 | Gradle project + Compose shell screen (wallpaper + taskbar), CI debug APK | done |
 | N1 | Native taskbar (Start menu, tray, clock) + window manager (drag/resize/snap/z-order) | done |
-| N2 | Apps: Explorer (done), Notepad, Settings, Task Manager, Terminal, Container Manager | in progress |
+| N2 | Apps: Explorer (done), Notepad (done), Settings, Task Manager, Terminal, Container Manager | in progress |
 | R1–R4 | proot/box64 in `jniLibs`, ContainerService, rootfs download, self-test | — |
 | D1–D2 | In-app X server (fullscreen surface, then one surface per top-level window) | — |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | — |
@@ -51,12 +51,21 @@ app/src/main/java/dev/win11we/shell/
   ui/explorer/ExplorerScreen.kt toolbar, breadcrumb, nav pane, status bar, dialogs, menus
   ui/explorer/ExplorerViews.kt details rows and tiles grid
   ui/explorer/ExplorerIcons.kt extension -> icon mapping, sidebar locations
+  ui/notepad/DocumentIO.kt     encodings, BOM, line endings, Ln/Col maths
+  ui/notepad/Windows1252.kt    bundled cp1252 codec (Notepad's "ANSI")
+  ui/notepad/NotepadState.kt   buffer, dirty flag, find/replace, zoom, caption
+  ui/notepad/NotepadMenuBar.kt File / Edit / Format / View menu bar
+  ui/notepad/NotepadViews.kt   editor, find & replace bar, status bar
+  ui/notepad/NotepadScreen.kt  SAF open/save/save-as, shortcuts, close guard
 ```
 
-Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 35 tests): snap zones,
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 67 tests): snap zones,
 maximize/restore, halves snapping, edge/corner resize with minimums, on-screen clamping,
 z-order/focus, taskbar toggle open-minimize-restore, Explorer listing/filtering/sorting,
 Windows-style size and type labels, back/forward/up/trail navigation, selection,
-create/rename/delete and the revision counter that refreshes the list.
+create/rename/delete and the revision counter that refreshes the list,
+Notepad encoding/BOM round trips, CRLF-LF-CR detection and preservation, Ln/Col maths,
+find next/previous with wrap and match-case, replace/replace-all, zoom clamping,
+the bundled windows-1252 codec, and the window close guard.
 
 See `docs/THIRD_PARTY.md` for third-party components and licences.
