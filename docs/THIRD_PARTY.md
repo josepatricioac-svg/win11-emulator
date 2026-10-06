@@ -44,6 +44,16 @@ Chromium, Tor Browser, Firefox Focus/Fennec) are used only for detection - no
 affiliation or endorsement. Search fallback URL: DuckDuckGo (`https://duckduckgo.com/?q=`),
 a plain HTTPS GET, no integration or API key.
 
+### UI-test additions (opt-in, `-PuiTests=true`)
+
+| Component | Version | Licence | Used for |
+| --- | --- | --- | --- |
+| Robolectric | 4.14.1 | MIT | JVM composition of the taskbar in `TaskbarComposeTest` |
+| AndroidX Compose `ui-test-junit4` / `ui-test-manifest` | from the BOM | Apache-2.0 | Compose test rule and assertions |
+| AndroidX Test core | 1.6.1 | Apache-2.0 | Robolectric test host |
+
+Test-only: none of this ships in the APK.
+
 ## Assets
 
 | Asset | Origin | Licence |

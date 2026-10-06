@@ -52,6 +52,22 @@ models a second engine family - **Linux arm64 Firefox ESR / Chromium** in the ro
 See `docs/BROWSER_ENGINES.md` for the feasibility write-up, the licensing constraints
 (Edge is proprietary and must not be redistributed) and the three open decisions.
 
+## UI tests
+
+`./gradlew testDebugUnitTest` runs the 121 pure-JVM tests (window geometry, snap zones,
+Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing).
+
+Compose tests that actually **compose** the taskbar (Robolectric) are opt-in because they
+need a couple of GB of RAM:
+
+```bash
+./gradlew testDebugUnitTest -PuiTests=true      # CI runs this as a separate step
+```
+
+They exist because of a real regression: a `Popup` that was composed unconditionally drew
+every taskbar pin's jump list at once and stole input focus, so nothing could be clicked.
+Popup content must always be gated by `expanded`/`if (open)`.
+
 ## Build
 
 ```bash
