@@ -27,6 +27,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
@@ -39,9 +41,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.win11we.shell.R
-import dev.win11we.shell.ui.theme.StrokeSubtle
-import dev.win11we.shell.ui.theme.WindowContentDark
-import dev.win11we.shell.ui.theme.WindowDark
+import dev.win11we.shell.ui.theme.ShellSurfaces
 import dev.win11we.shell.window.SnapZone
 import dev.win11we.shell.window.WindowManager
 import dev.win11we.shell.window.WindowMode
@@ -60,6 +60,7 @@ fun WindowFrame(
     desktopSize: DpSize,
     focused: Boolean,
     manager: WindowManager,
+    visual: WindowVisual,
     onSnapPreview: (SnapZone) -> Unit,
 ) {
     val bounds = remember(window.mode, window.offset, window.size, desktopSize) { window.bounds(desktopSize) }
@@ -67,17 +68,25 @@ fun WindowFrame(
 
     BoxWithConstraints(
         modifier = Modifier
+            // Open/close: fade + settle from 94% scale, anchored at the caption.
+            .graphicsLayer {
+                alpha = visual.alpha
+                scaleX = visual.scale
+                scaleY = visual.scale
+                translationY = size.height * 0.02f * (1f - visual.progress)
+                transformOrigin = TransformOrigin(0.5f, 0f)
+            }
             .offset { IntOffset(bounds.offset.x.roundToPx(), bounds.offset.y.roundToPx()) }
             .size(bounds.size)
             .shadow(
-                elevation = if (focused) 26.dp else 10.dp,
+                elevation = (if (focused) 26.dp else 10.dp) * visual.progress,
                 shape = FrameShape,
                 spotColor = Color.Black,
                 ambientColor = Color.Black,
             )
             .clip(FrameShape)
-            .background(if (lightContent) Color(0xFFF7F9FC) else WindowDark)
-            .border(1.dp, if (focused) Color(0x594CC2FF) else StrokeSubtle, FrameShape)
+            .background(if (lightContent) Color(0xFFF7F9FC) else ShellSurfaces.window)
+            .border(1.dp, if (focused) Color(0x594CC2FF) else ShellSurfaces.stroke, FrameShape)
             .pointerInput(window.id) { detectTapGestures(onTap = { manager.focus(window) }) },
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -85,7 +94,7 @@ fun WindowFrame(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(TitleHeight)
-                    .background(if (lightContent) Color(0xFFEFF4FA) else TitleBarDark),
+                    .background(if (lightContent) Color(0xFFEFF4FA) else ShellSurfaces.window),
             ) {
                 TitleBar(
                     window = window,
@@ -101,14 +110,14 @@ fun WindowFrame(
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
                         .height(1.dp)
-                        .background(if (lightContent) Color(0x14000000) else StrokeSubtle),
+                        .background(if (lightContent) Color(0x14000000) else ShellSurfaces.stroke),
                 )
             }
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .clip(RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp))
-                    .background(if (lightContent) Color(0xFFF7F9FC) else WindowContentDark),
+                    .background(if (lightContent) Color(0xFFF7F9FC) else ShellSurfaces.windowContent),
             ) {
                 WindowContent(
                     window = window,
@@ -119,7 +128,7 @@ fun WindowFrame(
             }
         }
 
-        if (window.mode == WindowMode.NORMAL) {
+        if (window.mode == WindowMode.NORMAL && !window.closing) {
             ResizeHandles(window = window, desktopSize = desktopSize)
         }
         // maxWidth/maxHeight come from BoxWithConstraintsScope (used by the handles).

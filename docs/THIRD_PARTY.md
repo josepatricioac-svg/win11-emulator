@@ -22,14 +22,23 @@ Updated at every step. Nothing here is a Microsoft asset.
 
 No new external binaries, no GPL code, no WebView.
 
-### N2 additions (Explorer, Notepad)
+### N2 additions (Explorer, Notepad, Settings, Browser)
 
 No new libraries and no new binaries. Explorer is plain `java.io.File` + Compose
 Foundation/Material 3, plus `androidx.core.content.ContextCompat` for the runtime
 permission check (`READ_EXTERNAL_STORAGE`, `maxSdkVersion 32`). Notepad uses the
 Storage Access Framework (`OpenDocument` / `CreateDocument`) and a bundled
 windows-1252 codec (`ui/notepad/Windows1252.kt`, written for this project, because
-the platform charset registry is not guaranteed to ship cp1252).
+the platform charset registry is not guaranteed to ship cp1252). Settings uses
+`SharedPreferences` behind a testable `ShellPreferences` interface; no new libraries.
+
+Browser handling: the shell only fires an `ACTION_VIEW` intent. **No browser engine is
+bundled.** Firefox (Mozilla, MPL-2.0) is merely the preferred *target* when the user
+already has it installed; its package name appears in `<queries>` so it can be listed
+on API 30+. Other package names listed there (Chrome, Brave, Vivaldi, Edge, Opera,
+Chromium, Tor Browser, Firefox Focus/Fennec) are used only for detection - no
+affiliation or endorsement. Search fallback URL: DuckDuckGo (`https://duckduckgo.com/?q=`),
+a plain HTTPS GET, no integration or API key.
 
 ## Assets
 

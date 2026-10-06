@@ -44,6 +44,8 @@ import java.io.IOException
 @Composable
 fun NotepadScreen(state: NotepadState, windowId: Int, onCloseWindow: (Int) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
+    // P1 replaces this with LocalClipboard (suspend) for two-way Windows clipboard sync.
+    @Suppress("DEPRECATION")
     val clipboard = LocalClipboardManager.current
     var pendingSaveAs by remember { mutableStateOf(false) }
     var showCloseConfirm by remember { mutableStateOf(false) }

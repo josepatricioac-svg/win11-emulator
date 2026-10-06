@@ -79,10 +79,13 @@ class WindowCloseGuardTest {
     private val notepad = AppSpec("notepad", "Notepad", R.drawable.ic_app_notepad)
 
     @Test
-    fun `requestClose without a guard closes immediately`() {
+    fun `requestClose without a guard starts the close animation`() {
         val manager = WindowManager()
         val window = manager.open(notepad, desktop)
         manager.requestClose(window)
+        assertTrue(window.closing) // WindowLayer removes it when the fade ends
+        assertEquals(1, manager.windows.size)
+        manager.close(window)
         assertTrue(manager.windows.isEmpty())
     }
 
@@ -94,9 +97,64 @@ class WindowCloseGuardTest {
         window.closeGuard = { asked++ }
         manager.requestClose(window)
         assertEquals(1, asked)
+        assertFalse(window.closing) // the app decides, nothing started yet
         assertEquals(1, manager.windows.size)
-        window.closeGuard = null // app decided to close anyway
+
+        window.closeGuard = null // the app chose "don't save"
         manager.requestClose(window)
+        assertTrue(window.closing)
+        manager.close(window)
         assertTrue(manager.windows.isEmpty())
+    }
+}
+
+/** Closing is a two-step animation: flag first, removal when the fade is done. */
+class WindowCloseAnimationTest {
+
+    private val desktop = DpSize(1200.dp, 700.dp)
+    private val notepad = AppSpec("notepad", "Notepad", R.drawable.ic_app_notepad)
+
+    @Test
+    fun `requestClose flags the window and keeps it until close is called`() {
+        val manager = WindowManager()
+        val window = manager.open(notepad, desktop)
+        manager.requestClose(window)
+        assertTrue(window.closing)
+        assertEquals(1, manager.windows.size) // still rendered, animating out
+        manager.close(window)
+        assertTrue(manager.windows.isEmpty())
+    }
+
+    @Test
+    fun `a closing window loses focus to the next visible one`() {
+        val manager = WindowManager()
+        val first = manager.open(notepad, desktop)
+        val second = manager.open(notepad, desktop)
+        assertEquals(second.id, manager.focusedId)
+        manager.requestClose(second)
+        assertEquals(first.id, manager.focusedId)
+    }
+
+    @Test
+    fun `beginClose is idempotent`() {
+        val manager = WindowManager()
+        val window = manager.open(notepad, desktop)
+        manager.beginClose(window)
+        manager.beginClose(window)
+        assertEquals(1, manager.windows.size)
+        assertTrue(window.closing)
+    }
+
+    @Test
+    fun `the taskbar ignores windows that are animating out`() {
+        val manager = WindowManager()
+        val window = manager.open(notepad, desktop)
+        manager.requestClose(window)
+        // Toggle must not "restore" a window that is already leaving.
+        manager.toggle(notepad, desktop)
+        assertEquals(2, manager.windows.size)
+        assertEquals(window.id, manager.windows.first().id)
+        assertTrue(manager.windows.first().closing)
+        assertFalse(manager.windows.last().closing)
     }
 }

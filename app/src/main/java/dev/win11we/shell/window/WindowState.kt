@@ -36,6 +36,9 @@ class WindowState(
     var minimized by mutableStateOf(false)
     var zIndex by mutableIntStateOf(0)
 
+    /** Set when a close has been requested: WindowLayer animates it out first. */
+    var closing by mutableStateOf(false)
+
     /** Floating geometry; only meaningful while [mode] == NORMAL. */
     var offset by mutableStateOf(initialOffset)
     var size by mutableStateOf(initialSize)

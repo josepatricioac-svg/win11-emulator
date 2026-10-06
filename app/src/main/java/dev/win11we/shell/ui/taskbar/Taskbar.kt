@@ -18,8 +18,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import dev.win11we.shell.R
-import dev.win11we.shell.ui.theme.StartSurface
-import dev.win11we.shell.ui.theme.StrokeSubtle
+import dev.win11we.shell.settings.SettingsStore
+import dev.win11we.shell.settings.TaskbarAlignment
+import dev.win11we.shell.ui.theme.ShellSurfaces
 import dev.win11we.shell.window.ShellApps
 import dev.win11we.shell.window.WindowManager
 
@@ -31,21 +32,28 @@ import dev.win11we.shell.window.WindowManager
 fun Taskbar(
     manager: WindowManager,
     desktopSize: DpSize,
+    store: SettingsStore,
     startOpen: Boolean,
     onStartClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val pinned = ShellApps.filter { it.pinned }
+    val pinned = ShellApps.filter { app ->
+        app.pinned && when (app.id) {
+            "browser" -> store.showBrowserPin
+            "containers" -> store.showContainersPin
+            else -> true
+        }
+    }
     Box(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp))
-            .background(StartSurface)
+            .background(ShellSurfaces.taskbar)
             .navigationBarsPadding()
             .height(56.dp),
     ) {
         // Hairline separating the bar from the desktop.
-        Box(Modifier.fillMaxWidth().height(1.dp).background(StrokeSubtle))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(ShellSurfaces.stroke))
 
         Row(
             modifier = Modifier.align(Alignment.CenterStart).padding(start = 12.dp),
@@ -55,7 +63,9 @@ fun Taskbar(
         }
 
         Row(
-            modifier = Modifier.align(Alignment.Center),
+            modifier = Modifier.align(
+                if (store.taskbarAlignment == TaskbarAlignment.CENTER) Alignment.Center else Alignment.CenterStart,
+            ).padding(start = if (store.taskbarAlignment == TaskbarAlignment.LEFT) 120.dp else 0.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             TaskbarButton(

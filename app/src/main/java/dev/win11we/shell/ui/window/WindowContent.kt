@@ -25,7 +25,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.win11we.shell.R
+import dev.win11we.shell.settings.ShellSettings
+import dev.win11we.shell.ui.browser.BrowserApp
+import dev.win11we.shell.ui.browser.BrowserState
 import dev.win11we.shell.ui.explorer.ExplorerScreen
+import dev.win11we.shell.ui.settings.SettingsScreen
+import dev.win11we.shell.ui.settings.SettingsState
 import dev.win11we.shell.ui.notepad.NotepadScreen
 import dev.win11we.shell.ui.notepad.NotepadState
 import dev.win11we.shell.window.WindowState
@@ -47,6 +52,17 @@ fun WindowContent(
         "notepad" -> {
             val state = window.payload as? NotepadState ?: NotepadState()
             NotepadScreen(state = state, windowId = window.id, onCloseWindow = onCloseWindow)
+        }
+        "browser" -> {
+            val state = window.payload as? BrowserState ?: BrowserState()
+            BrowserApp(
+                state = state,
+                onChooseBrowser = { packageName -> ShellSettings.get().store.browserPackage = packageName },
+            )
+        }
+        "settings" -> {
+            val state = window.payload as? SettingsState ?: SettingsState()
+            SettingsScreen(state = state, store = ShellSettings.get().store)
         }
         else -> ComingSoon(label = label, enabled = enabled)
     }

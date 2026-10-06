@@ -60,7 +60,7 @@ import dev.win11we.shell.ui.theme.AccentBlue
 import dev.win11we.shell.ui.theme.CardSurface
 import dev.win11we.shell.ui.theme.HoverLight
 import dev.win11we.shell.ui.theme.PressedLight
-import dev.win11we.shell.ui.theme.StartSurface
+import dev.win11we.shell.ui.theme.ShellSurfaces
 import dev.win11we.shell.ui.theme.StrokeSubtle
 import dev.win11we.shell.ui.theme.TextPrimary
 import dev.win11we.shell.ui.theme.TextSecondary
@@ -117,8 +117,8 @@ private fun StartMenu(onLaunch: (AppSpec) -> Unit, modifier: Modifier = Modifier
         modifier = modifier
             .fillMaxWidth()
             .clip(PanelShape)
-            .background(StartSurface)
-            .border(1.dp, StrokeSubtle, PanelShape)
+            .background(ShellSurfaces.start)
+            .border(1.dp, ShellSurfaces.stroke, PanelShape)
             .padding(horizontal = 22.dp, vertical = 20.dp),
     ) {
         StartSearchBar(query = query, onQueryChange = { query = it })
@@ -151,8 +151,8 @@ private fun StartSearchBar(query: String, onQueryChange: (String) -> Unit) {
             .fillMaxWidth()
             .height(38.dp)
             .clip(RoundedCornerShape(50))
-            .background(CardSurface)
-            .border(1.dp, StrokeSubtle, RoundedCornerShape(50))
+            .background(ShellSurfaces.card)
+            .border(1.dp, ShellSurfaces.stroke, RoundedCornerShape(50))
             .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -191,7 +191,7 @@ private fun SectionHeader(title: String, actionLabel: String?, onAction: () -> U
                 fontSize = 12.sp,
                 modifier = Modifier
                     .clip(RoundedCornerShape(6.dp))
-                    .background(CardSurface)
+                    .background(ShellSurfaces.card)
                     .clickable(onClickLabel = actionLabel, onClick = onAction)
                     .padding(horizontal = 12.dp, vertical = 5.dp),
             )
@@ -254,7 +254,7 @@ private fun AllAppsHeader(onBack: () -> Unit) {
         Row(
             modifier = Modifier
                 .clip(RoundedCornerShape(6.dp))
-                .background(CardSurface)
+                .background(ShellSurfaces.card)
                 .clickable(onClickLabel = "Back", onClick = onBack)
                 .padding(horizontal = 10.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -317,7 +317,7 @@ private fun RecommendedTile(title: String, subtitle: String, onOpen: () -> Unit)
     Row(
         modifier = Modifier
             .clip(TileShape)
-            .background(CardSurface)
+            .background(ShellSurfaces.card)
             .clickable(onClickLabel = title, onClick = onOpen)
             .padding(10.dp),
         verticalAlignment = Alignment.CenterVertically,

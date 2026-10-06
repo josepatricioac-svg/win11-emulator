@@ -15,10 +15,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import dev.win11we.shell.settings.SettingsStore
 import dev.win11we.shell.ui.start.StartMenuPanel
+import dev.win11we.shell.settings.ThemeMode
 import dev.win11we.shell.ui.taskbar.Taskbar
+import dev.win11we.shell.ui.theme.Win11Theme
 import dev.win11we.shell.ui.window.WindowLayer
 import dev.win11we.shell.window.rememberWindowManager
 
@@ -27,10 +31,12 @@ import dev.win11we.shell.window.rememberWindowManager
  * [desktopSize] is the area windows live in (everything above the taskbar).
  */
 @Composable
-fun DesktopScreen() {
-    val manager = rememberWindowManager()
+fun DesktopScreen(store: SettingsStore) {
+    val context = LocalContext.current
+    val manager = rememberWindowManager(context, store)
     var startOpen by remember { mutableStateOf(false) }
 
+    Win11Theme(darkTheme = store.themeMode == ThemeMode.DARK) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
         val taskbarHeight = 56.dp
         val desktopSize = DpSize(maxWidth, maxHeight - taskbarHeight)
@@ -63,9 +69,11 @@ fun DesktopScreen() {
         Taskbar(
             manager = manager,
             desktopSize = desktopSize,
+            store = store,
             startOpen = startOpen,
             onStartClick = { startOpen = !startOpen },
             modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
         )
+    }
     }
 }

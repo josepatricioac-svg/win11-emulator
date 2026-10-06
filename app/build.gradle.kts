@@ -44,6 +44,13 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
+    }
+
+    testOptions {
+        unitTests.all {
+            it.maxHeapSize = "384m"
+        }
     }
 
     packaging {

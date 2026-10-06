@@ -13,8 +13,13 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import android.os.Environment
 import dev.win11we.shell.R
+import dev.win11we.shell.settings.SettingsStore
+import android.content.Context
+import dev.win11we.shell.ui.browser.BrowserState
+import dev.win11we.shell.ui.browser.Browsers
 import dev.win11we.shell.ui.explorer.ExplorerState
 import dev.win11we.shell.ui.notepad.NotepadState
+import dev.win11we.shell.ui.settings.SettingsState
 import java.io.File
 
 /** Every app the shell knows about. Order == taskbar / Start menu order. */
@@ -37,6 +42,15 @@ val ShellApps: List<AppSpec> = listOf(
         label = "Notepad",
         iconRes = R.drawable.ic_app_notepad,
         title = { window -> (window.payload as? NotepadState)?.caption() ?: "Notepad" },
+    ),
+    AppSpec(
+        id = "browser",
+        label = "Browser",
+        iconRes = R.drawable.ic_app_browser,
+        title = { window ->
+            val url = (window.payload as? BrowserState)?.lastUrl
+            if (url.isNullOrBlank()) "Browser" else url.removePrefix("https://").removePrefix("http://").take(40)
+        },
     ),
     AppSpec("settings", "Settings", R.drawable.ic_app_settings),
     AppSpec("terminal", "Terminal", R.drawable.ic_app_terminal),
@@ -85,10 +99,26 @@ class WindowManager(
         return window
     }
 
-    /** Close button path: honours an app's unsaved-changes guard first. */
+    /**
+     * Close button path: honours an app's unsaved-changes guard first, then plays
+     * the close animation before the window leaves the list.
+     */
     fun requestClose(window: WindowState) {
         val guard = window.closeGuard
-        if (guard != null) guard() else close(window)
+        if (guard != null) {
+            guard()
+            return
+        }
+        beginClose(window)
+    }
+
+    /** Flags the window so [dev.win11we.shell.ui.window.WindowLayer] can animate it out. */
+    fun beginClose(window: WindowState) {
+        if (window.closing) return
+        window.closing = true
+        if (focusedId == window.id) {
+            focusedId = windows.filter { !it.minimized && !it.closing }.maxByOrNull { it.zIndex }?.id
+        }
     }
 
     fun close(window: WindowState) {
@@ -105,7 +135,7 @@ class WindowManager(
 
     /** Taskbar click: closed -> open, minimized -> restore, focused -> minimize, else -> focus. */
     fun toggle(app: AppSpec, desktop: DpSize) {
-        val running = windows.filter { it.app.id == app.id }
+        val running = windows.filter { it.app.id == app.id && !it.closing }
         when {
             running.isEmpty() -> open(app, desktop)
             running.any { focusedId == it.id && !it.minimized } -> running.forEach { it.minimized = true }
@@ -122,12 +152,18 @@ class WindowManager(
 }
 
 @Composable
-fun rememberWindowManager(): WindowManager = remember {
+fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager = remember(store) {
+    val appContext = context.applicationContext
     val root = Environment.getExternalStorageDirectory()
     WindowManager { app ->
         when (app.id) {
             "explorer" -> ExplorerState(root = if (root.isDirectory) root else File(root.parent ?: "/"))
             "notepad" -> NotepadState()
+            "browser" -> BrowserState(
+                installed = Browsers.resolve(appContext),
+                preferredPackage = store.browserPackage.ifBlank { null },
+            )
+            "settings" -> SettingsState()
             else -> null
         }
     }

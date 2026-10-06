@@ -4,8 +4,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import dev.win11we.shell.settings.rememberSettingsStore
 import dev.win11we.shell.ui.desktop.DesktopScreen
-import dev.win11we.shell.ui.theme.Win11Theme
 
 /**
  * The single Activity of the shell. N0 renders one screen: wallpaper + taskbar.
@@ -16,9 +16,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         setContent {
-            Win11Theme {
-                DesktopScreen()
-            }
+            DesktopScreen(store = rememberSettingsStore())
         }
     }
 }

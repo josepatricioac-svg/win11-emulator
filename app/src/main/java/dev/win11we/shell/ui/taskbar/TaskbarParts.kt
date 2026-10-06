@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import dev.win11we.shell.R
 import dev.win11we.shell.ui.theme.AccentBlue
 import dev.win11we.shell.ui.theme.HoverLight
+import dev.win11we.shell.ui.theme.ShellSurfaces
 import dev.win11we.shell.ui.theme.PressedLight
 import dev.win11we.shell.ui.theme.TextPrimary
 import dev.win11we.shell.ui.theme.TextSecondary
