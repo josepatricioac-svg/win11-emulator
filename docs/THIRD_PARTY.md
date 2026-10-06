@@ -22,7 +22,7 @@ Updated at every step. Nothing here is a Microsoft asset.
 
 No new external binaries, no GPL code, no WebView.
 
-### N2 additions (Explorer, Notepad, Settings, Browser)
+### N2 additions (Explorer, Notepad, Settings, Browser, Task Manager)
 
 No new libraries and no new binaries. Explorer is plain `java.io.File` + Compose
 Foundation/Material 3, plus `androidx.core.content.ContextCompat` for the runtime
@@ -32,8 +32,12 @@ windows-1252 codec (`ui/notepad/Windows1252.kt`, written for this project, becau
 the platform charset registry is not guaranteed to ship cp1252). Settings uses
 `SharedPreferences` behind a testable `ShellPreferences` interface; no new libraries.
 
+Task Manager reads `/proc/stat`, `/proc/self/stat` and `/proc/self/status` and uses
+`ActivityManager.MemoryInfo` - no new libraries, no third-party code.
+
 Browser handling: the shell only fires an `ACTION_VIEW` intent. **No browser engine is
-bundled.** Firefox (Mozilla, MPL-2.0) is merely the preferred *target* when the user
+bundled.** Desktop engines (Firefox ESR, Chromium, Edge arm64) are modelled and gated but
+not shipped; see `docs/BROWSER_ENGINES.md` for licences and the redistribution rules. Firefox (Mozilla, MPL-2.0) is merely the preferred *target* when the user
 already has it installed; its package name appears in `<queries>` so it can be listed
 on API 30+. Other package names listed there (Chrome, Brave, Vivaldi, Edge, Opera,
 Chromium, Tor Browser, Firefox Focus/Fennec) are used only for detection - no
