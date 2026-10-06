@@ -13,7 +13,7 @@ android {
         minSdk = 28
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1.0-n2.1"
+        versionName = "0.1.0-n2.2"
 
         // arm64-v8a only: proot/box64 are 64-bit ARM (R1).
         ndk {
@@ -49,8 +49,10 @@ android {
 
     testOptions {
         unitTests.all {
-            it.maxHeapSize = "384m"
+            it.maxHeapSize = "560m"
         }
+        unitTests.isIncludeAndroidResources = true
+        unitTests.isReturnDefaultValues = true
     }
 
     packaging {
@@ -59,6 +61,16 @@ android {
             // R1: proot/box64 are executed straight from nativeLibraryDir.
             useLegacyPackaging = true
         }
+    }
+}
+
+// Compose/Robolectric UI tests are opt-in (-PuiTests=true): they need a couple of GB,
+// which low-memory dev boxes and sandboxes often lack. CI always opts in.
+val uiTestsEnabled = (project.findProperty("uiTests") as? String)?.toBoolean() == true
+
+tasks.withType<Test>().configureEach {
+    if (!uiTestsEnabled) {
+        exclude("**/TaskbarComposeTest.class")
     }
 }
 
@@ -73,4 +85,8 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
