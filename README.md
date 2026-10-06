@@ -14,10 +14,27 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | --- | --- | --- |
 | N0 | Gradle project + Compose shell screen (wallpaper + taskbar), CI debug APK | done |
 | N1 | Native taskbar (Start menu, tray, clock) + window manager (drag/resize/snap/z-order) | done |
-| N2 | Apps: Explorer (done), Notepad (done), Settings, Task Manager, Terminal, Container Manager | in progress |
+| N2 | Apps: Explorer, Notepad, Settings, Browser (done) · Task Manager, Terminal, Container Manager | in progress |
 | R1–R4 | proot/box64 in `jniLibs`, ContainerService, rootfs download, self-test | — |
 | D1–D2 | In-app X server (fullscreen surface, then one surface per top-level window) | — |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | — |
+
+## Animation
+
+Windows fade in and settle from 94% scale anchored at the caption (220 ms), closing
+plays the reverse and only then leaves the window list, minimizing/restoring shrinks
+and grows in place (140 ms), and the snap preview cross-fades. One frame loop in
+`WindowLayer` drives every window - no per-window coroutines. Settings ▸
+Personalisation ▸ *Window animations* turns all of it off.
+
+## Browser
+
+The Browser pin opens a shell window with an address bar. The shell never renders web
+content: it resolves the input (URL, bare hostname -> `https://`, otherwise a search)
+and hands it to a real browser via `ACTION_VIEW`. **Firefox is preferred** when
+installed (`org.mozilla.firefox`), then the user's pinned choice, then Android's
+default handler; Settings ▸ Apps lists what is installed and stores the preference.
+Firefox is never bundled in the APK.
 
 ## Build
 
@@ -42,7 +59,7 @@ app/src/main/java/dev/win11we/shell/
   ui/taskbar/Taskbar.kt        bar layout: widgets chip, centred pins, tray, clock
   ui/taskbar/TaskbarParts.kt   button/indicator, tooltips, tray, clock
   ui/start/StartMenuPanel.kt   scrim + animated Start menu (search, pinned, all apps, recommended)
-  ui/window/WindowLayer.kt     z-ordered rendering + snap preview overlay
+  ui/window/WindowLayer.kt     z-ordered rendering, open/close/minimize animations, snap preview
   ui/window/WindowFrame.kt     frame, caption, drag-to-move/snap, 8 resize handles
   ui/window/WindowControlButton.kt  minimize / maximize-restore / close
   ui/window/WindowContent.kt   routes a window to its app body
@@ -57,15 +74,23 @@ app/src/main/java/dev/win11we/shell/
   ui/notepad/NotepadMenuBar.kt File / Edit / Format / View menu bar
   ui/notepad/NotepadViews.kt   editor, find & replace bar, status bar
   ui/notepad/NotepadScreen.kt  SAF open/save/save-as, shortcuts, close guard
+  settings/SettingsStore.kt    persisted, observable shell settings (+ keys, presets)
+  ui/settings/SettingsUi.kt    sections, searchable settings catalogue
+  ui/settings/SettingsScreen.kt Personalisation / Apps / Storage / Containers / Diagnostics / About
+  ui/browser/Browsers.kt       installed-browser discovery, intent building, URL parsing
+  ui/browser/BrowserState.kt   address bar, target package, launch bookkeeping
+  ui/browser/BrowserApp.kt     Browser window: address bar + browser chooser
 ```
 
-Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 67 tests): snap zones,
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 103 tests): snap zones,
 maximize/restore, halves snapping, edge/corner resize with minimums, on-screen clamping,
 z-order/focus, taskbar toggle open-minimize-restore, Explorer listing/filtering/sorting,
 Windows-style size and type labels, back/forward/up/trail navigation, selection,
 create/rename/delete and the revision counter that refreshes the list,
 Notepad encoding/BOM round trips, CRLF-LF-CR detection and preservation, Ln/Col maths,
 find next/previous with wrap and match-case, replace/replace-all, zoom clamping,
-the bundled windows-1252 codec, and the window close guard.
+the bundled windows-1252 codec, the window close guard, the two-phase close
+animation, the animation curve, settings persistence/defaults/fallbacks, settings
+search, URL parsing (host vs. search) and the browser-preference resolution order.
 
 See `docs/THIRD_PARTY.md` for third-party components and licences.
