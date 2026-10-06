@@ -28,6 +28,7 @@ object SettingsKeys {
     const val TASKBAR_ALIGNMENT = "shell.taskbarAlignment"
     const val WINDOW_ANIMATIONS = "shell.windowAnimations"
     const val BROWSER_PACKAGE = "shell.browserPackage"
+    const val BROWSER_ENGINE = "shell.browserEngine"
     const val SHOW_BROWSER_PIN = "shell.showBrowserPin"
     const val SHOW_CONTAINERS_PIN = "shell.showContainersPin"
     const val BOX64_PRESET = "container.box64Preset"
@@ -38,6 +39,7 @@ object SettingsKeys {
         TASKBAR_ALIGNMENT,
         WINDOW_ANIMATIONS,
         BROWSER_PACKAGE,
+        BROWSER_ENGINE,
         SHOW_BROWSER_PIN,
         SHOW_CONTAINERS_PIN,
         BOX64_PRESET,
@@ -84,6 +86,14 @@ class SettingsStore(private val prefs: ShellPreferences) {
     var windowAnimations: Boolean
         get() = booleanValue(SettingsKeys.WINDOW_ANIMATIONS, true)
         set(value) = write(SettingsKeys.WINDOW_ANIMATIONS, value.toString())
+
+    /**
+     * Selected [dev.win11we.shell.ui.browser.BrowserEngine] id. Empty means
+     * "resolve automatically" (Firefox on Android, then the system default).
+     */
+    var browserEngine: String
+        get() = values[SettingsKeys.BROWSER_ENGINE].orEmpty()
+        set(value) = write(SettingsKeys.BROWSER_ENGINE, value)
 
     /** Empty means "let Android pick the default http handler". */
     var browserPackage: String

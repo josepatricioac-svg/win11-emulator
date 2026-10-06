@@ -30,6 +30,7 @@ import dev.win11we.shell.ui.browser.BrowserApp
 import dev.win11we.shell.ui.browser.BrowserState
 import dev.win11we.shell.ui.explorer.ExplorerScreen
 import dev.win11we.shell.ui.settings.SettingsScreen
+import dev.win11we.shell.ui.taskmanager.TaskManagerScreen
 import dev.win11we.shell.ui.settings.SettingsState
 import dev.win11we.shell.ui.notepad.NotepadScreen
 import dev.win11we.shell.ui.notepad.NotepadState
@@ -57,12 +58,29 @@ fun WindowContent(
             val state = window.payload as? BrowserState ?: BrowserState()
             BrowserApp(
                 state = state,
-                onChooseBrowser = { packageName -> ShellSettings.get().store.browserPackage = packageName },
+                onChooseBrowser = { engineId ->
+                    val store = ShellSettings.get().store
+                    store.browserEngine = engineId
+                    if (engineId.startsWith("android:")) {
+                        store.browserPackage = engineId.removePrefix("android:")
+                    }
+                },
             )
         }
         "settings" -> {
             val state = window.payload as? SettingsState ?: SettingsState()
             SettingsScreen(state = state, store = ShellSettings.get().store)
+        }
+        "taskmgr" -> {
+            val manager = window.payload as? dev.win11we.shell.window.WindowManager
+            if (manager == null) {
+                ComingSoon(label = label, enabled = enabled)
+            } else {
+                TaskManagerScreen(
+                    windowManager = manager,
+                    onCloseWindow = { id -> onCloseWindow(if (id >= 0) id else window.id) },
+                )
+            }
         }
         else -> ComingSoon(label = label, enabled = enabled)
     }

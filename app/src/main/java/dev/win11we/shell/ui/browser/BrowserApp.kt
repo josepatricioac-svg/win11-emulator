@@ -56,6 +56,7 @@ fun BrowserApp(
     onChooseBrowser: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val engine = state.engine()
     val context = LocalContext.current
     Column(
         modifier = modifier
@@ -93,8 +94,8 @@ fun BrowserApp(
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = "Opens in ${state.targetLabel()}",
-                color = TextSecondary,
+                text = if (state.engineBlocked()) "${engine.label} - runtime not installed" else "Opens in ${engine.label}",
+                color = if (state.engineBlocked()) Color(0xFFFFB4A6) else TextSecondary,
                 fontSize = 12.5.sp,
                 modifier = Modifier.weight(1f),
             )
@@ -110,6 +111,12 @@ fun BrowserApp(
                         val url = state.resolve()
                         if (url == null) {
                             Toast.makeText(context, "Nothing to open", Toast.LENGTH_SHORT).show()
+                        } else if (state.engineBlocked()) {
+                            Toast.makeText(
+                                context,
+                                "${engine.label} needs the container runtime (R1/R3) and the X server (D1).",
+                                Toast.LENGTH_LONG,
+                            ).show()
                         } else {
                             try {
                                 context.startActivity(Browsers.launchIntent(url, state.targetPackage()))
@@ -156,11 +163,39 @@ fun BrowserApp(
                     accent = chosen,
                     onClick = {
                         state.chooseBrowser(browser.packageName)
-                        onChooseBrowser(browser.packageName)
+                        onChooseBrowser("android:" + browser.packageName)
                     },
                 )
                 Spacer(Modifier.height(6.dp))
             }
+        }
+
+        Spacer(Modifier.height(20.dp))
+        Text("Desktop browsers (in the container)", color = TextPrimary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "PC-class browsers with profiles, extensions and sidebars. They run inside the Linux rootfs on the " +
+                "shell's own X server - never as an Android app, and never bundled in this APK.",
+            color = TextTertiary,
+            fontSize = 11.5.sp,
+        )
+        Spacer(Modifier.height(10.dp))
+        DesktopBrowserCatalogue.ALL.forEach { desktop ->
+            val chosen = engine is BrowserEngine.DesktopBrowser && engine.id == desktop.id
+            BrowserCard(
+                title = desktop.label,
+                subtitle = desktop.detail,
+                iconRes = desktop.iconRes,
+                trailing = if (chosen) "Selected" else "Needs " + desktop.requirement.substringBefore(' '),
+                accent = chosen,
+                badge = desktop.license,
+                locked = !desktop.available,
+                onClick = {
+                    state.chooseBrowser(desktop.id)
+                    onChooseBrowser(desktop.id)
+                },
+            )
+            Spacer(Modifier.height(6.dp))
         }
 
         Spacer(Modifier.height(14.dp))
@@ -181,6 +216,8 @@ private fun BrowserCard(
     trailing: String?,
     drawable: android.graphics.drawable.Drawable? = null,
     accent: Boolean = false,
+    badge: String? = null,
+    locked: Boolean = false,
     onClick: (() -> Unit)? = null,
 ) {
     Row(
@@ -207,7 +244,26 @@ private fun BrowserCard(
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(title, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    title,
+                    color = if (locked) TextSecondary else TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                if (badge != null) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = badge,
+                        color = TextTertiary,
+                        fontSize = 10.sp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color(0x14FFFFFF))
+                            .padding(horizontal = 7.dp, vertical = 2.dp),
+                    )
+                }
+            }
             Text(subtitle, color = TextTertiary, fontSize = 11.sp)
         }
         if (trailing != null) {

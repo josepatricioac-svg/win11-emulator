@@ -43,6 +43,7 @@ import dev.win11we.shell.settings.SettingsStore
 import dev.win11we.shell.settings.TaskbarAlignment
 import dev.win11we.shell.settings.ThemeMode
 import dev.win11we.shell.ui.browser.Browsers
+import dev.win11we.shell.ui.browser.DesktopBrowserCatalogue
 import dev.win11we.shell.ui.theme.AccentBlue
 import dev.win11we.shell.ui.theme.CardSurface
 import dev.win11we.shell.ui.theme.HoverLight
@@ -197,7 +198,10 @@ private fun AppsPage(store: SettingsStore) {
     val context = LocalContext.current
     val installed = remember { Browsers.resolve(context) }
     PageTitle("Apps")
-    Hint("Browser choice is stored per device; the shell never renders web content itself.")
+    Hint(
+        "Default browser engine. Android browsers launch now; desktop engines run inside the " +
+            "container on the shell's X server and unlock with R1/R3/D1.",
+    )
     SettingsCard {
         installed.forEach { browser ->
             RadioRow(
@@ -225,6 +229,18 @@ private fun AppsPage(store: SettingsStore) {
             checked = store.browserPackage.isBlank(),
             onClick = { store.browserPackage = "" },
         )
+        DesktopBrowserCatalogue.ALL.forEach { engine ->
+            RadioRow(
+                title = engine.label,
+                subtitle = "Needs ${engine.requirement}  ·  ${engine.license}",
+                options = emptyList(),
+                selectedIndex = 0,
+                onSelect = {},
+                checked = store.browserEngine == engine.id,
+                onClick = { store.browserEngine = engine.id },
+            )
+        }
+        Hint("See docs/BROWSER_ENGINES.md for what each desktop engine needs and its licence.")
         ToggleRow("Show Browser on the taskbar", "", store.showBrowserPin, { store.showBrowserPin = it })
         ToggleRow("Show Container Manager on the taskbar", "Disabled apps stay in Start ▸ All apps", store.showContainersPin, { store.showContainersPin = it })
     }

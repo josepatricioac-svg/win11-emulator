@@ -2,6 +2,8 @@ package dev.win11we.shell.ui.taskbar
 
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -22,6 +24,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.Text
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.TooltipBox
 import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberTooltipState
@@ -46,7 +53,9 @@ import dev.win11we.shell.ui.theme.HoverLight
 import dev.win11we.shell.ui.theme.ShellSurfaces
 import dev.win11we.shell.ui.theme.PressedLight
 import dev.win11we.shell.ui.theme.TextPrimary
+import dev.win11we.shell.ui.theme.StrokeSubtle
 import dev.win11we.shell.ui.theme.TextSecondary
+import dev.win11we.shell.ui.theme.TextTertiary
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -54,6 +63,7 @@ import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
 private val ButtonShape = RoundedCornerShape(8.dp)
+private val JumpListSurface = Color(0xF7222833)
 
 /** Long-press / hover tooltip, the way the Windows 11 taskbar names its buttons. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -69,6 +79,9 @@ internal fun TaskbarTooltip(label: String, content: @Composable () -> Unit) {
 
 /** A pinned taskbar button with the Windows 11 running/focus indicator bar. */
 @OptIn(ExperimentalFoundationApi::class)
+/** Long-press a pin for its jump list: running windows, a new instance, Task Manager. */
+data class PinMenuEntry(val label: String, val enabled: Boolean = true, val onClick: () -> Unit)
+
 @Composable
 fun TaskbarButton(
     @DrawableRes iconRes: Int,
@@ -76,7 +89,9 @@ fun TaskbarButton(
     running: Boolean,
     focused: Boolean,
     onClick: () -> Unit,
+    menuEntries: List<PinMenuEntry> = emptyList(),
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     TaskbarTooltip(label) {
@@ -96,7 +111,7 @@ fun TaskbarButton(
                     indication = null,
                     onClickLabel = label,
                     onLongClickLabel = label,
-                    onLongClick = {},
+                    onLongClick = { if (menuEntries.isNotEmpty()) menuOpen = true },
                     onClick = onClick,
                 ),
             contentAlignment = Alignment.Center,
@@ -116,6 +131,45 @@ fun TaskbarButton(
                         .clip(CircleShape)
                         .background(if (focused) AccentBlue else TextSecondary),
                 )
+            }
+        }
+        if (menuEntries.isNotEmpty()) {
+            Popup(
+                alignment = Alignment.BottomCenter,
+                offset = IntOffset(0, with(LocalDensity.current) { (-46).dp.roundToPx() }),
+                onDismissRequest = { menuOpen = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(JumpListSurface)
+                        .border(1.dp, StrokeSubtle, RoundedCornerShape(9.dp))
+                        .padding(vertical = 5.dp, horizontal = 5.dp),
+                ) {
+                    Text(
+                        text = label,
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    )
+                    menuEntries.forEach { entry ->
+                        Text(
+                            text = entry.label,
+                            color = if (entry.enabled) TextPrimary else TextTertiary,
+                            fontSize = 12.5.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(5.dp))
+                                .clickable(enabled = entry.enabled, onClickLabel = entry.label) {
+                                    menuOpen = false
+                                    entry.onClick()
+                                }
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                        )
+                    }
+                }
             }
         }
     }

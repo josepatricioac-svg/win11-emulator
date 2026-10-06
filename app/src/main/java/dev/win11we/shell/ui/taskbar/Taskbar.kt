@@ -21,6 +21,7 @@ import dev.win11we.shell.R
 import dev.win11we.shell.settings.SettingsStore
 import dev.win11we.shell.settings.TaskbarAlignment
 import dev.win11we.shell.ui.theme.ShellSurfaces
+import dev.win11we.shell.window.AppSpec
 import dev.win11we.shell.window.ShellApps
 import dev.win11we.shell.window.WindowManager
 
@@ -35,6 +36,7 @@ fun Taskbar(
     store: SettingsStore,
     startOpen: Boolean,
     onStartClick: () -> Unit,
+    onOpenApp: (AppSpec) -> Unit = { app -> manager.toggle(app, desktopSize) },
     modifier: Modifier = Modifier,
 ) {
     val pinned = ShellApps.filter { app ->
@@ -74,6 +76,10 @@ fun Taskbar(
                 running = startOpen,
                 focused = startOpen,
                 onClick = onStartClick,
+                menuEntries = listOf(
+                    PinMenuEntry("Settings") { onOpenApp(ShellApps.first { it.id == "settings" }) },
+                    PinMenuEntry("Task Manager") { onOpenApp(ShellApps.first { it.id == "taskmgr" }) },
+                ),
             )
             pinned.forEach { app ->
                 val instances = manager.windows.filter { it.app.id == app.id }
@@ -85,6 +91,16 @@ fun Taskbar(
                     running = running,
                     focused = focused,
                     onClick = { manager.toggle(app, desktopSize) },
+                    menuEntries = buildList {
+                        instances.filterNot { it.closing }.forEach { window ->
+                            val title = window.app.title?.let { "Window" } ?: app.label
+                            add(
+                                PinMenuEntry(if (window.minimized) "Restore  ·  $title" else title) { manager.focus(window) },
+                            )
+                        }
+                        add(PinMenuEntry("New window") { manager.open(app, desktopSize) })
+                        add(PinMenuEntry("Task Manager") { onOpenApp(ShellApps.first { it.id == "taskmgr" }) })
+                    },
                 )
             }
         }

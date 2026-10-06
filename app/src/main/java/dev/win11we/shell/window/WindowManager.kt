@@ -155,18 +155,23 @@ class WindowManager(
 fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager = remember(store) {
     val appContext = context.applicationContext
     val root = Environment.getExternalStorageDirectory()
-    WindowManager { app ->
+    lateinit var manager: WindowManager
+    manager = WindowManager { app ->
         when (app.id) {
             "explorer" -> ExplorerState(root = if (root.isDirectory) root else File(root.parent ?: "/"))
             "notepad" -> NotepadState()
             "browser" -> BrowserState(
                 installed = Browsers.resolve(appContext),
                 preferredPackage = store.browserPackage.ifBlank { null },
+                chosenEngineId = store.browserEngine.ifBlank { null },
             )
             "settings" -> SettingsState()
+            // Task Manager observes the window list, so it gets the manager itself.
+            "taskmgr" -> manager
             else -> null
         }
     }
+    manager
 }
 
 /**

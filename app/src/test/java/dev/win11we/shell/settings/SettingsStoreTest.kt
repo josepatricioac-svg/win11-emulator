@@ -85,6 +85,19 @@ class SettingsStoreTest {
     }
 
     @Test
+    fun `the browser engine choice persists and defaults to auto`() {
+        val prefs = FakePreferences()
+        val store = SettingsStore(prefs)
+        assertEquals("", store.browserEngine) // "" = resolve automatically (Firefox first)
+        store.browserEngine = "desktop:firefox-esr"
+        assertEquals("desktop:firefox-esr", SettingsStore(prefs).browserEngine)
+        store.browserEngine = "android:com.brave.browser"
+        assertEquals("android:com.brave.browser", SettingsStore(prefs).browserEngine)
+        store.browserEngine = ""
+        assertEquals("", SettingsStore(prefs).browserEngine)
+    }
+
+    @Test
     fun `a pinned browser is only preferred while it is installed`() {
         val store = SettingsStore(FakePreferences())
         store.browserPackage = "org.mozilla.firefox"
