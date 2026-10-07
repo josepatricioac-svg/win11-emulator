@@ -16,6 +16,10 @@ import dev.win11we.shell.container.DriveMapping
 class ContainerManagerState(
     val store: ContainerStore,
     val runtime: ContainerRuntime,
+    /** Starts the foreground service that owns the processes (R2). No-op in tests. */
+    val onStartRuntime: () -> Unit = {},
+    /** Stops it again once nothing is running. No-op in tests. */
+    val onStopRuntime: () -> Unit = {},
 ) {
     var expandedId by mutableStateOf<String?>(null)
     var message by mutableStateOf<String?>(null)
@@ -30,6 +34,14 @@ class ContainerManagerState(
     }
 
     val containers: List<Container> get() = store.containers
+
+    /** One-line runtime verdict, straight from the launcher's own validation. */
+    val runtimeStatus: String
+        get() = if (runtime.ready) {
+            "Runtime ready - Start launches proot -> box64 -> wine as a foreground service."
+        } else {
+            containers.firstOrNull()?.let { runtime.logExcerpt(it, 1) } ?: ""
+        }
 
     fun toggle(container: Container) {
         expandedId = if (expandedId == container.id) null else container.id
@@ -69,11 +81,16 @@ class ContainerManagerState(
         val result = action(runtime, container)
         if (result.success) {
             store.update(container.id) { it.withStatus(runtime.statusOf(it)) }
+            onStartRuntime()
         } else {
             store.update(container.id) { it.withStatus(ContainerStatus.ERROR, result.message) }
         }
         message = result.message.ifBlank { if (result.success) "Done." else "Failed." }
+        if (store.containers.none { runtime.statusOf(it) == ContainerStatus.RUNNING }) onStopRuntime()
     }
+
+    /** The service's own log tail, shown in the container card (R4 expands this). */
+    fun logExcerpt(container: Container, lines: Int = 12): String = runtime.logExcerpt(container, lines)
 
     fun start(container: Container) = run(ContainerRuntime::start, container)
     fun stop(container: Container) = run(ContainerRuntime::stop, container)

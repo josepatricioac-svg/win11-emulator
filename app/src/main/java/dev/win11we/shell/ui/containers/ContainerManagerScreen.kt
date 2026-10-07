@@ -36,6 +36,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -104,6 +105,7 @@ fun ContainerManagerScreen(
                     onRemoveDrive = { drive -> state.removeDrive(container, drive.letter) },
                     onOpenPrefix = { onOpenPath(container.prefixPath) },
                     onSave = { updated, what -> state.save(container, updated, what) },
+                    logExcerpt = { lines -> state.logExcerpt(container, lines) },
                 )
                 Spacer(Modifier.height(8.dp))
             }
@@ -171,9 +173,11 @@ private fun Header(state: ContainerManagerState) {
             Text("Containers", color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
             Text(
                 text = if (state.runtime.ready) {
-                    "Runtime ready - Start launches proot -> box64 -> wine."
+                    "Runtime ready - Start launches proot -> box64 -> wine in a foreground service."
                 } else {
-                    "Runtime not installed: proot/box64 arrive in R1, ContainerService in R2, the rootfs in R3."
+                    "Runtime not ready: " + state.runtimeStatus.ifBlank {
+                        "no libbox64.so / libproot.so in this APK (R1), rootfs in R3. See Diagnostics."
+                    }
                 },
                 color = if (state.runtime.ready) OkGreen else TextTertiary,
                 fontSize = 11.5.sp,
@@ -233,6 +237,7 @@ private fun ContainerCard(
     onRemoveDrive: (DriveMapping) -> Unit,
     onOpenPrefix: () -> Unit,
     onSave: (Container, String) -> Unit,
+    logExcerpt: (Int) -> String,
 ) {
     Column(
         modifier = Modifier
@@ -351,6 +356,19 @@ private fun ContainerCard(
                     modifier = Modifier.clip(ChipShape).clickable(onClick = onAddDrive)
                         .padding(horizontal = 10.dp, vertical = 6.dp),
                 )
+                Spacer(Modifier.height(12.dp))
+
+                Label("Container log")
+                Column(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp)).background(Color(0xFF0B0F16)).padding(10.dp),
+                ) {
+                    Text(
+                        text = logExcerpt(8).ifBlank { "(no output yet)" },
+                        color = Color(0xFF9FE8B8),
+                        fontSize = 10.5.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
                 Spacer(Modifier.height(12.dp))
 
                 Label("Prefix")

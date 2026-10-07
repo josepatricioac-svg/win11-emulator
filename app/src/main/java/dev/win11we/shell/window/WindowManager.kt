@@ -24,7 +24,10 @@ import dev.win11we.shell.ui.notepad.NotepadState
 import dev.win11we.shell.ui.settings.SettingsState
 import dev.win11we.shell.container.ContainerStore
 import dev.win11we.shell.container.NotInstalledRuntime
+import dev.win11we.shell.runtime.ContainerService
+import dev.win11we.shell.runtime.LauncherRuntime
 import dev.win11we.shell.runtime.NativeBinaries
+import dev.win11we.shell.runtime.RuntimeHolder
 import dev.win11we.shell.ui.containers.ContainerManagerState
 import dev.win11we.shell.ui.diagnostics.DiagnosticsState
 import dev.win11we.shell.ui.terminal.LocalCommandExecutor
@@ -186,10 +189,15 @@ fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager
             "settings" -> SettingsState()
             // Task Manager observes the window list, so it gets the manager itself.
             "taskmgr" -> manager
-            "containers" -> ContainerManagerState(
-                store = ContainerStore(File(appContext.filesDir, "containers")),
-                runtime = NotInstalledRuntime(),
-            )
+            "containers" -> {
+                val launcher = RuntimeHolder.init(appContext, store.rootfsLocation.ifBlank { null })
+                ContainerManagerState(
+                    store = ContainerStore(File(appContext.filesDir, "containers")),
+                    runtime = LauncherRuntime(launcher, appContext),
+                    onStartRuntime = { ContainerService.start(appContext) },
+                    onStopRuntime = { ContainerService.stopAll(appContext) },
+                )
+            }
             "diagnostics" -> DiagnosticsState(
                 binaries = NativeBinaries.from(
                     nativeLibraryDirPath = appContext.applicationInfo.nativeLibraryDir,
