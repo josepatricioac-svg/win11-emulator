@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- R2: the container runtime is a foreground service owned by this app. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- Browsing shared storage on API 28-32; SAF drive mapping replaces this in P1. -->
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
@@ -45,6 +49,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".runtime.ContainerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs a Wine/container runtime (proot + box64) for the app's own windows" />
+        </service>
     </application>
 
 </manifest>
