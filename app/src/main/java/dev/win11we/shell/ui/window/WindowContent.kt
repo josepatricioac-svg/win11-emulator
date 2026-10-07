@@ -29,6 +29,8 @@ import dev.win11we.shell.settings.ShellSettings
 import dev.win11we.shell.ui.browser.BrowserApp
 import dev.win11we.shell.ui.browser.BrowserState
 import dev.win11we.shell.ui.containers.ContainerManagerScreen
+import dev.win11we.shell.ui.diagnostics.DiagnosticsScreen
+import dev.win11we.shell.ui.diagnostics.DiagnosticsState
 import dev.win11we.shell.ui.containers.ContainerManagerState
 import dev.win11we.shell.ui.explorer.ExplorerScreen
 import dev.win11we.shell.ui.explorer.ExplorerState
@@ -100,6 +102,10 @@ fun WindowContent(
                     onCloseWindow = { id -> onCloseWindow(if (id >= 0) id else window.id) },
                 )
             }
+        }
+        "diagnostics" -> {
+            val state = window.payload as? DiagnosticsState
+            if (state == null) ComingSoon(label = label, enabled = enabled) else DiagnosticsScreen(state = state)
         }
         "containers" -> {
             val state = window.payload as? ContainerManagerState

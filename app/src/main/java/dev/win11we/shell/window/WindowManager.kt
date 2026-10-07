@@ -24,7 +24,9 @@ import dev.win11we.shell.ui.notepad.NotepadState
 import dev.win11we.shell.ui.settings.SettingsState
 import dev.win11we.shell.container.ContainerStore
 import dev.win11we.shell.container.NotInstalledRuntime
+import dev.win11we.shell.runtime.NativeBinaries
 import dev.win11we.shell.ui.containers.ContainerManagerState
+import dev.win11we.shell.ui.diagnostics.DiagnosticsState
 import dev.win11we.shell.ui.terminal.LocalCommandExecutor
 import dev.win11we.shell.ui.terminal.TerminalState
 import java.io.File
@@ -63,6 +65,13 @@ val ShellApps: List<AppSpec> = listOf(
     AppSpec("terminal", "Terminal", R.drawable.ic_app_terminal2),
     AppSpec("taskmgr", "Task Manager", R.drawable.ic_app_taskmgr),
     AppSpec("containers", "Container Manager", R.drawable.ic_app_container),
+    AppSpec(
+        id = "diagnostics",
+        label = "Diagnostics",
+        iconRes = R.drawable.ic_app_diagnostics,
+        pinned = false,
+        title = { "Diagnostics" },
+    ),
 )
 
 /** Owns the window list, the z-order and which window is on top. */
@@ -180,6 +189,12 @@ fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager
             "containers" -> ContainerManagerState(
                 store = ContainerStore(File(appContext.filesDir, "containers")),
                 runtime = NotInstalledRuntime(),
+            )
+            "diagnostics" -> DiagnosticsState(
+                binaries = NativeBinaries.from(
+                    nativeLibraryDirPath = appContext.applicationInfo.nativeLibraryDir,
+                    pins = NativeBinaries.loadPinsFromAssets(appContext.assets),
+                ),
             )
             "terminal" -> TerminalState(
                 executor = LocalCommandExecutor(
