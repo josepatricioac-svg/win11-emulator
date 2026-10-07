@@ -1,0 +1,13 @@
+# Pinned SHA-256 of the native binaries shipped in jniLibs/arm64-v8a.
+#
+# A required binary that is present but NOT listed here is refused (fail closed):
+# Diagnostics reports CHECKSUM_NOT_PINNED and R2 will not exec it. A listed binary
+# whose hash does not match reports CHECKSUM_MISMATCH.
+#
+# After vendoring, fill in the real hashes (sha256sum lib*.so) and their provenance
+# in docs/THIRD_PARTY.md. Nothing is pinned yet because nothing is vendored yet.
+#
+# libbox64.so=
+# libproot.so=
+# libproot-loader.so=
+# libproot-loader32.so=
