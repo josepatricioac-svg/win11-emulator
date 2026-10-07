@@ -66,6 +66,28 @@ a plain HTTPS GET, no integration or API key.
 
 Test-only: none of this ships in the APK.
 
+### R1 additions (native runtime)
+
+**No third-party binary is packaged in the APK yet.** `app/src/main/jniLibs/arm64-v8a/`
+contains a `README.txt` only; the Kotlin side (inventory, permissions, probes, proot
+command line) is written and unit-tested. When binaries are vendored, this table must be
+filled in at the same time, with upstream URL, tag/commit and SHA-256:
+
+| File | Upstream | Licence | Status |
+| --- | --- | --- | --- |
+| `libbox64.so` | box64 (ptitSeb), pinned ref `v0.4.5-1` = commit `e99ca51299ec897e6a96da6d00983d90406a836f` | MIT | not vendored; `.github/workflows/build-native.yml` builds it with `-DANDROID=ON -DWINLATOR_GLIBC=ON` |
+| `libproot.so` | proot Android fork | **GPL-2.0** | not vendored; will be exec'd as a separate process, never linked |
+| `libproot-loader.so` / `libproot-loader32.so` | proot | **GPL-2.0** | not vendored |
+| Ubuntu 22.04 arm64 rootfs, Wine 9.x | R3 download | per-package / LGPL-2.1+ | not downloaded |
+
+Binaries must also be pinned by SHA-256 in `app/src/main/assets/native/checksums.txt`
+(template committed, all entries commented out). An unpinned or mismatched required
+binary is refused, not executed.
+
+GPL note (rule 4): proot is GPL-2.0. We only `exec()` it, we do not link against it, and
+no GPL code is copied into this repository. Redistribution of the binary still requires
+the GPL licence text and a source offer, which must accompany the vendored artefacts.
+
 ## Assets
 
 | Asset | Origin | Licence |

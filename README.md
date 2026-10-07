@@ -15,7 +15,7 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | N0 | Gradle project + Compose shell screen (wallpaper + taskbar), CI debug APK | done |
 | N1 | Native taskbar (Start menu, tray, clock) + window manager (drag/resize/snap/z-order) | done |
 | N2 | Apps: Explorer, Notepad, Settings, Browser, Task Manager, Terminal, Container Manager | **done** |
-| R1–R4 | proot/box64 in `jniLibs`, ContainerService, rootfs download, self-test | — |
+| R1 | proot/box64 exec from `nativeLibraryDir`, inventory/permissions, `--version` probes, proot command builder, Diagnostics window | done (binaries not vendored) |
 | D1–D2 | In-app X server (fullscreen surface, then one surface per top-level window) | — |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | — |
 
@@ -26,6 +26,21 @@ plays the reverse and only then leaves the window list, minimizing/restoring shr
 and grows in place (140 ms), and the snap preview cross-fades. One frame loop in
 `WindowLayer` drives every window - no per-window coroutines. Settings ▸
 Personalisation ▸ *Window animations* turns all of it off.
+
+## Native runtime (R1)
+
+proot and box64 are shipped as `lib*.so` in `app/src/main/jniLibs/arm64-v8a/` and
+**executed in place from `nativeLibraryDir`** — `targetSdk 34` forbids exec from app data,
+and `jniLibs.useLegacyPackaging = true` keeps them extracted.
+
+Every shipped binary must be pinned by SHA-256 in `app/src/main/assets/native/checksums.txt`;
+a required binary that is unpinned or mismatched is **refused** (`CHECKSUM_NOT_PINNED` /
+`CHECKSUM_MISMATCH`) rather than exec'd. `.github/workflows/build-native.yml`
+(`workflow_dispatch` only, so it can never affect `build-apk`) builds box64 from a pinned
+ref with `-DANDROID=ON -DWINLATOR_GLIBC=ON` and uploads `libbox64.so` + provenance +
+`SHA256SUMS.txt`. No binary is committed in git yet, and proot needs a patched Android fork
+(upstream does not build against bionic). `docs/NATIVE_RUNTIME.md` has the full procedure
+and the licence rules (proot is GPL-2.0 and is only ever exec'd, never linked).
 
 ## Container Manager
 
@@ -91,10 +106,12 @@ See `docs/BROWSER_ENGINES.md` for the feasibility write-up, the licensing constr
 
 ## UI tests
 
-`./gradlew testDebugUnitTest` runs the 171 pure-JVM tests (window geometry, snap zones,
+`./gradlew testDebugUnitTest` runs the 198 pure-JVM tests (window geometry, snap zones,
 Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing, argv
 splitting, the log buffer, the built-in commands, the terminal transcript/history, the
-container codec/store, guest<->host path mapping and the Wine environment builder).
+container codec/store, guest<->host path mapping, the Wine environment builder, the
+native-binary inventory/permission handling, SHA-256 pinning and its fail-closed verdicts,
+the probe runner and the proot command line).
 
 Compose tests that actually **compose** the taskbar (Robolectric) are opt-in because they
 need a couple of GB of RAM:
@@ -161,6 +178,10 @@ app/src/main/java/dev/win11we/shell/
   container/Container.kt       container model, drives, guest<->host paths, wine env builder
   container/ContainerStore.kt  containers.list codec + on-disk store + runtime interface
   ui/containers/…              Container Manager state and screen (presets, drives, env preview)
+  runtime/NativeBinaries.kt    jniLibs inventory, +x fix, PrepareResult (R1)
+  runtime/RuntimeProbe.kt      ProcessRunner seam + `--version` probes with explicit env
+  runtime/ProotCommand.kt      the proot command line: fixed prefix bind, drives, R4 plan
+  ui/diagnostics/…             Diagnostics window (binaries, probes, log excerpt)
 ```
 
 Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 121 tests): snap zones,
