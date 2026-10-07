@@ -111,4 +111,6 @@ R2 then reuses `ProotCommand.build()` and `WineEnvironment.build()` (with
 | proot command line incl. fixed prefix bind + extra drives | done, 6 unit tests |
 | R4's self-test plan (box64, `wine64 --version`, `wine64 cmd /c echo hello`) | plan built + tested, execution needs R2/R3 |
 | Diagnostics window | done (UI shows real inventory/probe state) |
+| R2 launch path (validate -> command -> env -> stream -> status) | done, 18 unit tests; refuses to run without binaries/rootfs |
+| R2 `ContainerService` (foreground, Stop all, kills children on destroy) | done; never started in practice until binaries exist |
 | The binaries themselves | **not vendored** — see above; box64 v0.4.5-1 could not be compiled in this sandbox (clang OOM) |

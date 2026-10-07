@@ -15,7 +15,8 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | N0 | Gradle project + Compose shell screen (wallpaper + taskbar), CI debug APK | done |
 | N1 | Native taskbar (Start menu, tray, clock) + window manager (drag/resize/snap/z-order) | done |
 | N2 | Apps: Explorer, Notepad, Settings, Browser, Task Manager, Terminal, Container Manager | **done** |
-| R1 | proot/box64 exec from `nativeLibraryDir`, inventory/permissions, `--version` probes, proot command builder, Diagnostics window | done (binaries not vendored) |
+| R1 | proot/box64 exec from `nativeLibraryDir`, inventory/permissions, SHA-256 pins, `--version` probes, proot command builder, Diagnostics window | done (binaries not vendored) |
+| R2 | `ContainerService` (foreground, Stop all), `proot -> box64 -> wine` launch with the explicit env, per-container status, logs into the shared buffer | done (inert until R1 binaries + R3 rootfs exist) |
 | D1–D2 | In-app X server (fullscreen surface, then one surface per top-level window) | — |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | — |
 
@@ -26,6 +27,54 @@ plays the reverse and only then leaves the window list, minimizing/restoring shr
 and grows in place (140 ms), and the snap preview cross-fades. One frame loop in
 `WindowLayer` drives every window - no per-window coroutines. Settings ▸
 Personalisation ▸ *Window animations* turns all of it off.
+
+## What is deliberately not usable yet
+
+Nothing is stubbed by accident. Every app window opens; the parts that need the container
+runtime or the X server say exactly which step they wait for, and `RoadmapGatingTest`
+fails if that ever changes silently:
+
+| Thing | State today | Unlocked by |
+| --- | --- | --- |
+| Container Manager | Real UI, real persisted containers; Start/Stop answer "no runtime yet" and mark the container *Not ready* | R1 binaries + **R2** service |
+| Wine prefix, `wineboot`, installing apps | Not created | R2 + R3 |
+| Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Listed with licence + gating step; selecting one falls back to an Android browser, or reports "needs the container runtime and X server" | **R3 + D1** (Firefox ESR), **R1/R2/R3 + D2** (Edge) |
+| Terminal `wine`/`box64`/`proot`/`cmd` | Answer "not available yet" and name the step | R1 + R2 |
+| Task Manager container rows | Absent (no processes to show) | R2 |
+| Diagnostics wine64 self-test | Command lines are built and shown, not executed | R2 + R3 + **R4** |
+
+The single blocker for all of it is the native payload: **no `libbox64.so` / `libproot.so`
+is committed** (see `docs/NATIVE_RUNTIME.md`). box64 builds from `.github/workflows/build-native.yml`
+(`workflow_dispatch`); proot needs a patched Android fork and is GPL-2.0, so vendoring it
+is a decision for you, not something I will slip into the repo.
+
+## Container runtime (R2)
+
+`ContainerService` is a foreground service (`specialUse`, with the required property,
+`FOREGROUND_SERVICE` + `POST_NOTIFICATIONS`) that owns the container processes - no
+Termux, no adb. Its notification has a **Stop all** action; `onDestroy` stops every child.
+
+`ContainerLauncher` is the actual logic and contains no Android types, so all of it is
+unit-tested with a fake `ProcessLauncher`:
+
+1. **Validate before spawning** and refuse with a named reason: `BINARIES_NOT_READY`
+   (which includes the fail-closed SHA-256 verdicts), `ROOTFS_MISSING`, `PREFIX_MISSING`,
+   `NO_COMMAND`, `ALREADY_RUNNING`, `SPAWN_FAILED`.
+2. **Build the command**: `proot --rootfs <rootfs> --link2symlink --kill-on-exit
+   --bind <prefix>:/root/.wine --bind <drive>:/mnt/<letter> … --cwd /root -- box64 wine64 cmd`.
+   box64 is inserted only for Windows payloads (`wine*`, `*.exe`), not for native commands.
+3. **Build the environment**: `WineEnvironment.build()` plus this container's
+   `PROOT_LOADER`/`PROOT_LOADER_32`, sorted so Diagnostics can diff it.
+4. **Stream** stdout/stderr into the shared `LogBuffer` (Terminal `log` and Diagnostics
+   read the same lines) and map the exit code to `STOPPED`/`ERROR`.
+
+`ContainerManagerState` now drives it through `LauncherRuntime`, starts the service on a
+successful launch, stops it when nothing is running, and each container card shows its own
+log excerpt.
+
+**It is inert on purpose**: with no `libbox64.so`/`libproot.so` and no rootfs, Start
+reports exactly which piece is missing and marks the container *Not ready*. Nothing is
+guessed or faked.
 
 ## Native runtime (R1)
 
@@ -106,12 +155,15 @@ See `docs/BROWSER_ENGINES.md` for the feasibility write-up, the licensing constr
 
 ## UI tests
 
-`./gradlew testDebugUnitTest` runs the 198 pure-JVM tests (window geometry, snap zones,
+`./gradlew testDebugUnitTest` runs the 221 pure-JVM tests (window geometry, snap zones,
 Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing, argv
 splitting, the log buffer, the built-in commands, the terminal transcript/history, the
 container codec/store, guest<->host path mapping, the Wine environment builder, the
 native-binary inventory/permission handling, SHA-256 pinning and its fail-closed verdicts,
-the probe runner and the proot command line).
+the probe runner, the proot command line, and the R2 launcher: every refusal path
+(missing/unpinned binaries, missing rootfs, missing prefix, empty command, spawn failure,
+double start), the `proot -> box64 -> wine` command shape, drive binds, the explicit
+environment, stop/restart/stopAll, and exit-code -> status mapping).
 
 Compose tests that actually **compose** the taskbar (Robolectric) are opt-in because they
 need a couple of GB of RAM:
@@ -172,6 +224,7 @@ app/src/main/java/dev/win11we/shell/
   ui/taskmanager/ProcessList.kt  /proc parsing, CPU maths, sampler, history ring
   ui/taskmanager/TaskManagerScreen.kt Processes + Performance tabs, End task
   ui/terminal/LogBuffer.kt     bounded shared log sink + shell-style argv splitting
+  ui/terminal/SharedLog.kt     the one log the Terminal, service and Diagnostics share
   ui/terminal/CommandExecutor.kt CommandResult, executor interface, built-in local commands
   ui/terminal/TerminalState.kt transcript, prompt, cwd, history, exit/clear handling
   ui/terminal/TerminalScreen.kt console transcript, quick commands, input row
@@ -182,6 +235,9 @@ app/src/main/java/dev/win11we/shell/
   runtime/RuntimeProbe.kt      ProcessRunner seam + `--version` probes with explicit env
   runtime/ProotCommand.kt      the proot command line: fixed prefix bind, drives, R4 plan
   ui/diagnostics/…             Diagnostics window (binaries, probes, log excerpt)
+  runtime/ProcessLauncher.kt   start/stream/destroy seam (real ProcessBuilder + fakes in tests)
+  runtime/ContainerLauncher.kt validate -> build command+env -> start -> track status/logs (R2)
+  runtime/ContainerService.kt  foreground service, notification, Stop all, RuntimePaths/RuntimeHolder
 ```
 
 Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 121 tests): snap zones,

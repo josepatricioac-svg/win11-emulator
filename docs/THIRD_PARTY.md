@@ -66,6 +66,12 @@ a plain HTTPS GET, no integration or API key.
 
 Test-only: none of this ships in the APK.
 
+### R2 additions (container runtime)
+
+No new libraries: `ContainerService` uses `androidx.core` (`NotificationCompat`,
+`ContextCompat.startForegroundService`) which was already a dependency, plus
+`ProcessBuilder` from the JDK. No third-party code was copied.
+
 ### R1 additions (native runtime)
 
 **No third-party binary is packaged in the APK yet.** `app/src/main/jniLibs/arm64-v8a/`
