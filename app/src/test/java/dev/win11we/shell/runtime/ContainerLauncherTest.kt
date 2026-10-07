@@ -1,0 +1,293 @@
+package dev.win11we.shell.runtime
+
+import dev.win11we.shell.container.Container
+import dev.win11we.shell.container.ContainerStatus
+import dev.win11we.shell.container.DriveMapping
+import dev.win11we.shell.settings.Box64Preset
+import dev.win11we.shell.ui.terminal.LineKind
+import dev.win11we.shell.ui.terminal.LogBuffer
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.InputStream
+
+/** A [ProcessHandle] the tests drive by hand. */
+private class FakeHandle(
+    private val out: String = "",
+    private val err: String = "",
+    var exitCode: Int? = 0,
+) : ProcessHandle {
+    var alive = true
+    var destroyed = 0
+    override val isAlive: Boolean get() = alive
+    override fun stdout(): InputStream = ByteArrayInputStream(out.toByteArray())
+    override fun stderr(): InputStream = ByteArrayInputStream(err.toByteArray())
+    override fun waitFor(timeoutMillis: Long): Int? {
+        alive = false
+        return exitCode
+    }
+
+    override fun destroy() {
+        destroyed++
+        alive = false
+    }
+}
+
+private class FakeLauncher(
+    private val handle: ProcessHandle? = FakeHandle(),
+    private val failure: String? = null,
+) : ProcessLauncher {
+    val commands = mutableListOf<List<String>>()
+    val environments = mutableListOf<Map<String, String>>()
+    override fun start(command: List<String>, environment: Map<String, String>, workingDir: File?): LaunchAttempt {
+        commands.add(command)
+        environments.add(environment)
+        return LaunchAttempt(handle, failure)
+    }
+}
+
+class ContainerLauncherTest {
+
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    private lateinit var nativeDir: File
+    private lateinit var rootfs: File
+    private lateinit var prefix: File
+    private lateinit var container: Container
+    private val log = LogBuffer()
+
+    @Before
+    fun setUp() {
+        nativeDir = tmp.newFolder("lib")
+        rootfs = tmp.newFolder("rootfs")
+        prefix = tmp.newFolder("prefix")
+        listOf(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER).forEach { role ->
+            File(nativeDir, role.fileName).writeBytes(ByteArray(2048) { 0x41 })
+        }
+        container = Container(
+            id = "office",
+            name = "Office",
+            prefixPath = prefix.absolutePath,
+            preset = Box64Preset.OFFICE,
+            drives = listOf(DriveMapping('D', "/sdcard/Documents")),
+        )
+    }
+
+    private fun pins() = BinaryRole.entries
+        .filter { File(nativeDir, it.fileName).isFile }
+        .associate { it.fileName to NativeBinaries.sha256(File(nativeDir, it.fileName))!! }
+
+    private fun launcher(fake: ProcessLauncher = FakeLauncher()) =
+        ContainerLauncher(NativeBinaries(nativeDir, pins()), log, fake, streamThreads = false)
+
+    private fun request(command: List<String> = listOf("wine64", "cmd")) = RuntimeRequest(
+        container = container,
+        rootfsDir = rootfs,
+        xDisplay = ":100",
+        audioSocket = "/tmp/pulse",
+        guestCommand = command,
+    )
+
+    // --- the gate: nothing is exec'd unless everything is in place -------------
+
+    @Test
+    fun `refuses to start when the binaries are missing`() {
+        val empty = tmp.newFolder("empty-lib")
+        val launcher = ContainerLauncher(NativeBinaries(empty), log, FakeLauncher(), streamThreads = false)
+        val result = launcher.start(request())
+        assertFalse(result.success)
+        assertEquals(LaunchFailure.BINARIES_NOT_READY, result.failure)
+        assertEquals(ContainerStatus.ERROR, launcher.statusOf(container.id))
+        assertTrue(log.filter(LineKind.ERROR).any { it.text.contains("start refused") })
+    }
+
+    @Test
+    fun `refuses to start an unpinned binary - fail closed`() {
+        val unpinned = ContainerLauncher(NativeBinaries(nativeDir), log, FakeLauncher(), streamThreads = false)
+        val result = unpinned.start(request())
+        assertEquals(LaunchFailure.BINARIES_NOT_READY, result.failure)
+        assertTrue(result.message.contains("refusing to exec"))
+    }
+
+    @Test
+    fun `refuses to start without a rootfs and says R3`() {
+        val result = launcher().start(request().copy(rootfsDir = File(tmp.root, "no-rootfs")))
+        assertEquals(LaunchFailure.ROOTFS_MISSING, result.failure)
+        assertTrue(result.message.contains("R3"))
+    }
+
+    @Test
+    fun `refuses to start without a prefix`() {
+        val broken = container.copy(prefixPath = File(tmp.root, "no-prefix").absolutePath)
+        val result = launcher().start(request().copy(container = broken))
+        assertEquals(LaunchFailure.PREFIX_MISSING, result.failure)
+    }
+
+    @Test
+    fun `refuses an empty guest command`() {
+        val result = launcher().start(request(command = emptyList()))
+        assertEquals(LaunchFailure.NO_COMMAND, result.failure)
+    }
+
+    @Test
+    fun `a spawn failure is reported, not thrown`() {
+        val launcher = launcher(FakeLauncher(handle = null, failure = "IOException: Permission denied"))
+        val result = launcher.start(request())
+        assertFalse(result.success)
+        assertEquals(LaunchFailure.SPAWN_FAILED, result.failure)
+        assertEquals(ContainerStatus.ERROR, launcher.statusOf(container.id))
+        assertTrue(log.filter(LineKind.ERROR).any { it.text.contains("Permission denied") })
+    }
+
+    // --- the happy path ------------------------------------------------------
+
+    @Test
+    fun `start runs proot with box64 in front of wine and the prefix bind fixed`() {
+        val fake = FakeLauncher()
+        val launcher = launcher(fake)
+        val result = launcher.start(request())
+        assertTrue(result.message, result.success)
+        assertEquals(ContainerStatus.RUNNING, launcher.statusOf(container.id))
+
+        val command = fake.commands.single()
+        assertEquals(File(nativeDir, "libproot.so").absolutePath, command.first())
+        assertTrue(command.containsAll(listOf("--rootfs", rootfs.absolutePath)))
+        assertTrue(command.contains(prefix.absolutePath + ":/root/.wine"))
+        assertTrue("box64 must sit between proot and wine", command.contains(File(nativeDir, "libbox64.so").absolutePath))
+        assertEquals(listOf("wine64", "cmd"), command.subList(command.size - 2, command.size))
+        // container drives are bound under /mnt/<letter>
+        assertTrue(command.contains("/sdcard/Documents:/mnt/d"))
+        assertEquals(command, launcher.commandOf(container.id))
+    }
+
+    @Test
+    fun `native linux commands are not wrapped in box64`() {
+        val fake = FakeLauncher()
+        launcher(fake).start(request(command = listOf("ls", "-l")))
+        val command = fake.commands.single()
+        assertFalse(command.contains(File(nativeDir, "libbox64.so").absolutePath))
+        assertEquals(listOf("ls", "-l"), command.subList(command.size - 2, command.size))
+    }
+
+    @Test
+    fun `needsBox64 recognises windows binaries only`() {
+        val launcher = launcher()
+        assertTrue(launcher.needsBox64(listOf("wine64", "cmd")))
+        assertTrue(launcher.needsBox64(listOf("/opt/wine/bin/wine", "notepad.exe")))
+        assertTrue(launcher.needsBox64(listOf("C:\\office\\winword.exe")))
+        assertFalse(launcher.needsBox64(listOf("ls")))
+        assertFalse(launcher.needsBox64(listOf("box64", "wine64")))
+        assertFalse(launcher.needsBox64(emptyList()))
+    }
+
+    @Test
+    fun `the environment is explicit and carries the container's tuning`() {
+        val fake = FakeLauncher()
+        launcher(fake).start(request())
+        val env = fake.environments.single()
+        assertEquals(":100", env["DISPLAY"])
+        assertEquals("/root/.wine", env["WINEPREFIX"])
+        assertEquals(rootfs.absolutePath, env["PROOT_ROOTFS"])
+        assertEquals(File(nativeDir, "libproot-loader.so").absolutePath, env["PROOT_LOADER"])
+        assertEquals("/tmp/pulse", env["PULSE_SERVER"])
+        assertEquals("2", env["BOX64_DYNAREC_BIGBLOCK"]) // the Office preset
+        assertEquals(env.keys.toList(), env.keys.sorted()) // deterministic for diagnostics
+    }
+
+    // --- lifecycle -----------------------------------------------------------
+
+    @Test
+    fun `starting twice is refused while one is running`() {
+        val launcher = launcher()
+        assertTrue(launcher.start(request()).success)
+        val second = launcher.start(request())
+        assertEquals(LaunchFailure.ALREADY_RUNNING, second.failure)
+        assertEquals(1, launcher.runningIds().size)
+    }
+
+    @Test
+    fun `stop destroys the process and clears the state`() {
+        val handle = FakeHandle()
+        val launcher = launcher(FakeLauncher(handle))
+        launcher.start(request())
+        val result = launcher.stop(container.id)
+        assertTrue(result.success)
+        assertEquals(1, handle.destroyed)
+        assertEquals(ContainerStatus.STOPPED, launcher.statusOf(container.id))
+        assertTrue(launcher.runningIds().isEmpty())
+        assertNull(launcher.commandOf(container.id))
+        assertTrue(log.snapshot().any { it.text.contains("stopped by user") })
+    }
+
+    @Test
+    fun `stopping something that is not running is a no-op success`() {
+        val result = launcher().stop("nothing")
+        assertTrue(result.success)
+        assertEquals("Not running.", result.message)
+    }
+
+    @Test
+    fun `restart stops then starts again`() {
+        val handle = FakeHandle()
+        val launcher = launcher(FakeLauncher(handle))
+        launcher.start(request())
+        val result = launcher.restart(request())
+        assertTrue(result.success)
+        assertEquals(1, handle.destroyed)
+        assertEquals(ContainerStatus.RUNNING, launcher.statusOf(container.id))
+    }
+
+    @Test
+    fun `a zero exit code leaves the container stopped, a failure marks it errored`() {
+        val launcher = launcher()
+        launcher.start(request())
+        launcher.onProcessExited(container.id, 0)
+        assertEquals(ContainerStatus.STOPPED, launcher.statusOf(container.id))
+        assertTrue(log.snapshot().any { it.text.contains("exited with code 0") })
+
+        launcher.start(request())
+        launcher.onProcessExited(container.id, 137)
+        assertEquals(ContainerStatus.ERROR, launcher.statusOf(container.id))
+        assertTrue(log.filter(LineKind.ERROR).any { it.text.contains("code 137") })
+    }
+
+    @Test
+    fun `a timeout is reported as no exit code`() {
+        val launcher = launcher()
+        launcher.start(request())
+        launcher.onProcessExited(container.id, null)
+        assertEquals(ContainerStatus.ERROR, launcher.statusOf(container.id))
+        assertTrue(log.snapshot().any { it.text.contains("no code (timed out)") })
+    }
+
+    @Test
+    fun `stopAll empties the running set - what the service calls on destroy`() {
+        val launcher = launcher()
+        launcher.start(request())
+        launcher.start(request().copy(container = container.copy(id = "games", name = "Games")))
+        assertEquals(2, launcher.runningIds().size)
+        launcher.stopAll()
+        assertTrue(launcher.runningIds().isEmpty())
+        assertEquals(ContainerStatus.STOPPED, launcher.statusOf("games"))
+    }
+
+    @Test
+    fun `the launch is logged with its full command line for diagnostics`() {
+        val launcher = launcher()
+        launcher.start(request())
+        val line = log.snapshot().first { it.text.startsWith("starting Office:") }
+        assertEquals(LineKind.SYSTEM, line.kind)
+        assertTrue(line.text.contains("libproot.so"))
+        assertTrue(line.text.contains("wine64"))
+        assertNotNull(launcher.binaries.loaderPaths()["PROOT_LOADER"])
+    }
+}
