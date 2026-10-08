@@ -28,6 +28,7 @@ import dev.win11we.shell.runtime.ContainerService
 import dev.win11we.shell.runtime.LauncherRuntime
 import dev.win11we.shell.runtime.NativeBinaries
 import dev.win11we.shell.runtime.RuntimeHolder
+import dev.win11we.shell.runtime.RuntimePaths
 import dev.win11we.shell.ui.containers.ContainerManagerState
 import dev.win11we.shell.ui.diagnostics.DiagnosticsState
 import dev.win11we.shell.ui.terminal.LocalCommandExecutor
@@ -140,6 +141,15 @@ class WindowManager(
         }
     }
 
+    /**
+     * Builds (and discards) the payload for [app] so the classes, PackageManager queries
+     * and disk reads behind it are warm before the user first taps the pin. Called from a
+     * background thread at startup; never from composition.
+     */
+    fun warmPayload(app: AppSpec) {
+        payloadFactory(app)
+    }
+
     fun close(window: WindowState) {
         windows.remove(window)
         if (focusedId == window.id) focusedId = windows.maxByOrNull { it.zIndex }?.id
@@ -182,7 +192,7 @@ fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager
             "explorer" -> ExplorerState(root = if (root.isDirectory) root else File(root.parent ?: "/"))
             "notepad" -> NotepadState()
             "browser" -> BrowserState(
-                installed = Browsers.resolve(appContext),
+                installed = Browsers.installed(appContext),
                 preferredPackage = store.browserPackage.ifBlank { null },
                 chosenEngineId = store.browserEngine.ifBlank { null },
             )
@@ -203,6 +213,7 @@ fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager
                     nativeLibraryDirPath = appContext.applicationInfo.nativeLibraryDir,
                     pins = NativeBinaries.loadPinsFromAssets(appContext.assets),
                 ),
+                rootfsDir = RuntimePaths.defaultRootfs(appContext.filesDir),
             )
             "terminal" -> TerminalState(
                 executor = LocalCommandExecutor(

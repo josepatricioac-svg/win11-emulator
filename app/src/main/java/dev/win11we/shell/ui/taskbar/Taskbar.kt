@@ -82,24 +82,9 @@ fun Taskbar(
                 ),
             )
             pinned.forEach { app ->
-                val instances = manager.windows.filter { it.app.id == app.id }
-                val running = instances.isNotEmpty()
-                val focused = instances.any { manager.focusedId == it.id && !it.minimized }
-                TaskbarButton(
-                    iconRes = app.iconRes,
-                    label = app.label,
-                    running = running,
-                    focused = focused,
-                    onClick = { manager.toggle(app, desktopSize) },
-                    menuEntries = buildList {
-                        instances.filterNot { it.closing }.forEachIndexed { index, window ->
-                            val name = "${app.label}${if (instances.size > 1) " ${index + 1}" else ""}"
-                            add(PinMenuEntry(if (window.minimized) "Restore  ·  $name" else name) { manager.focus(window) })
-                        }
-                        add(PinMenuEntry("New window") { manager.open(app, desktopSize) })
-                        add(PinMenuEntry("Task Manager") { onOpenApp(ShellApps.first { it.id == "taskmgr" }) })
-                    },
-                )
+                // Its own composable: the window-list reads stay scoped to this pin, so
+                // dragging or resizing a window does not recompose the whole taskbar.
+                AppPin(app = app, manager = manager, desktopSize = desktopSize, onOpenApp = onOpenApp)
             }
         }
 
@@ -112,4 +97,31 @@ fun Taskbar(
             ClockButton()
         }
     }
+}
+
+@Composable
+private fun AppPin(
+    app: AppSpec,
+    manager: WindowManager,
+    desktopSize: DpSize,
+    onOpenApp: (AppSpec) -> Unit,
+) {
+    val instances = manager.windows.filter { it.app.id == app.id }
+    val running = instances.isNotEmpty()
+    val focused = instances.any { manager.focusedId == it.id && !it.minimized }
+    TaskbarButton(
+        iconRes = app.iconRes,
+        label = app.label,
+        running = running,
+        focused = focused,
+        onClick = { manager.toggle(app, desktopSize) },
+        menuEntries = buildList {
+            instances.filterNot { it.closing }.forEachIndexed { index, window ->
+                val name = "${app.label}${if (instances.size > 1) " ${index + 1}" else ""}"
+                add(PinMenuEntry(if (window.minimized) "Restore  ·  $name" else name) { manager.focus(window) })
+            }
+            add(PinMenuEntry("New window") { manager.open(app, desktopSize) })
+            add(PinMenuEntry("Task Manager") { onOpenApp(ShellApps.first { it.id == "taskmgr" }) })
+        },
+    )
 }

@@ -70,6 +70,7 @@ fun DiagnosticsScreen(state: DiagnosticsState, modifier: Modifier = Modifier) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             ActionChip("Re-check binaries") { state.check() }
             ActionChip(if (state.running) "Running..." else "Run --version probes") { state.runProbes() }
+            ActionChip(if (state.selfTestRunning) "Testing..." else "Run self-test") { state.runSelfTest() }
         }
         Spacer(Modifier.height(14.dp))
 
@@ -109,22 +110,18 @@ fun DiagnosticsScreen(state: DiagnosticsState, modifier: Modifier = Modifier) {
         state.probes.forEach { probe -> ProbeRow(probe.id, probe.passed, probe.summary, probe.command, probe.output, probe.durationMillis) }
         Spacer(Modifier.height(14.dp))
 
-        Label("What R4 will run")
-        ProotCommand.selfTestPlan(
-            prootBinary = File(state.nativeLibraryDir, "libproot.so"),
-            box64Binary = File(state.nativeLibraryDir, "libbox64.so"),
-            rootfsDir = File("/data/user/0/dev.win11we.shell/files/rootfs"),
-            prefixDir = File("/data/user/0/dev.win11we.shell/files/containers/default/prefix"),
-        ).forEachIndexed { index, command ->
+        Label("Self-test (R4)")
+        val report = state.selfTest
+        if (report == null) {
             Text(
-                text = "${index + 1}. " + command.joinToString(" "),
-                color = TextSecondary,
-                fontSize = 10.5.sp,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(vertical = 2.dp),
+                text = "Runs box64 --version, then wine64 --version and `wine64 cmd /c echo hello` inside proot. " +
+                    "Steps without prerequisites are skipped with the reason, never passed.",
+                color = TextTertiary,
+                fontSize = 11.5.sp,
             )
+        } else {
+            SelfTestSummary(report)
+            report.steps.forEachIndexed { index, step -> SelfTestRow(index + 1, step) }
         }
         Spacer(Modifier.height(14.dp))
 
@@ -146,6 +143,92 @@ fun DiagnosticsScreen(state: DiagnosticsState, modifier: Modifier = Modifier) {
             color = TextTertiary,
             fontSize = 11.sp,
         )
+    }
+}
+
+@Composable
+private fun SelfTestSummary(report: dev.win11we.shell.runtime.SelfTestReport) {
+    val colour = when {
+        report.allGreen -> OkGreen
+        report.failed > 0 -> ErrorRed
+        else -> WarnAmber
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(CardShape)
+            .background(CardSurface)
+            .border(1.dp, colour.copy(alpha = 0.45f), CardShape)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(10.dp).clip(CircleShape).background(colour))
+        Spacer(Modifier.width(11.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = when {
+                    report.allGreen -> "All green"
+                    report.failed > 0 -> "${report.failed} step(s) failed"
+                    else -> "Incomplete - ${report.skipped} step(s) skipped"
+                },
+                color = TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(report.summary(), color = TextTertiary, fontSize = 11.sp)
+        }
+    }
+    Spacer(Modifier.height(8.dp))
+}
+
+@Composable
+private fun SelfTestRow(index: Int, step: dev.win11we.shell.runtime.SelfTestStep) {
+    val colour = when (step.verdict) {
+        dev.win11we.shell.runtime.StepVerdict.PASS -> OkGreen
+        dev.win11we.shell.runtime.StepVerdict.FAIL -> ErrorRed
+        dev.win11we.shell.runtime.StepVerdict.SKIPPED -> WarnAmber
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(CardShape)
+            .background(CardSurface)
+            .border(1.dp, colour.copy(alpha = 0.35f), CardShape)
+            .padding(12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("$index.", color = TextTertiary, fontSize = 11.5.sp)
+            Spacer(Modifier.width(8.dp))
+            Text(step.label, color = TextPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(step.verdict.name, color = colour, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(8.dp))
+            Text("${step.durationMillis}ms", color = TextTertiary, fontSize = 10.5.sp)
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "$ ${step.command.joinToString(" ")}",
+            color = TextSecondary,
+            fontSize = 10.5.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+        if (step.exitCode != null) {
+            Text("exit ${step.exitCode}", color = TextTertiary, fontSize = 10.5.sp)
+        }
+        step.reason?.let { reason ->
+            Spacer(Modifier.height(4.dp))
+            Text(reason, color = if (step.verdict == dev.win11we.shell.runtime.StepVerdict.FAIL) ErrorRed else WarnAmber,
+                fontSize = 11.sp)
+        }
+        if (step.output.isNotBlank()) {
+            Spacer(Modifier.height(6.dp))
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).background(Color(0xFF0B0F16)).padding(9.dp),
+            ) {
+                Text(step.output, color = Color(0xFF9FE8B8), fontSize = 10.5.sp, fontFamily = FontFamily.Monospace)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
     }
 }
 

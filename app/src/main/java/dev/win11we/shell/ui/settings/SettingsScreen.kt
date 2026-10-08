@@ -196,7 +196,7 @@ private fun PersonalisationPage(store: SettingsStore) {
 @Composable
 private fun AppsPage(store: SettingsStore) {
     val context = LocalContext.current
-    val installed = remember { Browsers.resolve(context) }
+    val installed = remember { Browsers.installed(context) }
     PageTitle("Apps")
     Hint(
         "Default browser engine. Android browsers launch now; desktop engines run inside the " +
@@ -268,7 +268,9 @@ private fun StoragePage() {
             subtitle = String.format(Locale.US, "%.1f GB free of %.1f GB", freeGb, totalGb),
         )
     }
-    Hint("The Ubuntu rootfs and Wine are downloaded on first container start (R3), with a pinned SHA-256 and a free-space check. Nothing is bundled in the APK.")
+    Spacer(Modifier.height(14.dp))
+    PageTitle("Runtime download")
+    RootfsPage()
 }
 
 @Composable
@@ -291,11 +293,15 @@ private fun ContainersPage(store: SettingsStore) {
 private fun DiagnosticsPage() {
     PageTitle("Diagnostics")
     SettingsCard {
-        SettingsRow(title = "box64 --version", subtitle = "Unavailable until the runtime is shipped (R1)")
-        SettingsRow(title = "wine64 --version", subtitle = "Unavailable until the rootfs is downloaded (R3)")
-        SettingsRow(title = "wine64 cmd /c echo hello", subtitle = "Self-test arrives with R4, results shown green/red")
+        SettingsRow(title = "box64 --version", subtitle = "Step 1 - runs the shipped translator")
+        SettingsRow(title = "wine64 --version", subtitle = "Step 2 - runs inside proot with the downloaded rootfs")
+        SettingsRow(title = "wine64 cmd /c echo hello", subtitle = "Step 3 - a real Windows process must print hello")
     }
-    Hint("Logs will be written by ContainerService and shown here with the failing command and a log excerpt.")
+    Hint(
+        "Run these from Start > All apps > Diagnostics > Run self-test. Each row is green/red/skipped with the " +
+            "exact failing command and a log excerpt; steps without prerequisites are skipped, never passed. " +
+            "ContainerService streams into the same log (Terminal: `log`).",
+    )
 }
 
 @Composable

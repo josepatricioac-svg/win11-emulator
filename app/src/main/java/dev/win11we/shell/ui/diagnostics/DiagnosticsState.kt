@@ -8,10 +8,16 @@ import dev.win11we.shell.ui.terminal.LineKind
 import dev.win11we.shell.runtime.PrepareStatus
 import dev.win11we.shell.ui.terminal.LogBuffer
 import dev.win11we.shell.ui.terminal.TerminalLine
+import dev.win11we.shell.runtime.JvmProcessRunner
 import dev.win11we.shell.runtime.NativeBinaries
+import dev.win11we.shell.runtime.ProcessRunner
 import dev.win11we.shell.runtime.PrepareResult
 import dev.win11we.shell.runtime.ProbeResult
 import dev.win11we.shell.runtime.RuntimeProbe
+import dev.win11we.shell.runtime.SelfTestReport
+import dev.win11we.shell.runtime.SelfTestRunner
+import dev.win11we.shell.runtime.SelfTestStep
+import dev.win11we.shell.runtime.StepVerdict
 import java.io.File
 
 /**
@@ -24,6 +30,9 @@ class DiagnosticsState(
     val binaries: NativeBinaries,
     val probe: RuntimeProbe = RuntimeProbe(binaries),
     val log: LogBuffer = LogBuffer(),
+    val rootfsDir: File? = null,
+    /** Injectable so the self-test is testable without spawning anything. */
+    private val runner: ProcessRunner = JvmProcessRunner(),
 ) {
     var prepareResult by mutableStateOf<PrepareResult?>(null)
         private set
@@ -71,6 +80,51 @@ class DiagnosticsState(
         }
         return results
     }
+
+    var selfTest by mutableStateOf<SelfTestReport?>(null)
+        private set
+    var selfTestRunning by mutableStateOf(false)
+        private set
+
+    /**
+     * R4: box64 --version, wine64 --version and `wine64 cmd /c echo hello` through the
+     * real proot command line. Steps whose prerequisites are missing are skipped with
+     * the reason named, so the screen never claims a green it did not earn.
+     */
+    fun runSelfTest(): SelfTestReport {
+        selfTestRunning = true
+        val selfTestRunner = SelfTestRunner(
+            binaries = binaries,
+            rootfsDir = rootfsDir ?: File("/nonexistent"),
+            runner = runner,
+        )
+        val report = try {
+            selfTestRunner.run()
+        } finally {
+            selfTestRunning = false
+        }
+        selfTest = report
+        log.add(TerminalLine(LineKind.SYSTEM, "self-test: ${report.summary()}"))
+        report.steps.forEach { step ->
+            log.add(
+                TerminalLine(
+                    when (step.verdict) {
+                        StepVerdict.PASS -> LineKind.INFO
+                        StepVerdict.FAIL -> LineKind.ERROR
+                        StepVerdict.SKIPPED -> LineKind.SYSTEM
+                    },
+                    "${step.id} ${step.verdict}${step.reason?.let { " - $it" } ?: ""}",
+                ),
+            )
+        }
+        report.firstFailure?.let { failure ->
+            log.add(TerminalLine(LineKind.ERROR, "failing command: ${failure.command.joinToString(" ")}"))
+            log.add(TerminalLine(LineKind.ERROR, "log excerpt:\n${failure.output.ifBlank { "(no output)" }}"))
+        }
+        return report
+    }
+
+    fun selfTestSteps(): List<SelfTestStep> = selfTest?.steps ?: emptyList()
 
     fun logExcerpt(lines: Int = 20): String = log.tail(lines)
 }

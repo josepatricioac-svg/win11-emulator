@@ -49,6 +49,8 @@ import dev.win11we.shell.window.WindowState
 
 private val FrameShape = RoundedCornerShape(10.dp)
 private val TitleBarDark = Color(0xFF252B36)
+private val FocusedElevation = 26.dp
+private val RestElevation = 10.dp
 private val TitleHeight = 40.dp
 private val HandleEdge = 10.dp
 private val HandleCorner = 22.dp
@@ -63,13 +65,15 @@ fun WindowFrame(
     visual: WindowVisual,
     onSnapPreview: (SnapZone) -> Unit,
 ) {
-    val bounds = remember(window.mode, window.offset, window.size, desktopSize) { window.bounds(desktopSize) }
     val lightContent = window.app.id == "notepad"
     val consoleContent = window.app.id == "terminal"
+    val elevation = if (focused) FocusedElevation else RestElevation
 
     BoxWithConstraints(
         modifier = Modifier
             // Open/close: fade + settle from 94% scale, anchored at the caption.
+            // Everything here reads animation state inside the layer lambda, so the
+            // 60fps ramp never recomposes this window (or its app content).
             .graphicsLayer {
                 alpha = visual.alpha
                 scaleX = visual.scale
@@ -77,10 +81,14 @@ fun WindowFrame(
                 translationY = size.height * 0.02f * (1f - visual.progress)
                 transformOrigin = TransformOrigin(0.5f, 0f)
             }
-            .offset { IntOffset(bounds.offset.x.roundToPx(), bounds.offset.y.roundToPx()) }
-            .size(bounds.size)
+            // Geometry is read inside the lambda too: dragging recomposes nothing.
+            .offset {
+                val bounds = window.bounds(desktopSize)
+                IntOffset(bounds.offset.x.roundToPx(), bounds.offset.y.roundToPx())
+            }
+            .size(window.sizeFor(desktopSize))
             .shadow(
-                elevation = (if (focused) 26.dp else 10.dp) * visual.progress,
+                elevation = elevation,
                 shape = FrameShape,
                 spotColor = Color.Black,
                 ambientColor = Color.Black,

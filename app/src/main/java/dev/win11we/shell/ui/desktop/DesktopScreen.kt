@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,6 +38,26 @@ fun DesktopScreen(store: SettingsStore) {
     var startOpen by remember { mutableStateOf(false) }
 
     Win11Theme(darkTheme = store.themeMode == ThemeMode.DARK) {
+    // Warm the caches that opening a window would otherwise pay for on the main thread:
+    // the PackageManager browser query and the SHA-256 of the shipped binaries.
+    LaunchedEffect(Unit) {
+        dev.win11we.shell.ui.browser.Browsers.warmUp(context)
+        val launcher = dev.win11we.shell.runtime.RuntimeHolder.init(context, store.rootfsLocation.ifBlank { null })
+        launcher.binaries.warmChecksums()
+        // Pay the first-window costs (class loading, PackageManager queries, disk reads,
+        // container list parsing) now, in the background, instead of on the first tap.
+        Thread {
+            runCatching {
+                dev.win11we.shell.window.ShellApps.forEach { app -> manager.warmPayload(app) }
+            }
+        }.apply {
+            name = "shell-warmup"
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+            start()
+        }
+    }
+
     BoxWithConstraints(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
         val taskbarHeight = 56.dp
         val desktopSize = DpSize(maxWidth, maxHeight - taskbarHeight)

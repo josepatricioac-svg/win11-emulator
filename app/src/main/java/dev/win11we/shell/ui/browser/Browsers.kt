@@ -36,6 +36,34 @@ object Browsers {
     const val PREFERRED_PACKAGE = "org.mozilla.firefox"
 
     /**
+     * PackageManager queries plus icon loading cost real milliseconds, so they happen
+     * once per process (and are warmed up in the background at startup) instead of on
+     * the main thread every time a Browser window opens.
+     */
+    @Volatile
+    private var cache: List<BrowserApp>? = null
+
+    fun installed(context: Context): List<BrowserApp> =
+        cache ?: resolve(context).also { cache = it }
+
+    /** Drops the cache; call after an install/uninstall or from a "refresh" action. */
+    fun invalidate() {
+        cache = null
+    }
+
+    /** Warms the cache off the caller's thread. Safe to call repeatedly. */
+    fun warmUp(context: Context) {
+        if (cache != null) return
+        val appContext = context.applicationContext
+        Thread { runCatching { cache = resolve(appContext) } }.apply {
+            name = "browser-resolve"
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+            start()
+        }
+    }
+
+    /**
      * Installed browsers, resolved two ways: a VIEW intent for http(s) (what the
      * system would use) plus the known package names, so browsers that are
      * installed but not registered as http handlers still show up.

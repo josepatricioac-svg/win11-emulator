@@ -100,7 +100,7 @@ fun WindowLayer(
     LaunchedEffect(manager, animated) {
         while (true) {
             val now = System.nanoTime()
-            val alive = manager.windows.map { it.id }
+            val alive = HashSet<Int>(manager.windows.size).apply { manager.windows.forEach { w -> add(w.id) } }
             lifecycles.keys.filterNot { it in alive }.forEach { id ->
                 lifecycles.remove(id)
                 visuals.remove(id)
@@ -154,11 +154,13 @@ fun WindowLayer(
 
     // Read the live list, not a snapshot taken during composition, otherwise a
     // window opened by this very recomposition would not be drawn at all.
+    // Reading the live list (not a snapshot taken during composition) keeps newly opened
+    // windows visible; `visuals` is only consulted for membership, so the per-frame
+    // animation values are read in the draw phase, never in composition.
     val ordered = manager.windows.filter { visuals.containsKey(it.id) }.sortedBy { it.zIndex }
     Box(modifier = modifier.fillMaxSize()) {
         for (window in ordered) {
             val visual = visuals[window.id] ?: continue
-            if (visual.alpha <= 0.01f) continue
             WindowFrame(
                 window = window,
                 desktopSize = desktopSize,

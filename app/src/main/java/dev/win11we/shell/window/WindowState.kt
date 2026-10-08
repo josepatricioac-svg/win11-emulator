@@ -57,6 +57,16 @@ class WindowState(
         )
     }
 
+    /**
+     * Size alone, for the layout modifier: cheaper than [bounds] because it does not
+     * allocate, and reading it inside a lambda keeps recomposition out of dragging.
+     */
+    fun sizeFor(desktop: DpSize): DpSize = when (mode) {
+        WindowMode.NORMAL -> size
+        WindowMode.MAXIMIZED -> desktop
+        WindowMode.SNAP_LEFT, WindowMode.SNAP_RIGHT -> DpSize(desktop.width / 2f, desktop.height)
+    }
+
     /** Float -> maximize (remembering the floating rect); anything else -> float. */
     fun toggleMaximize() {
         if (mode == WindowMode.NORMAL) {
