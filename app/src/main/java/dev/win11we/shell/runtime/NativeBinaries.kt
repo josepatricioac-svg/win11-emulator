@@ -89,15 +89,45 @@ class NativeBinaries(
         )
     }
 
+    /** Hashes are cached per file (path + size + mtime): a 10 MB binary is hashed once. */
+    private val hashCache = HashMap<String, Pair<FileStamp, String?>>()
+
+    private data class FileStamp(val size: Long, val modified: Long)
+
+    private fun cachedSha256(file: File): String? {
+        val key = file.absolutePath
+        val stamp = FileStamp(file.length(), file.lastModified())
+        val cached = hashCache[key]
+        if (cached != null && cached.first == stamp) return cached.second
+        val hash = sha256(file)
+        hashCache[key] = stamp to hash
+        return hash
+    }
+
+    /**
+     * Hashes every present binary on a background thread and caches the results, so
+     * opening Diagnostics does not hash megabytes on the main thread. Safe to call twice.
+     */
+    fun warmChecksums() {
+        val files = BinaryRole.entries.map { File(nativeLibraryDir, it.fileName) }.filter { it.isFile }
+        if (files.isEmpty()) return
+        Thread { files.forEach { cachedSha256(it) } }.apply {
+            name = "binary-hash"
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+            start()
+        }
+    }
+
     /** Verifies every present binary against its pin. Never throws. */
     fun verifyChecksums(): List<ChecksumResult> = BinaryRole.entries.map { role ->
         val binary = record(role)
         val pin = pinnedChecksums[role.fileName]?.trim()?.lowercase()
         when {
             !binary.present -> ChecksumResult(role, ChecksumStatus.MISSING, null)
-            pin.isNullOrBlank() -> ChecksumResult(role, ChecksumStatus.NOT_PINNED, sha256(binary.file))
+            pin.isNullOrBlank() -> ChecksumResult(role, ChecksumStatus.NOT_PINNED, cachedSha256(binary.file))
             else -> {
-                val actual = sha256(binary.file)
+                val actual = cachedSha256(binary.file)
                 ChecksumResult(
                     role = role,
                     status = if (actual != null && actual == pin) ChecksumStatus.MATCH else ChecksumStatus.MISMATCH,
