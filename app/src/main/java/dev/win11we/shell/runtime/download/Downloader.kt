@@ -186,21 +186,24 @@ class HttpTransfer(
         onProgress: (Long, Long) -> Unit,
         cancelled: () -> Boolean,
     ): Long {
-        val connection = URL(artifact.url).openConnection() as HttpURLConnection
+        val connection = open(artifact.url, fromByte, target.isFile)
         try {
-            connection.instanceFollowRedirects = true
-            connection.connectTimeout = connectTimeoutMillis
-            connection.readTimeout = readTimeoutMillis
-            connection.setRequestProperty("User-Agent", "Win11WE/1.0 (Android)")
-            val resuming = fromByte > 0 && target.isFile
-            if (resuming) connection.setRequestProperty("Range", "bytes=$fromByte-")
-            connection.connect()
             val code = connection.responseCode
+            val resuming = fromByte > 0 && target.isFile
             if (resuming && code == HttpURLConnection.HTTP_OK) {
                 throw ResumeNotSupportedException("Server ignored the Range request; restart the download.")
             }
             if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
-                throw IOException("HTTP $code from ${artifact.url}")
+                throw IOException("HTTP $code from ${connection.url}")
+            }
+            if (resuming) {
+                // A 206 whose Content-Range does not start where we asked would silently
+                // produce a corrupt tail, so refuse it instead of appending.
+                val range = connection.getHeaderField("Content-Range")
+                val start = range?.substringAfter("bytes ", "")?.substringBefore('-', "")?.toLongOrNull()
+                if (start != null && start != fromByte) {
+                    throw ResumeNotSupportedException("Server resumed at $start instead of $fromByte.")
+                }
             }
             val total = if (artifact.sizeBytes > 0) artifact.sizeBytes else connection.contentLengthLong + fromByte
 
@@ -224,5 +227,34 @@ class HttpTransfer(
         } finally {
             connection.disconnect()
         }
+    }
+
+    /**
+     * Opens the connection, following redirects by hand: `HttpURLConnection` will not
+     * cross protocols (http -> https), which cdimage mirrors do.
+     */
+    private fun open(url: String, fromByte: Long, hasPartial: Boolean, hops: Int = 0): HttpURLConnection {
+        if (hops > MAX_REDIRECTS) throw IOException("Too many redirects from $url")
+        val connection = URL(url).openConnection() as HttpURLConnection
+        connection.instanceFollowRedirects = false
+        connection.connectTimeout = connectTimeoutMillis
+        connection.readTimeout = readTimeoutMillis
+        connection.setRequestProperty("User-Agent", "Win11WE/1.0 (Android)")
+        if (fromByte > 0 && hasPartial) connection.setRequestProperty("Range", "bytes=$fromByte-")
+        connection.connect()
+        val code = connection.responseCode
+        val location = connection.getHeaderField("Location")
+        return if (code in 300..399 && !location.isNullOrBlank()) {
+            connection.disconnect()
+            val next = if (location.startsWith("http")) location else URL(URL(url), location).toString()
+            if (!next.startsWith("https://")) throw IOException("Refusing insecure redirect to $next")
+            open(next, fromByte, hasPartial, hops + 1)
+        } else {
+            connection
+        }
+    }
+
+    private companion object {
+        const val MAX_REDIRECTS = 5
     }
 }

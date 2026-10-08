@@ -10,6 +10,9 @@ object X11 {
     const val PROTOCOL_MAJOR = 11
     const val PROTOCOL_MINOR = 0
 
+    /** Release number reported in the setup reply: X11R6.4 clients expect 11.x here. */
+    const val RELEASE_NUMBER = 11 shl 16
+
     /** Vendor string reported to clients. Ours, not a real X.org one. */
     const val VENDOR = "Win11WE X server"
 
@@ -151,6 +154,8 @@ object X11 {
     const val EV_FOCUS_OUT = 10
     const val EV_EXPOSE = 12
     const val EV_GRAPHICS_EXPOSURE = 13
+    const val EV_MAP_REQUEST = 20
+    const val EV_CONFIGURE_REQUEST = 23
     const val EV_CREATE_NOTIFY = 16
     const val EV_DESTROY_NOTIFY = 17
     const val EV_UNMAP_NOTIFY = 18
@@ -183,6 +188,7 @@ object X11 {
     const val ERR_BAD_FONT = 7
     const val ERR_BAD_MATCH = 8
     const val ERR_BAD_DRAWABLE = 9
+    const val ERR_ACCESS = 10
     const val ERR_BAD_GC = 11
     const val ERR_BAD_COLORMAP = 12
     const val ERR_BAD_ALLOC = 17

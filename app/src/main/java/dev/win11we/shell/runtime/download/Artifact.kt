@@ -22,7 +22,9 @@ data class Artifact(
 ) {
     init {
         require(sha256.length == 64) { "pinned SHA-256 must be 64 hex characters" }
-        require(url.startsWith("https://") || url.startsWith("http://")) { "url must be http(s)" }
+        // https only: Android 9+ blocks cleartext by default, and a pinned hash is not a
+        // substitute for transport security when the URL also tells us the file name.
+        require(url.startsWith("https://")) { "artifact url must be https: $url" }
     }
 
     /** Where the verified file lands. */
@@ -66,7 +68,7 @@ object RuntimeManifest {
     val WINE64_DEB = Artifact(
         id = "wine64-deb",
         label = "wine64 9.0~repack-4build3 (arm64 .deb)",
-        url = "http://ports.ubuntu.com/pool/universe/w/wine/wine64_9.0~repack-4build3_arm64.deb",
+        url = "https://ports.ubuntu.com/pool/universe/w/wine/wine64_9.0~repack-4build3_arm64.deb",
         sha256 = "d44c0266f404ad59944ef7245d3162affa6415ee58193c5fa7cdc1aa105a46bd",
         sizeBytes = 244_164L,
         requiredFreeBytes = 200L * 1024 * 1024,
@@ -77,7 +79,7 @@ object RuntimeManifest {
     val WINE_ALL_DEB = Artifact(
         id = "wine-all-deb",
         label = "wine 9.0~repack-4build3 (all .deb)",
-        url = "http://ports.ubuntu.com/pool/universe/w/wine/wine_9.0~repack-4build3_all.deb",
+        url = "https://ports.ubuntu.com/pool/universe/w/wine/wine_9.0~repack-4build3_all.deb",
         sha256 = "5606f0f5677ac0fb882e3fdc8ce03a60232cdf2930e912ed3e42db2b9e0d5f7f",
         sizeBytes = 51_966L,
         requiredFreeBytes = 200L * 1024 * 1024,

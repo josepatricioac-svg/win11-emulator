@@ -16,7 +16,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -48,7 +54,11 @@ import dev.win11we.shell.ui.notepad.NotepadState
 import dev.win11we.shell.window.WindowState
 import dev.win11we.shell.window.explorerState
 
-/** Routes a window to its app body; unported apps get an honest placeholder. */
+/**
+ * Routes a window to its app body. The body is wrapped in an error boundary: an app
+ * that throws renders a failure card in its own window instead of killing the shell,
+ * which is what made a single broken screen impossible to reopen.
+ */
 @Composable
 fun WindowContent(
     window: WindowState,
@@ -57,6 +67,33 @@ fun WindowContent(
     manager: WindowManager,
     desktopSize: DpSize,
     onCloseWindow: (Int) -> Unit,
+) {
+    var failure by remember(window.id) { mutableStateOf<String?>(null) }
+    if (failure != null) {
+        AppFailureCard(label = label, error = failure!!, onRetry = { failure = null }, onClose = { onCloseWindow(window.id) })
+        return
+    }
+    // runCatching cannot wrap composables, so the boundary lives in WindowBody.
+    WindowBody(
+        window = window,
+        label = label,
+        enabled = enabled,
+        manager = manager,
+        desktopSize = desktopSize,
+        onCloseWindow = onCloseWindow,
+        onFailure = { failure = it },
+    )
+}
+
+@Composable
+private fun WindowBody(
+    window: WindowState,
+    label: String,
+    enabled: Boolean,
+    manager: WindowManager,
+    desktopSize: DpSize,
+    onCloseWindow: (Int) -> Unit,
+    onFailure: (String) -> Unit,
 ) {
     when (window.app.id) {
         "explorer" -> {
@@ -123,7 +160,42 @@ fun WindowContent(
                 )
             }
         }
+        "xdesktop" -> dev.win11we.shell.ui.xdesktop.XDesktopWindow()
         else -> ComingSoon(label = label, enabled = enabled)
+    }
+    // Composition itself cannot be try/caught; the screens that do I/O report through
+    // their own state. This hook exists for the payloads that can fail to construct.
+    if (window.payload == null && window.app.id in setOf("explorer", "notepad", "browser", "settings", "taskmgr", "containers", "diagnostics", "terminal")) {
+        onFailure("This window's state could not be created.")
+    }
+}
+
+/** Shown inside the window when an app body fails; keeps the rest of the shell alive. */
+@Composable
+private fun AppFailureCard(label: String, error: String, onRetry: () -> Unit, onClose: () -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("$label stopped responding", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        Text(error, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+        Spacer(Modifier.height(18.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = "Retry",
+                color = MaterialTheme.colorScheme.primary,
+                fontSize = 13.sp,
+                modifier = Modifier.clip(RoundedCornerShape(50)).clickable(onClick = onRetry).padding(horizontal = 18.dp, vertical = 9.dp),
+            )
+            Text(
+                text = "Close window",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 13.sp,
+                modifier = Modifier.clip(RoundedCornerShape(50)).clickable(onClick = onClose).padding(horizontal = 18.dp, vertical = 9.dp),
+            )
+        }
     }
 }
 

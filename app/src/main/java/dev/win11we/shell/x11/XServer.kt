@@ -33,6 +33,14 @@ object XServer {
     var document: XDocument = defaultDocument(1280, 800)
         private set
 
+    /** The server's pixel memory; the Compose renderer (D1b) reads it. */
+    val displayList = XDisplayList()
+
+    /** Bumped on WM-driven changes so the renderer redraws even with no new drawing. */
+    @Volatile
+    var contentRevision: Long = 0
+        private set
+
     @Volatile
     var running: Boolean = false
         private set
@@ -46,9 +54,11 @@ object XServer {
         private set
 
     private val connections = mutableListOf<XConnection>()
+    private val outputs = HashMap<XConnection, java.io.OutputStream>()
     private val shutdown = AtomicBoolean(false)
     private var serverSocket: LocalServerSocket? = null
     private var acceptThread: Thread? = null
+    private var windowManager: XWindowManager? = null
 
     fun defaultDocument(widthPx: Int, heightPx: Int): XDocument {
         val rootId = X11.RESOURCE_ID_BASE
@@ -62,15 +72,29 @@ object XServer {
         )
     }
 
-    /** Resize the root (the native surface changed); existing windows are left alone. */
+    /** Resize the root (the native surface changed); windows and clients stay alive. */
     fun resizeScreen(widthPx: Int, heightPx: Int) {
-        val screen = document.screen
-        document = XDocument(
-            screen.copy(widthPx = widthPx, heightPx = heightPx),
-        )
-        val root = document.window(document.rootId)
-        root?.width = widthPx
-        root?.height = heightPx
+        document.setScreenSize(widthPx, heightPx)
+        applyWindowManager()
+    }
+
+    /**
+     * Installs the shell's in-process WM: it receives map/configure requests for
+     * top-level windows (SubstructureRedirect semantics) and places them itself.
+     */
+    fun attachWindowManager(wm: XWindowManager?) {
+        windowManager = wm
+        applyWindowManager()
+    }
+
+    private fun applyWindowManager() {
+        document.windowManager = windowManager
+        val root = document.window(document.rootId) ?: return
+        if (windowManager != null) {
+            root.eventMask = root.eventMask or EventMask.SUBSTRUCTURE_REDIRECT
+        } else {
+            root.eventMask = root.eventMask and EventMask.SUBSTRUCTURE_REDIRECT.inv()
+        }
     }
 
     /** Starts listening. Returns false with [lastError] set when the socket cannot be bound. */
@@ -103,6 +127,7 @@ object XServer {
         synchronized(connections) {
             connections.clear()
         }
+        synchronized(outputs) { outputs.clear() }
         clientCount = 0
         acceptThread?.interrupt()
         acceptThread = null
@@ -121,12 +146,14 @@ object XServer {
     }
 
     private fun serve(client: LocalSocket) {
-        val connection = XConnection(document)
+        val connection = XConnection(document, displayList)
         synchronized(connections) { connections.add(connection) }
         clientCount = synchronized(connections) { connections.size }
         try {
             val input = client.inputStream
             val output = client.outputStream
+            synchronized(outputs) { outputs[connection] = output }
+            document.externalFlush = { conn -> pushOutbox(conn) }
             val buffer = ByteArray(16 * 1024)
 
             // 1. The client opens with the connection setup request.
@@ -160,16 +187,59 @@ object XServer {
             Log.d(TAG, "client ended: ${error.message}")
         } finally {
             synchronized(connections) { connections.remove(connection) }
+            synchronized(outputs) { outputs.remove(connection) }
+            document.releaseRedirect(connection)
             clientCount = synchronized(connections) { connections.size }
             runCatching { client.close() }
         }
     }
 
     private fun flush(connection: XConnection, output: java.io.OutputStream) {
-        connection.drainOutbox().forEach { message ->
-            output.write(message)
+        val messages = connection.drainOutbox()
+        if (messages.isEmpty()) return
+        synchronized(connection) {
+            messages.forEach { message -> output.write(message) }
+            output.flush()
         }
-        output.flush()
+    }
+
+    /** Writes a connection's queued messages from any thread (WM-driven events). */
+    private fun pushOutbox(connection: XConnection) {
+        val output = synchronized(outputs) { outputs[connection] } ?: return
+        try {
+            flush(connection, output)
+        } catch (error: IOException) {
+            Log.d(TAG, "push failed: ${error.message}")
+        }
+    }
+
+    private fun broadcast(action: (XConnection) -> Unit) {
+        connections().forEach { connection ->
+            runCatching { action(connection) }
+            pushOutbox(connection)
+        }
+    }
+
+    /**
+     * Maps a window as the WM: applies the placement, then tells every client
+     * (MapNotify to root listeners, Expose to the window) and redraws.
+     */
+    fun wmMapWindow(id: Int, x: Int?, y: Int?, width: Int?, height: Int?) {
+        document.configure(id, x, y, width, height, null)
+        if (!document.mapWindow(id)) return
+        contentRevision++
+        val rootId = document.rootId
+        broadcast { connection ->
+            connection.sendEvent(rootId, X11.EV_MAP_NOTIFY, id)
+            connection.sendEvent(id, X11.EV_EXPOSE)
+        }
+    }
+
+    /** Applies a WM-approved geometry and notifies the client (ConfigureNotify). */
+    fun wmConfigureWindow(id: Int, x: Int?, y: Int?, width: Int?, height: Int?) {
+        if (!document.configure(id, x, y, width, height, null)) return
+        contentRevision++
+        broadcast { it.sendEvent(id, X11.EV_CONFIGURE_NOTIFY) }
     }
 
     private fun readFully(input: java.io.InputStream, buffer: ByteArray, count: Int): ByteArray? {
@@ -188,6 +258,25 @@ object XServer {
 
     /** Every live connection, for broadcasting input and WM messages. */
     fun connections(): List<XConnection> = synchronized(connections) { connections.toList() }
+
+    /**
+     * Registers an in-process connection (tests, and later in-app X clients) so
+     * broadcasts and input dispatch reach it. Without a socket in [outputs], its
+     * events simply accumulate in the connection's outbox.
+     */
+    fun register(connection: XConnection) {
+        synchronized(connections) {
+            if (connections.none { it === connection }) connections.add(connection)
+        }
+        clientCount = synchronized(connections) { connections.size }
+    }
+
+    fun unregister(connection: XConnection) {
+        synchronized(connections) { connections.removeAll { it === connection } }
+        synchronized(outputs) { outputs.remove(connection) }
+        document.releaseRedirect(connection)
+        clientCount = synchronized(connections) { connections.size }
+    }
 
     /** Feeds one input event to all clients that care (single-app server: usually one). */
     fun dispatchPointerMove(x: Int, y: Int) = connections().forEach { it.onPointerMove(x, y) }

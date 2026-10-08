@@ -5,6 +5,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.Snapshot
 import dev.win11we.shell.ui.terminal.LineKind
 import dev.win11we.shell.ui.terminal.LogBuffer
 import dev.win11we.shell.ui.terminal.TerminalLine
@@ -49,8 +50,22 @@ class RootfsManager(
         private set
     private var cancelRequested = false
 
-    init {
-        artifacts.forEach { states[it.id] = scan(it) }
+    /** Hashes are cached per file stamp: re-scanning never re-reads 27 MB. */
+    private val hashCache = HashMap<String, Pair<Long, String?>>()
+
+    /**
+     * Construction must stay free of disk I/O: this object is created during
+     * composition, and hashing a 27 MB archive on the UI thread stalls the shell.
+     * The initial scan happens in [refreshAsync].
+     */
+    private var scanned = false
+
+    private fun cachedSha256(file: File): String? {
+        val stamp = file.length()
+        hashCache[file.absolutePath]?.takeIf { it.first == stamp }?.let { return it.second }
+        val hash = DownloadSession.sha256(file)
+        hashCache[file.absolutePath] = stamp to hash
+        return hash
     }
 
     fun artifact(id: String): Artifact? = artifacts.firstOrNull { it.id == id }
@@ -61,16 +76,17 @@ class RootfsManager(
     val rootfsReady: Boolean
         get() = rootfsDir.isDirectory && File(rootfsDir, "bin").isDirectory && File(rootfsDir, "usr").isDirectory
 
-    /** Reads what is already on disk without touching the network. */
+    /** Reads what is already on disk without touching the network. May hash a file. */
     fun scan(artifact: Artifact): ArtifactState {
         val target = artifact.targetFile(downloadDir)
         val partial = artifact.partialFile(downloadDir)
         return when {
             artifact.id == RuntimeManifest.ROOTFS.id && rootfsReady -> ArtifactState.READY
-            target.isFile -> if (DownloadSession.sha256(target) == artifact.sha256) {
+            target.isFile -> if (cachedSha256(target) == artifact.sha256) {
                 ArtifactState.VERIFIED
             } else {
                 target.delete()
+                hashCache.remove(target.absolutePath)
                 ArtifactState.FAILED
             }
             partial.isFile -> ArtifactState.PARTIAL
@@ -80,6 +96,42 @@ class RootfsManager(
 
     fun rescan() {
         artifacts.forEach { states[it.id] = scan(it) }
+        scanned = true
+    }
+
+    /**
+     * Scans on a low-priority background thread and publishes through a snapshot, so
+     * the UI never blocks and background writes stay visible to Compose.
+     */
+    fun refreshAsync(onDone: () -> Unit = {}) {
+        if (scanned && !forceRescan) {
+            onDone()
+            return
+        }
+        forceRescan = false
+        Thread {
+            runCatching {
+                val result = artifacts.associate { it.id to scan(it) }
+                Snapshot.withMutableSnapshot {
+                    result.forEach { (id, state) -> states[id] = state }
+                    scanned = true
+                }
+            }
+            runCatching { onDone() }
+        }.apply {
+            name = "rootfs-scan"
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+            start()
+        }
+    }
+
+    private var forceRescan = false
+
+    /** Next [refreshAsync] re-reads the disk even if a scan already happened. */
+    fun invalidateScan() {
+        forceRescan = true
+        hashCache.clear()
     }
 
     fun cancel() {
@@ -92,34 +144,72 @@ class RootfsManager(
      */
     fun download(artifact: Artifact): DownloadResult {
         if (busy) return DownloadResult(DownloadOutcome.CANCELLED, "Another download is already running.")
-        busy = true
-        cancelRequested = false
-        states[artifact.id] = ArtifactState.DOWNLOADING
-        progress[artifact.id] = 0f
+        setState(artifact.id, ArtifactState.DOWNLOADING)
+        Snapshot.withMutableSnapshot {
+            busy = true
+            cancelRequested = false
+            progress[artifact.id] = 0f
+        }
         log.add(TerminalLine(LineKind.SYSTEM, "downloading ${artifact.fileName} from ${artifact.url}"))
-        val result = session.download(
-            artifact = artifact,
-            dir = downloadDir,
-            onProgress = { done, total ->
-                progress[artifact.id] = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f
-            },
-            cancelled = { cancelRequested },
-        )
-        states[artifact.id] = when (result.outcome) {
+        val result = try {
+            session.download(
+                artifact = artifact,
+                dir = downloadDir,
+                onProgress = { done, total ->
+                    Snapshot.withMutableSnapshot {
+                        progress[artifact.id] = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f
+                    }
+                },
+                cancelled = { cancelRequested },
+            )
+        } catch (error: Throwable) {
+            // A crash here used to take the whole process down: no permission, no network,
+            // no storage. It is a failed download now.
+            DownloadResult(
+                DownloadOutcome.NETWORK_ERROR,
+                "${error.javaClass.simpleName}: ${error.message}",
+            )
+        }
+        val newState = when (result.outcome) {
             DownloadOutcome.VERIFIED, DownloadOutcome.ALREADY_VERIFIED -> ArtifactState.VERIFIED
             DownloadOutcome.CANCELLED -> ArtifactState.PARTIAL
             else -> ArtifactState.FAILED
         }
-        progress[artifact.id] = if (result.success) 1f else progress[artifact.id] ?: 0f
-        messages[artifact.id] = result.message
+        Snapshot.withMutableSnapshot {
+            states[artifact.id] = newState
+            progress[artifact.id] = if (result.success) 1f else progress[artifact.id] ?: 0f
+            messages[artifact.id] = result.message
+            busy = false
+        }
         log.add(
             TerminalLine(
                 if (result.success) LineKind.INFO else LineKind.ERROR,
                 "${artifact.id}: ${result.outcome} - ${result.message}",
             ),
         )
-        busy = false
+        invalidateScan()
         return result
+    }
+
+    /** UI-side message setter (snapshot-safe, callable from any thread). */
+    fun setMessage(id: String, message: String) {
+        Snapshot.withMutableSnapshot { messages[id] = message }
+    }
+
+    /** Last resort for worker threads: never let an exception escape into the process. */
+    fun reportFailure(what: String, error: Throwable) {
+        val message = "$what failed: ${error.javaClass.simpleName}: ${error.message}"
+        Snapshot.withMutableSnapshot { busy = false }
+        artifacts.firstOrNull { it.id == what || message.contains(it.fileName) }?.let { artifact ->
+            setState(artifact.id, ArtifactState.FAILED)
+            setMessage(artifact.id, message)
+        }
+        log.add(TerminalLine(LineKind.ERROR, message))
+    }
+
+    /** All state writes from worker threads go through a snapshot so Compose sees them. */
+    private fun setState(id: String, state: ArtifactState) {
+        Snapshot.withMutableSnapshot { states[id] = state }
     }
 
     /**
@@ -128,35 +218,37 @@ class RootfsManager(
      */
     fun import(artifact: Artifact, input: InputStream, sourceName: String): DownloadResult {
         if (busy) return DownloadResult(DownloadOutcome.CANCELLED, "Another download is already running.")
-        busy = true
-        downloadDir.mkdirs()
-        states[artifact.id] = ArtifactState.VERIFYING
+        Snapshot.withMutableSnapshot { busy = true }
+        runCatching { downloadDir.mkdirs() }
+        setState(artifact.id, ArtifactState.VERIFYING)
         val target = artifact.targetFile(downloadDir)
         val written = try {
             target.outputStream().use { output -> input.copyTo(output) }
             target.length()
-        } catch (error: Exception) {
-            busy = false
-            states[artifact.id] = ArtifactState.FAILED
+        } catch (error: Throwable) {
+            Snapshot.withMutableSnapshot { busy = false }
+            setState(artifact.id, ArtifactState.FAILED)
             val message = "Import failed: ${error.javaClass.simpleName}: ${error.message}"
             messages[artifact.id] = message
             log.add(TerminalLine(LineKind.ERROR, message))
             return DownloadResult(DownloadOutcome.NETWORK_ERROR, message)
         }
-        val hash = DownloadSession.sha256(target)
-        busy = false
+        val hash = cachedSha256(target)
+        Snapshot.withMutableSnapshot { busy = false }
         return if (hash == artifact.sha256) {
-            states[artifact.id] = ArtifactState.VERIFIED
+            setState(artifact.id, ArtifactState.VERIFIED)
             val message = "Imported $sourceName (${DownloadSession.formatBytes(written)}), SHA-256 matches the pin."
-            messages[artifact.id] = message
+            Snapshot.withMutableSnapshot { messages[artifact.id] = message }
+            invalidateScan()
             log.add(TerminalLine(LineKind.INFO, message))
             DownloadResult(DownloadOutcome.VERIFIED, message, written, hash)
         } else {
-            target.delete()
-            states[artifact.id] = ArtifactState.FAILED
+            runCatching { target.delete() }
+            hashCache.remove(target.absolutePath)
+            setState(artifact.id, ArtifactState.FAILED)
             val message = "Imported file does not match the pinned SHA-256 for ${artifact.fileName} " +
                 "(expected ${artifact.sha256.take(16)}…, got ${hash?.take(16) ?: "unreadable"}). Nothing was kept."
-            messages[artifact.id] = message
+            Snapshot.withMutableSnapshot { messages[artifact.id] = message }
             log.add(TerminalLine(LineKind.ERROR, message))
             DownloadResult(DownloadOutcome.HASH_MISMATCH, message, written, hash)
         }
@@ -170,45 +262,65 @@ class RootfsManager(
     fun extract(artifact: Artifact = RuntimeManifest.ROOTFS): Boolean {
         val archive = artifact.targetFile(downloadDir)
         if (!archive.isFile) {
-            messages[artifact.id] = "Nothing to extract: download it first."
-            states[artifact.id] = ArtifactState.NOT_DOWNLOADED
+            Snapshot.withMutableSnapshot {
+                messages[artifact.id] = "Nothing to extract: download it first."
+                states[artifact.id] = ArtifactState.NOT_DOWNLOADED
+            }
             return false
         }
-        if (DownloadSession.sha256(archive) != artifact.sha256) {
-            messages[artifact.id] = "Refusing to extract: the archive does not match its pinned SHA-256."
-            states[artifact.id] = ArtifactState.FAILED
+        if (cachedSha256(archive) != artifact.sha256) {
+            hashCache.remove(archive.absolutePath)
+            Snapshot.withMutableSnapshot {
+                messages[artifact.id] = "Refusing to extract: the archive does not match its pinned SHA-256."
+                states[artifact.id] = ArtifactState.FAILED
+            }
             log.add(TerminalLine(LineKind.ERROR, "extract refused for ${artifact.fileName}: hash mismatch"))
             return false
         }
-        states[artifact.id] = ArtifactState.EXTRACTING
-        val ok = extractor(archive, rootfsDir)
-        states[artifact.id] = if (ok && rootfsReady) ArtifactState.READY else ArtifactState.FAILED
-        messages[artifact.id] = if (ok && rootfsReady) {
+        setState(artifact.id, ArtifactState.EXTRACTING)
+        val ok = runCatching { extractor(archive, rootfsDir) }.getOrDefault(false)
+        val ready = ok && rootfsReady
+        setState(artifact.id, if (ready) ArtifactState.READY else ArtifactState.FAILED)
+        val message = if (ready) {
             "Extracted to ${rootfsDir.absolutePath}."
         } else {
             "Extraction did not produce a usable rootfs. proot-based untar arrives with the R1 binaries " +
                 "(device nodes and root ownership need `proot --rootfs / -0 tar`)."
         }
+        Snapshot.withMutableSnapshot { messages[artifact.id] = message }
         log.add(
-            TerminalLine(
-                if (states[artifact.id] == ArtifactState.READY) LineKind.INFO else LineKind.ERROR,
-                "extract ${artifact.fileName}: ${messages[artifact.id]}",
-            ),
+            TerminalLine(if (ready) LineKind.INFO else LineKind.ERROR, "extract ${artifact.fileName}: $message"),
         )
-        return states[artifact.id] == ArtifactState.READY
+        return ready
     }
 
     /** Removes the archive, its partial download and (for the rootfs) the unpacked tree. */
     fun remove(artifact: Artifact): Boolean {
-        val removed = session.remove(artifact, downloadDir)
+        val removed = runCatching { session.remove(artifact, downloadDir) }.getOrDefault(false)
         if (artifact.id == RuntimeManifest.ROOTFS.id && rootfsDir.isDirectory) {
-            rootfsDir.deleteRecursively()
+            runCatching { rootfsDir.deleteRecursively() }
         }
-        states[artifact.id] = scan(artifact)
-        messages[artifact.id] = if (removed) "Removed ${artifact.fileName}." else "Nothing to remove."
+        hashCache.clear()
+        val state = scan(artifact)
+        Snapshot.withMutableSnapshot {
+            states[artifact.id] = state
+            messages[artifact.id] = if (removed) "Removed ${artifact.fileName}." else "Nothing to remove."
+        }
         return removed
     }
 
     /** Free space on the partition that holds the downloads, for the UI's warning. */
-    fun freeBytes(): Long = downloadDir.usableSpace.let { if (it > 0) it else downloadDir.freeSpace }
+    /** Cached: `usableSpace` is a statfs syscall per call and this is read during layout. */
+    private var freeBytesCache = -1L
+    fun freeBytes(): Long {
+        if (freeBytesCache < 0) {
+            freeBytesCache = runCatching { downloadDir.usableSpace }.getOrDefault(0L)
+                .let { if (it > 0) it else runCatching { downloadDir.freeSpace }.getOrDefault(0L) }
+        }
+        return freeBytesCache
+    }
+
+    fun invalidateFreeSpace() {
+        freeBytesCache = -1L
+    }
 }

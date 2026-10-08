@@ -25,6 +25,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -409,6 +412,16 @@ private fun ContainerCard(
             }
         }
     }
+}
+
+/** Walking a prefix tree is disk I/O: do it off the UI thread and show a placeholder. */
+@Composable
+private fun PrefixSize(store: ContainerStore, containerId: String) {
+    var sizeKb by remember(containerId) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(containerId) {
+        withContext(Dispatchers.IO) { sizeKb = runCatching { store.prefixSizeKb(containerId) }.getOrDefault(0L) }
+    }
+    ActionButton(sizeKb?.let { "Size: ${formatKb(it)}" } ?: "Size: ...", onClick = {}, enabled = false)
 }
 
 @Composable

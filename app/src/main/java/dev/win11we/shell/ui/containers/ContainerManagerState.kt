@@ -78,16 +78,30 @@ class ContainerManagerState(
 
     /** Start/Stop/Restart are the R2 hooks; today they report what is missing. */
     fun run(action: (ContainerRuntime, Container) -> ContainerActionResult, container: Container) {
-        val result = action(runtime, container)
+        val wasRunning = runningIds()
+        val result = runCatching { action(runtime, container) }.getOrElse { error ->
+            ContainerActionResult.fail("${error.javaClass.simpleName}: ${error.message}")
+        }
         if (result.success) {
             store.update(container.id) { it.withStatus(runtime.statusOf(it)) }
-            onStartRuntime()
         } else {
             store.update(container.id) { it.withStatus(ContainerStatus.ERROR, result.message) }
         }
         message = result.message.ifBlank { if (result.success) "Done." else "Failed." }
-        if (store.containers.none { runtime.statusOf(it) == ContainerStatus.RUNNING }) onStopRuntime()
+
+        // Start the foreground service only when something actually started, and stop it
+        // only when nothing is left running. Starting and stopping it back-to-back (what
+        // the old code did on every action) risks a foreground-service start violation.
+        val nowRunning = runningIds()
+        if (nowRunning.isNotEmpty() && wasRunning.isEmpty()) {
+            runCatching { onStartRuntime() }.onFailure { message = "Could not start the runtime service: ${it.message}" }
+        } else if (nowRunning.isEmpty() && wasRunning.isNotEmpty()) {
+            runCatching { onStopRuntime() }
+        }
     }
+
+    private fun runningIds(): Set<String> =
+        store.containers.filter { runtime.statusOf(it) == ContainerStatus.RUNNING }.map { it.id }.toSet()
 
     /** The service's own log tail, shown in the container card (R4 expands this). */
     fun logExcerpt(container: Container, lines: Int = 12): String = runtime.logExcerpt(container, lines)

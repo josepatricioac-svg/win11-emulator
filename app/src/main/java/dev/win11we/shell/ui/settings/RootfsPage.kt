@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,23 +58,30 @@ private val WarnAmber = Color(0xFFFFC44D)
  */
 @Composable
 fun RootfsPage(modifier: Modifier = Modifier) {
+    // imports only used inside the composable body below
     val context = LocalContext.current
     val rootfs = remember { RootfsHolder.get(context) }
     var importTarget by remember { mutableStateOf<Artifact?>(null) }
+
+    // Scanning hashes archives, so it happens off the UI thread and never during layout.
+    LaunchedEffect(rootfs) { rootfs.refreshAsync() }
+
+    /** Every worker is guarded: a failure becomes a message, never a dead process. */
+    fun onWorker(name: String, work: () -> Unit) = startWorker(rootfs, name, work)
 
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val artifact = importTarget
         importTarget = null
         if (uri != null && artifact != null) {
             val name = uri.lastPathSegment?.substringAfterLast('/') ?: "picked file"
-            Thread {
-                val result = context.contentResolver.openInputStream(uri)?.use { input ->
-                    rootfs.import(artifact, input, name)
-                }
+            onWorker("import") {
+                val result = runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { input -> rootfs.import(artifact, input, name) }
+                }.getOrNull()
                 val message = result?.message ?: "Could not read that file"
-                rootfs.messages[artifact.id] = message
+                rootfs.setMessage(artifact.id, message)
                 Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-            }.apply { isDaemon = true; start() }
+            }
         }
     }
 
@@ -84,6 +92,7 @@ fun RootfsPage(modifier: Modifier = Modifier) {
             ArtifactCard(
                 artifact = artifact,
                 rootfs = rootfs,
+                onWorker = { name, work -> startWorker(rootfs, name, work) },
                 onImport = {
                     importTarget = artifact
                     importLauncher.launch(arrayOf("*/*"))
@@ -98,6 +107,21 @@ fun RootfsPage(modifier: Modifier = Modifier) {
             color = TextTertiary,
             fontSize = 11.sp,
         )
+    }
+}
+
+/** Runs [work] on a guarded daemon thread; any Throwable becomes a status message. */
+private fun startWorker(rootfs: RootfsManager, name: String, work: () -> Unit) {
+    Thread {
+        try {
+            work()
+        } catch (error: Throwable) {
+            rootfs.reportFailure(name, error)
+        }
+    }.apply {
+        this.name = "rootfs-$name"
+        isDaemon = true
+        start()
     }
 }
 
@@ -118,7 +142,12 @@ private fun SpaceRow(rootfs: RootfsManager) {
 }
 
 @Composable
-private fun ArtifactCard(artifact: Artifact, rootfs: RootfsManager, onImport: () -> Unit) {
+private fun ArtifactCard(
+    artifact: Artifact,
+    rootfs: RootfsManager,
+    onWorker: (String, () -> Unit) -> Unit,
+    onImport: () -> Unit,
+) {
     val state = rootfs.states[artifact.id] ?: ArtifactState.NOT_DOWNLOADED
     val progress = rootfs.progress[artifact.id] ?: 0f
     val message = rootfs.messages[artifact.id]
@@ -192,22 +221,18 @@ private fun ArtifactCard(artifact: Artifact, rootfs: RootfsManager, onImport: ()
                 ArtifactState.DOWNLOADING -> Chip("Cancel", destructive = true) { rootfs.cancel() }
                 ArtifactState.NOT_DOWNLOADED, ArtifactState.PARTIAL, ArtifactState.FAILED -> {
                     Chip(if (state == ArtifactState.PARTIAL) "Resume" else "Download") {
-                        Thread { rootfs.download(artifact) }.apply { isDaemon = true; start() }
+                        onWorker("download") { rootfs.download(artifact) }
                     }
                     Chip("Import...") { onImport() }
                 }
                 ArtifactState.VERIFIED -> {
                     if (artifact.id == dev.win11we.shell.runtime.download.RuntimeManifest.ROOTFS.id) {
-                        Chip("Extract") {
-                            Thread { rootfs.extract(artifact) }.apply { isDaemon = true; start() }
-                        }
+                        Chip("Extract") { onWorker("extract") { rootfs.extract(artifact) } }
                     }
-                    Chip("Re-verify") {
-                        Thread { rootfs.download(artifact) }.apply { isDaemon = true; start() }
-                    }
-                    Chip("Remove", destructive = true) { rootfs.remove(artifact) }
+                    Chip("Re-verify") { onWorker("verify") { rootfs.download(artifact) } }
+                    Chip("Remove", destructive = true) { onWorker("remove") { rootfs.remove(artifact) } }
                 }
-                ArtifactState.READY -> Chip("Remove", destructive = true) { rootfs.remove(artifact) }
+                ArtifactState.READY -> Chip("Remove", destructive = true) { onWorker("remove") { rootfs.remove(artifact) } }
                 ArtifactState.EXTRACTING, ArtifactState.VERIFYING -> Chip("Working...") {}
             }
         }

@@ -42,6 +42,17 @@ data class ScreenConfig(
     ),
 )
 
+/**
+ * The in-process window manager the shell installs. When a window that is not
+ * override-redirect asks to be mapped or configured under a parent with
+ * SubstructureRedirect selected, these hooks fire instead of the change itself,
+ * exactly like MapRequest/ConfigureRequest reach an external WM.
+ */
+interface XWindowManager {
+    fun mapRequested(windowId: Int)
+    fun configureRequested(windowId: Int, x: Int?, y: Int?, width: Int?, height: Int?, borderWidth: Int?)
+}
+
 /** Event-selection bits a window asked for (a subset of the X event masks). */
 object EventMask {
     const val KEY_PRESS = 1 shl 0
@@ -97,17 +108,50 @@ data class WindowProperty(val atom: Int, val type: Int, val format: Int, val dat
  * No sockets, no threads, no Android - so all of it is unit-testable.
  */
 class XDocument(
-    val screen: ScreenConfig,
+    screen: ScreenConfig,
     private val idBase: Int = X11.RESOURCE_ID_BASE,
     private val idMask: Int = X11.RESOURCE_ID_MASK,
 ) {
+    var screen: ScreenConfig = screen
+        private set
+
+    /** The shell's in-process WM; null until [XServer.attachWindowManager] runs. */
+    var windowManager: XWindowManager? = null
+
     private var nextId = 1
     val windows = LinkedHashMap<Int, XWindow>()
     private val atoms = LinkedHashMap<String, Int>()
     private val atomNames = LinkedHashMap<Int, String>()
 
+    /** Which connection holds SubstructureRedirect on a window (X allows only one). */
+    private val redirectOwners = HashMap<Int, XConnection>()
+
+    fun redirectOwner(windowId: Int): XConnection? = synchronized(redirectOwners) { redirectOwners[windowId] }
+
+    /** @return false when another connection already owns the redirect (Access error). */
+    fun claimRedirect(windowId: Int, connection: XConnection): Boolean = synchronized(redirectOwners) {
+        val current = redirectOwners[windowId]
+        if (current != null && current !== connection) return false
+        redirectOwners[windowId] = connection
+        true
+    }
+
+    fun releaseRedirect(connection: XConnection) = synchronized(redirectOwners) {
+        redirectOwners.entries.removeAll { it.value === connection }
+    }
+
+    /** Called when the native surface changed; keeps windows and clients alive. */
+    fun setScreenSize(widthPx: Int, heightPx: Int) {
+        screen = screen.copy(widthPx = widthPx, heightPx = heightPx)
+        windows[screen.rootId]?.let { it.width = widthPx; it.height = heightPx }
+    }
+
+    /** Set by XServer: invoked when an event was queued onto another connection. */
+    var externalFlush: ((XConnection) -> Unit)? = null
+
     init {
-        // The root window exists before any client connects.
+        // The root window exists before any client connects. It listens for structure
+        // changes on its children so the shell (and tests) always see Create/Map/Destroy.
         windows[screen.rootId] = XWindow(
             id = screen.rootId,
             parent = null,
@@ -118,6 +162,7 @@ class XDocument(
             depth = screen.rootDepth,
             visual = screen.rootVisual,
             mapped = true,
+            eventMask = EventMask.SUBSTRUCTURE_NOTIFY,
         )
         // A few atoms every client expects to exist with the standard numbering.
         listOf("PRIMARY", "SECONDARY", "ATOM", "STRING", "WM_NAME", "WM_CLASS", "WM_PROTOCOLS", "WM_DELETE_WINDOW")
@@ -170,6 +215,7 @@ class XDocument(
         window.children.toList().forEach { destroyWindow(it) }
         window.parent?.let { parent -> windows[parent]?.children?.remove(id) }
         windows.remove(id)
+        synchronized(redirectOwners) { redirectOwners.remove(id) }
         return true
     }
 
