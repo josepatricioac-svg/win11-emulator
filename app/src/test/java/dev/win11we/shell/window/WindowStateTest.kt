@@ -86,3 +86,41 @@ class WindowStateTest {
         assertTrue(w.offset.y >= 0.dp)
     }
 }
+
+/**
+ * [WindowState.sizeFor] is what the layout modifier reads; it must agree with
+ * [WindowState.bounds] or a window would be drawn at the wrong size after the
+ * performance pass moved geometry reads out of composition.
+ */
+class WindowSizeForTest {
+
+    private val desktop = DpSize(1200.dp, 700.dp)
+    private val app = AppSpec("notepad", "Notepad", R.drawable.ic_app_notepad)
+
+    private fun window() = WindowState(
+        id = 1,
+        app = app,
+        initialOffset = DpOffset(100.dp, 80.dp),
+        initialSize = DpSize(400.dp, 300.dp),
+    )
+
+    @Test
+    fun `sizeFor agrees with bounds in every mode`() {
+        val w = window()
+        assertEquals(w.bounds(desktop).size, w.sizeFor(desktop))
+
+        w.toggleMaximize()
+        assertEquals(w.bounds(desktop).size, w.sizeFor(desktop))
+        assertEquals(desktop, w.sizeFor(desktop))
+
+        w.snap(WindowMode.SNAP_LEFT, desktop)
+        assertEquals(w.bounds(desktop).size, w.sizeFor(desktop))
+        assertEquals(DpSize(600.dp, 700.dp), w.sizeFor(desktop))
+
+        w.snap(WindowMode.SNAP_RIGHT, desktop)
+        assertEquals(w.bounds(desktop).size, w.sizeFor(desktop))
+
+        w.snap(WindowMode.NORMAL, desktop)
+        assertEquals(DpSize(400.dp, 300.dp), w.sizeFor(desktop))
+    }
+}
