@@ -19,7 +19,7 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | R2 | `ContainerService` (foreground, Stop all), `proot -> box64 -> wine` launch with the explicit env, per-container status, logs into the shared buffer | done (inert until R1 binaries + R3 rootfs exist) |
 | R3 | Rootfs/Wine download: pinned SHA-256 (fail closed), resumable via `Range`, free-space check, progress UI, SAF import | done (extraction needs R1's proot) |
 | R4 | Diagnostics self-test: `box64 --version`, `wine64 --version`, `wine64 cmd /c echo hello`, green/red/skipped with the failing command + log excerpt | done |
-| D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a: protocol core + socket; 13 wire-format tests `@Ignore`d — see `docs/X_SERVER.md`) |
+| D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a+D1b done: protocol core, socket, renderer, input surface, SubstructureRedirect WM — 37+12 wire tests green; guest launch waits on the R1 binaries; see `docs/X_SERVER.md`) |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | — |
 
 ## Animation
@@ -30,6 +30,28 @@ and grows in place (140 ms), and the snap preview cross-fades. One frame loop in
 `WindowLayer` drives every window - no per-window coroutines. Settings ▸
 Personalisation ▸ *Window animations* turns all of it off.
 
+## Crash-safety rules
+
+Three rules came out of a real crash report (Settings ▸ Storage ▸ Download killed the
+process and the Settings window could not be reopened):
+
+1. **No `Thread { }` without a catch-all.** A missing `INTERNET` permission made
+   `URL.openConnection()` throw `SecurityException` on a bare worker thread, which takes
+   the whole process with it. Download/import/extract/remove now run through one guarded
+   worker helper, and `RootfsManager.download` catches `Throwable` and turns it into a
+   `FAILED` state with the exception name in the message.
+2. **No disk I/O during composition.** `RootfsManager` construction used to scan and hash
+   archives on the UI thread; it now does nothing until `refreshAsync()` runs on a
+   low-priority thread, hashes are cached per file stamp, and `freeBytes()` is cached.
+3. **A broken window must not take the shell down.** `WindowContent` renders a failure card
+   with Retry/Close inside the window instead of letting an exception escape into the
+   Activity, which is what made one broken screen unopenable.
+
+Also fixed: background state writes now go through `Snapshot.withMutableSnapshot` so Compose
+actually sees them, and the Container Manager only starts/stops the foreground service when
+the set of *running* containers changes (it used to start and immediately stop it on every
+button press, which risks a foreground-service start violation).
+
 ## X server (D1) - read this before using it
 
 `x11/` contains a from-scratch X11 core: wire marshalling, the connection handshake,
@@ -38,12 +60,16 @@ input translation with correct modifier masks, and a `LocalServerSocket` on the 
 name `/tmp/.X11-unix/X100` (which proot does not isolate, so a guest `DISPLAY=:100`
 reaches it with no bind mount).
 
-**It is not usable yet and is not started by anything.** 25 of its 38 protocol tests pass;
-13 that check the exact reply/event byte layout are `@Ignore`d with an explicit note, and
-there is no renderer (the `XSink` interface has only a recording implementation). See
-`docs/X_SERVER.md` for the precise state, why the remaining bugs were not fixed in this
-sandbox (1 GB RAM plus stale-artifact/clock-skew problems after several resets), and the
-ordered plan for D1b.
+**The server runs, renders and takes input; nothing guest-side connects yet.** All 37
+protocol tests plus the D1b suites pass: a `XDisplayList` records every drawing request
+per drawable (PutImage ZPixmap depth 24/32 → ARGB), `XCanvasRenderer` composites the
+window stack into the **Start ▸ X Desktop** window, raw MotionEvents/key events are
+translated through `XInput`, and top-level maps/configures are redirected to
+`ShellWindowManager` (SubstructureRedirect) so the shell places guest windows. What is
+still missing is a real client: the native binaries (R1) are not vendored, so
+`explorer.exe /desktop` cannot be started yet — `ExplorerSmokeTest` scripts its exact
+wire sequence instead. See `docs/X_SERVER.md` for limits (no RENDER/Composite/XShm, no
+XIM/soft keyboard, no real font metrics).
 
 ## What is deliberately not usable yet
 
@@ -318,16 +344,19 @@ app/src/main/java/dev/win11we/shell/
   runtime/download/Downloader.kt resume/hash/space/cancel logic + https Transfer seam
   runtime/download/RootfsManager.kt per-artifact state machine, SAF import, extract gate
   x11/X11.kt                 wire primitives, opcodes, events, masks (D1a)
-  x11/XDocument.kt           window tree, atoms, properties, hit testing
+  x11/XDocument.kt           window tree, atoms, properties, hit testing, WM hooks
   x11/XConnection.kt         handshake, request dispatch, replies/errors/events, XSink
+  x11/XDisplayList.kt        per-drawable DrawOp store: the server's pixel memory (D1b)
+  x11/ShellWindowManager.kt  SubstructureRedirect WM: cascaded placement of guest windows
   x11/XKeyboard.kt           X keycode = evdev+8, keysym table, GetKeyboardMapping
   x11/XInput.kt              device input -> X events with modifier/button masks
   x11/XServer.kt             LocalServerSocket on /tmp/.X11-unix/X100, accept + serve
+  ui/xdesktop/XDesktop.kt    Bitmap/Canvas renderer + Compose input surface (D1b)
   ui/settings/RootfsPage.kt    Settings ▸ Storage ▸ Runtime download (progress, actions)
   runtime/SelfTestRunner.kt    the R4 self-test: 3 steps, verdicts, reasons, report/log excerpt
 ```
 
-Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 121 tests): snap zones,
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 316 tests): snap zones,
 maximize/restore, halves snapping, edge/corner resize with minimums, on-screen clamping,
 z-order/focus, taskbar toggle open-minimize-restore, Explorer listing/filtering/sorting,
 Windows-style size and type labels, back/forward/up/trail navigation, selection,
