@@ -66,6 +66,37 @@ a plain HTTPS GET, no integration or API key.
 
 Test-only: none of this ships in the APK.
 
+### D1 additions (X server)
+
+**Written from scratch for this project** against the public X11 protocol specification:
+no Xorg, libX11, XSDL, Termux:X11 or other third-party X code was copied, and no
+GPL-licensed X server code is involved. `android.net.LocalServerSocket`/`LocalSocket`
+(framework) provide the unix-domain transport. The protocol opcode/event numbers follow
+the X11 core protocol; the ones the server dispatches are pinned by `XProtocolTest`.
+
+### R3 additions (rootfs download) — pinned artifacts
+
+No new libraries: `HttpURLConnection`, `MessageDigest` and the Storage Access Framework
+(`OpenDocument`) only. The manifest pins these artifacts; hashes were read from the
+publishers' own checksum data on **2026-10-07**:
+
+| Artifact | Source of the hash | SHA-256 | Size |
+| --- | --- | --- | --- |
+| `ubuntu-base-22.04.5-base-arm64.tar.gz` | `https://cdimage.ubuntu.com/ubuntu-base/releases/22.04.5/release/SHA256SUMS` | `075d4abd2817a5023ab0a82f5cb314c5ec0aa64a9c0b40fd3154ca3bfdae979f` | 27,671,306 B |
+| `wine64_9.0~repack-4build3_arm64.deb` | Ubuntu `noble/universe/binary-arm64` `Packages` index, SHA256 field | `d44c0266f404ad59944ef7245d3162affa6415ee58193c5fa7cdc1aa105a46bd` | 244,164 B |
+| `wine_9.0~repack-4build3_all.deb` | same index | `5606f0f5677ac0fb882e3fdc8ce03a60232cdf2930e912ed3e42db2b9e0d5f7f` | 51,966 B |
+
+Licences: Ubuntu base rootfs is a collection of packages under their own licences
+(mostly GPL-2.0+/LGPL-2.1+/MIT/BSD); Wine is LGPL-2.1+. They are **downloaded at runtime
+from the publisher**, never redistributed inside this APK. The two Wine `.deb`s are the
+loader/front-end packages only — the real payload (`wine-development` plus its library
+tree) still has to be provisioned inside the rootfs, which is why they are flagged
+`incompleteAlone` in the UI.
+
+A download whose SHA-256 does not match the pin is deleted and never unpacked. Extraction
+is refused until proot's tar is available (R1 binaries), because unpacking a rootfs needs
+`proot --rootfs / -0 tar` for device nodes and root ownership.
+
 ### R2 additions (container runtime)
 
 No new libraries: `ContainerService` uses `androidx.core` (`NotificationCompat`,

@@ -17,7 +17,9 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | N2 | Apps: Explorer, Notepad, Settings, Browser, Task Manager, Terminal, Container Manager | **done** |
 | R1 | proot/box64 exec from `nativeLibraryDir`, inventory/permissions, SHA-256 pins, `--version` probes, proot command builder, Diagnostics window | done (binaries not vendored) |
 | R2 | `ContainerService` (foreground, Stop all), `proot -> box64 -> wine` launch with the explicit env, per-container status, logs into the shared buffer | done (inert until R1 binaries + R3 rootfs exist) |
-| D1–D2 | In-app X server (fullscreen surface, then one surface per top-level window) | — |
+| R3 | Rootfs/Wine download: pinned SHA-256 (fail closed), resumable via `Range`, free-space check, progress UI, SAF import | done (extraction needs R1's proot) |
+| R4 | Diagnostics self-test: `box64 --version`, `wine64 --version`, `wine64 cmd /c echo hello`, green/red/skipped with the failing command + log excerpt | done |
+| D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a: protocol core + socket; 13 wire-format tests `@Ignore`d — see `docs/X_SERVER.md`) |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | — |
 
 ## Animation
@@ -27,6 +29,21 @@ plays the reverse and only then leaves the window list, minimizing/restoring shr
 and grows in place (140 ms), and the snap preview cross-fades. One frame loop in
 `WindowLayer` drives every window - no per-window coroutines. Settings ▸
 Personalisation ▸ *Window animations* turns all of it off.
+
+## X server (D1) - read this before using it
+
+`x11/` contains a from-scratch X11 core: wire marshalling, the connection handshake,
+request dispatch, the window/atom/property document, a keyboard map (X keycode = evdev+8),
+input translation with correct modifier masks, and a `LocalServerSocket` on the abstract
+name `/tmp/.X11-unix/X100` (which proot does not isolate, so a guest `DISPLAY=:100`
+reaches it with no bind mount).
+
+**It is not usable yet and is not started by anything.** 25 of its 38 protocol tests pass;
+13 that check the exact reply/event byte layout are `@Ignore`d with an explicit note, and
+there is no renderer (the `XSink` interface has only a recording implementation). See
+`docs/X_SERVER.md` for the precise state, why the remaining bugs were not fixed in this
+sandbox (1 GB RAM plus stale-artifact/clock-skew problems after several resets), and the
+ordered plan for D1b.
 
 ## What is deliberately not usable yet
 
@@ -47,6 +64,61 @@ The single blocker for all of it is the native payload: **no `libbox64.so` / `li
 is committed** (see `docs/NATIVE_RUNTIME.md`). box64 builds from `.github/workflows/build-native.yml`
 (`workflow_dispatch`); proot needs a patched Android fork and is GPL-2.0, so vendoring it
 is a decision for you, not something I will slip into the repo.
+
+## Performance
+
+The shell is written so that the common interactions recompose as little as possible:
+
+- **Wallpaper**: brushes and petal geometry are built once in `drawWithCache` and reused;
+  they are rebuilt only when the surface size changes, not on every frame while a window
+  animates above it.
+- **Windows**: geometry (`offset`/`size`) and the whole open/close/minimize animation are
+  read inside `graphicsLayer`/`offset` lambdas, i.e. in the layout/draw phase. Dragging,
+  resizing and the 60 fps fade therefore recompose **no** Compose code at all - the app
+  content inside the window is untouched.
+- **Taskbar**: each pin is its own composable, so the window-list reads are scoped to that
+  pin. Moving a window no longer rebuilds the bar, its tooltips or the clock.
+- **First open**: the expensive one-offs are warmed at startup on a low-priority background
+  thread - the PackageManager browser query (cached per process), the SHA-256 of the shipped
+  binaries (cached per file stamp) and every app's payload factory (class loading, disk
+  reads, container list parsing). `Browsers.invalidate()` exists for refresh-after-install.
+- **Frame loop**: one `withFrameNanos` loop drives every window animation and only writes
+  state while something is actually animating; steady windows cost no writes, so a desktop
+  with idle windows does not recompose at 60 fps.
+- `WindowState.sizeFor()` gives the layout modifier its size without allocating a
+  `WindowBounds` per frame (covered by a test that pins it to `bounds()`).
+
+Debug builds are still JIT-compiled and unoptimised; measure with a release build (P2)
+before chasing anything else.
+
+## Self-test (R4)
+
+Start ▸ All apps ▸ **Diagnostics** ▸ *Run self-test* executes the three required checks and
+shows one card per step: verdict (**PASS** green / **FAIL** red / **SKIPPED** amber), the
+exact command line, exit code, duration, the reason, and the output excerpt in a console
+block. A summary card reports `n passed, n failed, n skipped` and refuses to claim
+"All green" while anything is skipped. The failing command and its log excerpt are also
+written to the shared log (Terminal ▸ `log`).
+
+The rule the tests enforce: a step whose prerequisites are missing is **skipped with the
+reason named** (no `libbox64.so`, no `libproot.so`, no rootfs, rootfs not unpacked) and
+never counted as a pass — and `wine64 cmd /c echo hello` must actually print `hello`; a
+zero exit code without the output is a failure.
+
+## Runtime download (R3)
+
+Settings ▸ Storage ▸ **Runtime download** lists the pinned artifacts with their size,
+SHA-256 prefix and URL, plus Download / Resume / Cancel / Import / Extract / Remove and a
+free-space check for the whole set.
+
+Rules the code enforces (all unit-tested): a file is written to `<name>.part` and only
+promoted to its real name after its SHA-256 matches the pin; a mismatch deletes the
+download; a server that ignores `Range` is treated as an error rather than producing a
+corrupt tail; an interrupted download keeps its `.part` and resumes; SAF imports are held
+to the same pin as network downloads; and extraction refuses to run until proot's tar
+exists, because unpacking a rootfs needs `proot --rootfs / -0 tar` for device nodes and
+root ownership. Hashes come from the publishers (Ubuntu `SHA256SUMS`, the Ubuntu archive
+`Packages` index) and are recorded in `docs/THIRD_PARTY.md`.
 
 ## Container runtime (R2)
 
@@ -155,7 +227,7 @@ See `docs/BROWSER_ENGINES.md` for the feasibility write-up, the licensing constr
 
 ## UI tests
 
-`./gradlew testDebugUnitTest` runs the 221 pure-JVM tests (window geometry, snap zones,
+`./gradlew testDebugUnitTest` runs the 259 pure-JVM tests (window geometry, snap zones,
 Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing, argv
 splitting, the log buffer, the built-in commands, the terminal transcript/history, the
 container codec/store, guest<->host path mapping, the Wine environment builder, the
@@ -163,7 +235,11 @@ native-binary inventory/permission handling, SHA-256 pinning and its fail-closed
 the probe runner, the proot command line, and the R2 launcher: every refusal path
 (missing/unpinned binaries, missing rootfs, missing prefix, empty command, spawn failure,
 double start), the `proot -> box64 -> wine` command shape, drive binds, the explicit
-environment, stop/restart/stopAll, and exit-code -> status mapping).
+environment, stop/restart/stopAll, exit-code -> status mapping, and R3's downloader:
+resume offsets, hash fail-closed, space refusal, cancellation, servers that ignore
+`Range`, SAF import verification, the extract gate, and the R4 self-test: command order,
+proot wrapping, prefix binding, "printed hello" assertion, and skip-instead-of-pass when
+box64/proot/rootfs are missing).
 
 Compose tests that actually **compose** the taskbar (Robolectric) are opt-in because they
 need a couple of GB of RAM:
@@ -238,6 +314,17 @@ app/src/main/java/dev/win11we/shell/
   runtime/ProcessLauncher.kt   start/stream/destroy seam (real ProcessBuilder + fakes in tests)
   runtime/ContainerLauncher.kt validate -> build command+env -> start -> track status/logs (R2)
   runtime/ContainerService.kt  foreground service, notification, Stop all, RuntimePaths/RuntimeHolder
+  runtime/download/Artifact.kt   pinned manifest (Ubuntu 22.04.5 arm64, Wine 9.0 debs) + real hashes
+  runtime/download/Downloader.kt resume/hash/space/cancel logic + https Transfer seam
+  runtime/download/RootfsManager.kt per-artifact state machine, SAF import, extract gate
+  x11/X11.kt                 wire primitives, opcodes, events, masks (D1a)
+  x11/XDocument.kt           window tree, atoms, properties, hit testing
+  x11/XConnection.kt         handshake, request dispatch, replies/errors/events, XSink
+  x11/XKeyboard.kt           X keycode = evdev+8, keysym table, GetKeyboardMapping
+  x11/XInput.kt              device input -> X events with modifier/button masks
+  x11/XServer.kt             LocalServerSocket on /tmp/.X11-unix/X100, accept + serve
+  ui/settings/RootfsPage.kt    Settings ▸ Storage ▸ Runtime download (progress, actions)
+  runtime/SelfTestRunner.kt    the R4 self-test: 3 steps, verdicts, reasons, report/log excerpt
 ```
 
 Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 121 tests): snap zones,
