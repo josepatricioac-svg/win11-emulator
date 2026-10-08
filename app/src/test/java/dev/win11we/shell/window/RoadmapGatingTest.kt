@@ -25,7 +25,7 @@ class RoadmapGatingTest {
     fun `every shell app opens a real window - nothing is left as a stub`() {
         val ids = ShellApps.map { it.id }
         assertEquals(
-            listOf("explorer", "notepad", "browser", "settings", "terminal", "taskmgr", "containers", "diagnostics"),
+            listOf("explorer", "notepad", "browser", "settings", "terminal", "taskmgr", "containers", "xdesktop", "diagnostics"),
             ids,
         )
         assertTrue("all N2 apps must be enabled", ShellApps.all { it.enabled })

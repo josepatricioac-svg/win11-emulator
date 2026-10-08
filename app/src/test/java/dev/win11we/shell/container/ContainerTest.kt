@@ -1,6 +1,7 @@
 package dev.win11we.shell.container
 
 import dev.win11we.shell.settings.Box64Preset
+import dev.win11we.shell.ui.containers.ContainerManagerState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -326,5 +327,119 @@ class NotInstalledRuntimeTest {
             assertTrue(result.message.contains("R2"))
         }
         assertEquals("(no runtime, no logs yet)", runtime.logExcerpt(container))
+    }
+}
+
+/** The Container Manager must not start and stop the foreground service on every click. */
+class ContainerServiceLifecycleTest {
+
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    /** Behaves like the real runtime: start makes it run, stop makes it stop. */
+    private class FakeRuntime : ContainerRuntime {
+        var status: ContainerStatus = ContainerStatus.STOPPED
+        override val ready = true
+        override fun start(container: Container): ContainerActionResult {
+            status = ContainerStatus.RUNNING
+            return ContainerActionResult.ok("started")
+        }
+
+        override fun stop(container: Container): ContainerActionResult {
+            status = ContainerStatus.STOPPED
+            return ContainerActionResult.ok("stopped")
+        }
+
+        override fun restart(container: Container): ContainerActionResult {
+            status = ContainerStatus.RUNNING
+            return ContainerActionResult.ok("restarted")
+        }
+
+        override fun statusOf(container: Container) = status
+        override fun logExcerpt(container: Container, lines: Int) = ""
+    }
+
+    private fun state(runtime: ContainerRuntime, starts: MutableList<Int>, stops: MutableList<Int>) =
+        ContainerManagerState(
+            store = ContainerStore(tmp.root),
+            runtime = runtime,
+            onStartRuntime = { starts.add(1) },
+            onStopRuntime = { stops.add(1) },
+        )
+
+    @Test
+    fun `starting a container starts the service exactly once`() {
+        val runtime = FakeRuntime()
+        val starts = mutableListOf<Int>()
+        val stops = mutableListOf<Int>()
+        val manager = state(runtime, starts, stops)
+        assertTrue(manager.create("Office"))
+        val office = manager.containers.first()
+
+        manager.start(office)
+        assertEquals(1, starts.size)
+        assertEquals(0, stops.size)
+        assertEquals(ContainerStatus.RUNNING, manager.store.byId(office.id)?.status)
+    }
+
+    @Test
+    fun `a failed start never touches the service`() {
+        val failing = object : ContainerRuntime {
+            override val ready = false
+            override fun start(container: Container) = ContainerActionResult.fail("no runtime")
+            override fun stop(container: Container) = ContainerActionResult.fail("no runtime")
+            override fun restart(container: Container) = ContainerActionResult.fail("no runtime")
+            override fun statusOf(container: Container) = ContainerStatus.ERROR
+            override fun logExcerpt(container: Container, lines: Int) = ""
+        }
+        val starts = mutableListOf<Int>()
+        val stops = mutableListOf<Int>()
+        val manager = state(failing, starts, stops)
+        assertTrue(manager.create("Office"))
+        val office = manager.containers.first()
+        manager.start(office)
+        assertEquals(0, starts.size)
+        assertEquals(0, stops.size)
+        assertEquals(ContainerStatus.ERROR, manager.store.byId(office.id)?.status)
+        assertTrue(manager.store.byId(office.id)?.lastError?.contains("no runtime") == true)
+    }
+
+    @Test
+    fun `stopping the last running container stops the service, and only then`() {
+        val runtime = FakeRuntime()
+        val starts = mutableListOf<Int>()
+        val stops = mutableListOf<Int>()
+        val manager = state(runtime, starts, stops)
+        assertTrue(manager.create("Office"))
+        assertTrue(manager.create("Games"))
+        val first = manager.containers.first { it.name == "Office" }
+        val second = manager.containers.first { it.name == "Games" }
+
+        manager.start(first)
+        manager.start(second)
+        assertEquals("the service is already up", 1, starts.size)
+
+        manager.stop(first) // the fake runtime stops everything, so the service goes down here
+        assertEquals(1, stops.size)
+        manager.stop(second) // nothing was running: no second stop
+        assertEquals(1, stops.size)
+    }
+
+    @Test
+    fun `a runtime that throws is reported instead of crashing the window`() {
+        val throwing = object : ContainerRuntime {
+            override val ready = true
+            override fun start(container: Container): ContainerActionResult = throw IllegalStateException("service not allowed")
+            override fun stop(container: Container) = ContainerActionResult.ok("")
+            override fun restart(container: Container) = ContainerActionResult.ok("")
+            override fun statusOf(container: Container) = ContainerStatus.ERROR
+            override fun logExcerpt(container: Container, lines: Int) = ""
+        }
+        val manager = state(throwing, mutableListOf(), mutableListOf())
+        assertTrue(manager.create("Office"))
+        val office = manager.containers.first()
+        manager.start(office)
+        assertTrue(manager.message!!.contains("IllegalStateException"))
+        assertEquals(ContainerStatus.ERROR, manager.store.byId(office.id)?.status)
     }
 }

@@ -195,15 +195,13 @@ class DownloaderTest {
     }
 
     @Test
-    fun `artifact rejects a bad pin or url`() {
+    fun `artifact rejects a bad pin or a non-https url`() {
         var threw = 0
-        runCatching {
-            Artifact("x", "X", "https://e/x", "abc", 1, 1, "")
-        }.onFailure { threw++ }
-        runCatching {
-            Artifact("x", "X", "ftp://e/x", "0".repeat(64), 1, 1, "")
-        }.onFailure { threw++ }
-        assertEquals(2, threw)
+        runCatching { Artifact("x", "X", "https://e/x", "abc", 1, 1, "") }.onFailure { threw++ }
+        runCatching { Artifact("x", "X", "ftp://e/x", "0".repeat(64), 1, 1, "") }.onFailure { threw++ }
+        // Cleartext is blocked by Android 9+ anyway; refusing it here keeps the manifest honest.
+        runCatching { Artifact("x", "X", "http://e/x", "0".repeat(64), 1, 1, "") }.onFailure { threw++ }
+        assertEquals(3, threw)
     }
 
     @Test
@@ -217,6 +215,9 @@ class DownloaderTest {
         }
         assertEquals("ubuntu-base-22.04.5-base-arm64.tar.gz", RuntimeManifest.ROOTFS.fileName)
         assertTrue(RuntimeManifest.ROOTFS.url.startsWith("https://cdimage.ubuntu.com/"))
+        RuntimeManifest.ALL.forEach { artifact ->
+            assertTrue("${artifact.id} must be https", artifact.url.startsWith("https://"))
+        }
         assertTrue(RuntimeManifest.WINE64_DEB.incompleteAlone)
         assertTrue(RuntimeManifest.requiredFreeBytes > 1_000_000_000L)
     }
@@ -321,6 +322,7 @@ class RootfsManagerTest {
     fun `a partial file scans as partial and the state machine reports progress`() {
         artifact.partialFile(downloads).writeBytes(payload.copyOf(5))
         val manager = manager()
+        manager.rescan() // construction never touches the disk; the UI calls refreshAsync
         assertEquals(ArtifactState.PARTIAL, manager.stateOf(artifact.id))
         manager.download(artifact)
         assertEquals(1f, manager.progress[artifact.id]!!, 0.001f)
@@ -330,7 +332,9 @@ class RootfsManagerTest {
     fun `a verified file on disk scans as verified without downloading`() {
         artifact.targetFile(downloads).writeBytes(payload)
         val transfer = FakeTransfer(payload)
-        assertEquals(ArtifactState.VERIFIED, manager(transfer).stateOf(artifact.id))
+        val manager = manager(transfer)
+        manager.rescan()
+        assertEquals(ArtifactState.VERIFIED, manager.stateOf(artifact.id))
         assertTrue(transfer.ranges.isEmpty())
     }
 
@@ -338,6 +342,7 @@ class RootfsManagerTest {
     fun `a corrupt file on disk is dropped during the scan`() {
         artifact.targetFile(downloads).writeBytes("rot".toByteArray())
         val manager = manager()
+        manager.rescan()
         assertEquals(ArtifactState.FAILED, manager.stateOf(artifact.id))
         assertFalse(artifact.targetFile(downloads).exists())
     }
@@ -401,5 +406,104 @@ class RootfsManagerTest {
         assertTrue(text.contains("downloading"))
         assertTrue(text.contains("VERIFIED"))
         assertTrue(text.contains("extract"))
+    }
+}
+
+/** Regressions for the crash reported when downloading the rootfs from Settings. */
+class RootfsCrashSafetyTest {
+
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    private val payload = "rootfs".toByteArray()
+    private lateinit var artifact: Artifact
+
+    @Before
+    fun setUp() {
+        val hashSource = File(tmp.root, "hash-src").also { it.writeBytes(payload) }
+        artifact = Artifact(
+            id = "rootfs",
+            label = "Rootfs",
+            url = "https://example.org/rootfs.tar.gz",
+            sha256 = DownloadSession.sha256(hashSource)!!,
+            sizeBytes = payload.size.toLong(),
+            requiredFreeBytes = 1024,
+            description = "test",
+        )
+    }
+
+    private fun manager(transfer: Transfer) = RootfsManager(
+        downloadDir = File(tmp.root, "downloads"),
+        rootfsDir = File(tmp.root, "rootfs"),
+        session = DownloadSession(transfer, FreeSpaceProvider { Long.MAX_VALUE }),
+        log = LogBuffer(),
+        artifacts = listOf(artifact),
+    )
+
+    @Test
+    fun `a transport that throws a RuntimeException becomes a failed download, not a crash`() {
+        val exploding = object : Transfer {
+            override fun fetch(
+                artifact: Artifact,
+                target: File,
+                fromByte: Long,
+                onProgress: (Long, Long) -> Unit,
+                cancelled: () -> Boolean,
+            ): Long = throw SecurityException("Permission denied (missing INTERNET?)")
+        }
+        val manager = manager(exploding)
+        val result = manager.download(artifact)
+        assertFalse(result.success)
+        assertEquals(DownloadOutcome.NETWORK_ERROR, result.outcome)
+        assertTrue(result.message.contains("SecurityException"))
+        assertEquals(ArtifactState.FAILED, manager.stateOf(artifact.id))
+        assertFalse("busy must be cleared or every later download is refused", manager.busy)
+    }
+
+    @Test
+    fun `reportFailure clears busy and records the reason`() {
+        val log = LogBuffer()
+        val manager = RootfsManager(
+            downloadDir = File(tmp.root, "downloads"),
+            rootfsDir = File(tmp.root, "rootfs"),
+            session = DownloadSession(FakeTransfer(payload), FreeSpaceProvider { Long.MAX_VALUE }),
+            log = log,
+            artifacts = listOf(artifact),
+        )
+        manager.reportFailure("download", IllegalStateException("boom"))
+        assertFalse(manager.busy)
+        assertTrue(log.tail(5).contains("boom"))
+    }
+
+    @Test
+    fun `constructing the manager does no disk hashing`() {
+        // A 27 MB archive must not be hashed on the UI thread while composing Settings.
+        val downloads = File(tmp.root, "downloads").apply { mkdirs() }
+        artifact.targetFile(downloads).writeBytes(payload)
+        val log = LogBuffer()
+        val manager = RootfsManager(
+            downloadDir = downloads,
+            rootfsDir = File(tmp.root, "rootfs"),
+            session = DownloadSession(FakeTransfer(payload), FreeSpaceProvider { Long.MAX_VALUE }),
+            log = log,
+            artifacts = listOf(artifact),
+        )
+        // No scan happened during construction, so the state is unknown-but-safe...
+        assertEquals(ArtifactState.NOT_DOWNLOADED, manager.stateOf(artifact.id))
+        // ...and an explicit scan finds the verified archive.
+        manager.rescan()
+        assertEquals(ArtifactState.VERIFIED, manager.stateOf(artifact.id))
+        // Scanning again reuses the cached hash (same result, no exception, no re-read cost).
+        manager.rescan()
+        assertEquals(ArtifactState.VERIFIED, manager.stateOf(artifact.id))
+    }
+
+    @Test
+    fun `free space is cached and can be invalidated`() {
+        val manager = manager(FakeTransfer(payload))
+        val first = manager.freeBytes()
+        assertEquals(first, manager.freeBytes())
+        manager.invalidateFreeSpace()
+        assertTrue(manager.freeBytes() >= 0L)
     }
 }

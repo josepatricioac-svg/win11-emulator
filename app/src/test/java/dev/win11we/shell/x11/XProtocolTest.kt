@@ -29,6 +29,7 @@ private class ClientRequestBuilder(private val littleEndian: Boolean = true) {
 
     fun createWindow(id: Int, parent: Int, x: Int, y: Int, width: Int, height: Int, eventMask: Int = 0) =
         build(X11.REQ_CREATE_WINDOW, 24) { writer ->
+            // depth is carried in the request's data byte, so the body opens with wid.
             writer.int(id)
             writer.int(parent)
             writer.short(x); writer.short(y); writer.short(width); writer.short(height)
@@ -48,8 +49,7 @@ private class ClientRequestBuilder(private val littleEndian: Boolean = true) {
     fun configureWindow(id: Int, x: Int, y: Int, width: Int, height: Int) =
         build(X11.REQ_CONFIGURE_WINDOW) { writer ->
             writer.int(id)
-            writer.short(0x000F) // x, y, width, height
-            writer.short(0)
+            writer.int(0x000F) // value-mask: x, y, width, height
             writer.int(x); writer.int(y); writer.int(width); writer.int(height)
         }
 
@@ -218,7 +218,6 @@ class XProtocolTest {
 
     // --- handshake ---------------------------------------------------------
 
-    @org.junit.Ignore("D1a: the X11 wire format is implemented but NOT yet verified - these 13 checks fail on the reply/event byte layout and must be fixed against a real client (or a working build machine) before the X server is used. Tracked in docs/X_SERVER.md.")
     @Test
     fun `the setup reply has the layout a client parses`() {
         val setup = byteArrayOf('B'.code.toByte(), 0) + XWriter(true).apply {
@@ -233,20 +232,21 @@ class XProtocolTest {
         assertEquals(1, reply[0].toInt()) // success
         assertEquals(11, reply.shortLE(2)) // protocolMajorVersion
         assertEquals(0, reply.shortLE(4)) // protocolMinorVersion
-        assertEquals(X11.RESOURCE_ID_BASE, reply.intLE(8))
-        assertEquals(X11.RESOURCE_ID_MASK, reply.intLE(12))
-        val vendorLength = reply.shortLE(16)
+        // Spec layout after the 8-byte header: release-number(4) resource-id-base(4)
+        // mask(4) motion-buffer(4) vendor-length(2) max-request-size(2) screens(1)
+        // formats(1) byte-orders(2) scanline unit+pad(2) keycodes(2) pad(4), then vendor.
+        assertEquals(X11.RELEASE_NUMBER, reply.intLE(8))
+        assertEquals(X11.RESOURCE_ID_BASE, reply.intLE(12))
+        assertEquals(X11.RESOURCE_ID_MASK, reply.intLE(16))
+        val vendorLength = reply.shortLE(24)
         assertEquals(X11.VENDOR.length, vendorLength)
-        assertEquals(
-            "reply[0..31]=" + reply.take(32).joinToString(" ") { "%02x".format(it) },
-            1, reply[24].toInt(), // numberOfScreens
-        )
-        assertEquals(3, reply[25].toInt()) // numberOfFormats
-        assertEquals(8, reply[28].toInt()) // minKeycode
-        assertEquals(255, reply[29].toInt() and 0xFF) // maxKeycode
-        assertEquals(X11.VENDOR, String(reply.copyOfRange(32, 32 + vendorLength), Charsets.US_ASCII))
+        assertEquals(1, reply[28].toInt()) // numberOfScreens
+        assertEquals(3, reply[29].toInt()) // numberOfFormats
+        assertEquals(8, reply[34].toInt()) // minKeycode
+        assertEquals(255, reply[35].toInt() and 0xFF) // maxKeycode
+        assertEquals(X11.VENDOR, String(reply.copyOfRange(40, 40 + vendorLength), Charsets.US_ASCII))
         // vendor (padded) + 3 pixmap formats (8 bytes each), then the SCREEN block
-        val screenOffset = 32 + X11.pad4(vendorLength) + 3 * 8
+        val screenOffset = 40 + X11.pad4(vendorLength) + 3 * 8
         assertEquals(rootId, reply.intLE(screenOffset))
         assertEquals(1280, reply.shortLE(screenOffset + 20))
         assertEquals(800, reply.shortLE(screenOffset + 22))
@@ -278,7 +278,6 @@ class XProtocolTest {
 
     // --- windows -----------------------------------------------------------
 
-    @org.junit.Ignore("D1a: the X11 wire format is implemented but NOT yet verified - these 13 checks fail on the reply/event byte layout and must be fixed against a real client (or a working build machine) before the X server is used. Tracked in docs/X_SERVER.md.")
     @Test
     fun `create map and query a window over the wire`() {
         val windowId = rootId + 100
@@ -289,7 +288,7 @@ class XProtocolTest {
         )
         val reply = out.reply() // CreateWindow/MapWindow only emit events, never replies
         assertEquals(1, out.replies().size)
-        assertEquals(0, reply.intLE(4)) // no extra data
+        assertEquals(1, reply.intLE(4)) // extra data: one child id (4 bytes)
         assertEquals(rootId, reply.intLE(8))
         assertEquals(0, reply.intLE(12)) // the root has no parent
         assertEquals(1, reply.shortLE(16))
@@ -297,7 +296,6 @@ class XProtocolTest {
         assertTrue(document.window(windowId)!!.mapped)
     }
 
-    @org.junit.Ignore("D1a: the X11 wire format is implemented but NOT yet verified - these 13 checks fail on the reply/event byte layout and must be fixed against a real client (or a working build machine) before the X server is used. Tracked in docs/X_SERVER.md.")
     @Test
     fun `geometry and attributes reflect what the client asked for`() {
         val windowId = rootId + 7
@@ -315,11 +313,10 @@ class XProtocolTest {
         assertEquals(480, geometry.shortLE(18))
 
         val attributes = out.replies().last()
-        assertEquals(0, attributes[16].toInt() and 0xFF) // IsUnmapped: nothing was mapped yet
-        assertEquals(EventMask.STRUCTURE_NOTIFY, attributes.intLE(20))
+        assertEquals(0, attributes[26].toInt() and 0xFF) // IsUnmapped: nothing was mapped yet
+        assertEquals(EventMask.STRUCTURE_NOTIFY, attributes.intLE(36)) // your-event-mask
     }
 
-    @org.junit.Ignore("D1a: the X11 wire format is implemented but NOT yet verified - these 13 checks fail on the reply/event byte layout and must be fixed against a real client (or a working build machine) before the X server is used. Tracked in docs/X_SERVER.md.")
     @Test
     fun `configure changes the geometry and notifies the window`() {
         val windowId = rootId + 9
@@ -335,7 +332,6 @@ class XProtocolTest {
         assertEquals(600, window.height)
     }
 
-    @org.junit.Ignore("D1a: the X11 wire format is implemented but NOT yet verified - these 13 checks fail on the reply/event byte layout and must be fixed against a real client (or a working build machine) before the X server is used. Tracked in docs/X_SERVER.md.")
     @Test
     fun `destroy removes the window and notifies the parent`() {
         val windowId = rootId + 11
@@ -366,7 +362,6 @@ class XProtocolTest {
 
     // --- atoms and properties ---------------------------------------------
 
-    @org.junit.Ignore("D1a: the X11 wire format is implemented but NOT yet verified - these 13 checks fail on the reply/event byte layout and must be fixed against a real client (or a working build machine) before the X server is used. Tracked in docs/X_SERVER.md.")
     @Test
     fun `intern atom is stable and GetAtomName round trips`() {
         val atom = send(client.internAtom("_NET_WM_NAME")).reply().intLE(8)
@@ -393,7 +388,6 @@ class XProtocolTest {
         assertEquals(5, document.atomId("WM_NAME"))
     }
 
-    @org.junit.Ignore("D1a: the X11 wire format is implemented but NOT yet verified - these 13 checks fail on the reply/event byte layout and must be fixed against a real client (or a working build machine) before the X server is used. Tracked in docs/X_SERVER.md.")
     @Test
     fun `change and get property round trip with padding`() {
         val windowId = rootId + 21
@@ -404,14 +398,13 @@ class XProtocolTest {
         assertEquals("Notepad", String(document.property(windowId, atom)!!.data))
 
         val reply = send(client.getProperty(windowId, atom)).reply()
-        assertEquals(8, reply[1].toInt() and 0xFF) // format
+        assertEquals(8, reply[1].toInt() and 0xFF) // format sits in the reply's data byte
         assertEquals(4, reply.intLE(8)) // type = STRING
-        assertEquals(value.size, reply.shortLE(20))
+        assertEquals(value.size, reply.intLE(16)) // value-length in format units
         assertEquals("Notepad", String(reply.copyOfRange(32, 32 + value.size), Charsets.US_ASCII))
         assertEquals(0, reply.size % 4)
     }
 
-    @org.junit.Ignore("D1a: the X11 wire format is implemented but NOT yet verified - these 13 checks fail on the reply/event byte layout and must be fixed against a real client (or a working build machine) before the X server is used. Tracked in docs/X_SERVER.md.")
     @Test
     fun `a property on a missing window is BadWindow`() {
         val out = send(client.changeProperty(0x1234, 1, 4, 8, "x".toByteArray()))
@@ -443,7 +436,6 @@ class XProtocolTest {
 
     // --- protocol hygiene --------------------------------------------------
 
-    @org.junit.Ignore("D1a: the X11 wire format is implemented but NOT yet verified - these 13 checks fail on the reply/event byte layout and must be fixed against a real client (or a working build machine) before the X server is used. Tracked in docs/X_SERVER.md.")
     @Test
     fun `every reply and event is a multiple of 4 bytes and 32 bytes long for fixed messages`() {
         val windowId = rootId + 51
@@ -453,20 +445,24 @@ class XProtocolTest {
             client.queryTree(rootId),
             client.internAtom("X"),
             client.queryExtension("RENDER"),
-            client.getKeyboardMapping(8, 4),
+            client.getKeyboardMapping(38, 1),
             client.destroyWindow(0x99),
         )
         out.forEach { message ->
             assertEquals(0, message.size % 4) // every X message is 4-byte aligned
             if (message[0].toInt() == 0) assertEquals(32, message.size) // errors are fixed size
         }
-        // QueryExtension: present=0 at byte 8, no extension data
-        val extension = out.replies().first { it.intLE(4) == 0 && it.size == 32 }
+        // QueryExtension (request #5): present=0 at byte 8, no extension data
+        val extension = out.replies().first { it.shortLE(2) == 5 }
+        assertEquals(32, extension.size)
         assertEquals(0, extension[8].toInt())
-        // GetKeyboardMapping advertises 2 keysyms per keycode and 4 keycodes of data
-        val mapping = out.replies().first { it.size == 32 + 4 * 2 * 4 }
-        assertEquals(2, mapping[8].toInt())
-        assertEquals('a'.code, mapping.intLE(32 + ('a'.code + 8 - 8) * 8))
+        // GetKeyboardMapping (request #6): keysyms-per-keycode in the data byte,
+        // the two keysyms for keycode 38 ('a') start at offset 32
+        val mapping = out.replies().first { it.shortLE(2) == 6 }
+        assertEquals(32 + 1 * 2 * 4, mapping.size)
+        assertEquals(2, mapping[1].toInt())
+        assertEquals('a'.code, mapping.intLE(32))
+        assertEquals('A'.code, mapping.intLE(36)) // the shifted slot
     }
 
     @Test
@@ -476,7 +472,6 @@ class XProtocolTest {
         assertEquals(4, send(client.internAtom("D")).reply().shortLE(2))
     }
 
-    @org.junit.Ignore("D1a: the X11 wire format is implemented but NOT yet verified - these 13 checks fail on the reply/event byte layout and must be fixed against a real client (or a working build machine) before the X server is used. Tracked in docs/X_SERVER.md.")
     @Test
     fun `a request split across two reads is still handled once`() {
         val windowId = rootId + 61
@@ -490,7 +485,6 @@ class XProtocolTest {
 
     // --- events ------------------------------------------------------------
 
-    @org.junit.Ignore("D1a: the X11 wire format is implemented but NOT yet verified - these 13 checks fail on the reply/event byte layout and must be fixed against a real client (or a working build machine) before the X server is used. Tracked in docs/X_SERVER.md.")
     @Test
     fun `events only go to windows that selected for them`() {
         val quiet = rootId + 71
@@ -514,11 +508,10 @@ class XProtocolTest {
         val child = rootId + 73
         send(client.createWindow(child, listener, 0, 0, 10, 10))
         connection.drainOutbox()
-        send(client.mapWindow(child))
-        assertEquals(X11.EV_MAP_NOTIFY, connection.drainOutbox().event(X11.EV_MAP_NOTIFY)[0].toInt())
+        val mapped = send(client.mapWindow(child))
+        assertEquals(X11.EV_MAP_NOTIFY, mapped.event(X11.EV_MAP_NOTIFY)[0].toInt())
     }
 
-    @org.junit.Ignore("D1a: the X11 wire format is implemented but NOT yet verified - these 13 checks fail on the reply/event byte layout and must be fixed against a real client (or a working build machine) before the X server is used. Tracked in docs/X_SERVER.md.")
     @Test
     fun `pointer input is delivered in window coordinates with the button mask`() {
         val windowId = rootId + 81
@@ -527,18 +520,20 @@ class XProtocolTest {
                 windowId, rootId, 100, 50, 200, 200,
                 EventMask.POINTER_MOTION or EventMask.BUTTON_PRESS or EventMask.BUTTON_RELEASE,
             ),
+            client.mapWindow(windowId),
         )
-        connection.drainOutbox() // drop the CreateNotify for the root
+        connection.drainOutbox() // drop the CreateNotify/MapNotify for the root
 
         connection.onPointerMove(150, 80)
         val motion = connection.drainOutbox().single()
         assertEquals(X11.EV_MOTION_NOTIFY, motion[0].toInt())
-        assertEquals(windowId, motion.intLE(16)) // event window
-        assertEquals(150, motion.shortLE(24)) // root x
-        assertEquals(80, motion.shortLE(26)) // root y
-        assertEquals(0, motion.intLE(28)) // child
-        assertEquals(50, motion.shortLE(32)) // window x = 150 - 100
-        assertEquals(30, motion.shortLE(34)) // window y = 80 - 50
+        assertEquals(rootId, motion.intLE(8)) // root window
+        assertEquals(windowId, motion.intLE(12)) // event window
+        assertEquals(0, motion.intLE(16)) // child
+        assertEquals(150, motion.shortLE(20)) // root x
+        assertEquals(80, motion.shortLE(22)) // root y
+        assertEquals(50, motion.shortLE(24)) // window x = 150 - 100
+        assertEquals(30, motion.shortLE(26)) // window y = 80 - 50
 
         connection.onButton(150, 80, 1, pressed = true, maskAfter = X11.MASK_BUTTON1)
         val press = connection.drainOutbox().single()
@@ -554,7 +549,6 @@ class XProtocolTest {
         assertTrue(connection.drainOutbox().isEmpty())
     }
 
-    @org.junit.Ignore("D1a: the X11 wire format is implemented but NOT yet verified - these 13 checks fail on the reply/event byte layout and must be fixed against a real client (or a working build machine) before the X server is used. Tracked in docs/X_SERVER.md.")
     @Test
     fun `wm delete window is sent as a 32-byte client message`() {
         val windowId = rootId + 91
@@ -564,10 +558,10 @@ class XProtocolTest {
         val message = connection.drainOutbox().single()
         assertEquals(32, message.size)
         assertEquals(X11.EV_CLIENT_MESSAGE, message[0].toInt())
-        assertEquals(32, message[1].toInt()) // format
-        assertEquals(windowId, message.intLE(8))
-        assertEquals(document.atomId("WM_PROTOCOLS"), message.intLE(12))
-        assertEquals(document.atomId("WM_DELETE_WINDOW"), message.intLE(16))
+        assertEquals(32, message[1].toInt()) // format sits in byte 1
+        assertEquals(windowId, message.intLE(4))
+        assertEquals(document.atomId("WM_PROTOCOLS"), message.intLE(8))
+        assertEquals(document.atomId("WM_DELETE_WINDOW"), message.intLE(12))
     }
 
     // --- document model ----------------------------------------------------
