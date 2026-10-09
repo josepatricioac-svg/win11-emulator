@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -30,13 +31,26 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 
-/** How far along the open/close transition a window is, and what to draw. */
+/**
+ * How far along the open/close transition a window is, and what to draw.
+ *
+ * The fields are Compose state on purpose: [WindowFrame] reads them inside its
+ * `graphicsLayer {}` block, and that block only re-runs when a state it read changes.
+ * With plain `var`s the layer was drawn once at alpha 0 and never invalidated, so a
+ * freshly opened window stayed invisible until something else (e.g. opening another
+ * app and changing focus) forced the frame to recompose.
+ */
 class WindowVisual(
-    var progress: Float = 1f,
-    var alpha: Float = 1f,
-    var scale: Float = 1f,
-    var shrink: Float = 1f,
+    progress: Float = 1f,
+    alpha: Float = 1f,
+    scale: Float = 1f,
+    shrink: Float = 1f,
 ) {
+    var progress by mutableFloatStateOf(progress)
+    var alpha by mutableFloatStateOf(alpha)
+    var scale by mutableFloatStateOf(scale)
+    var shrink by mutableFloatStateOf(shrink)
+
     fun copyFrom(other: WindowVisual) {
         progress = other.progress
         alpha = other.alpha
