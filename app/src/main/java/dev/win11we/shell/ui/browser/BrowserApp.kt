@@ -23,6 +23,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -35,6 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.win11we.shell.R
+import dev.win11we.shell.runtime.DesktopEngineReadiness
 import dev.win11we.shell.ui.theme.AccentBlue
 import dev.win11we.shell.ui.theme.CardSurface
 import dev.win11we.shell.ui.theme.StrokeSubtle
@@ -48,16 +50,24 @@ private val Card = RoundedCornerShape(9.dp)
 
 /**
  * Browser window. The shell never renders web content itself: it resolves the
- * address and hands it to a real browser, Firefox by preference.
+ * address and hands it to a real browser - an Android one via intent, or the
+ * desktop engine (Firefox ESR in the rootfs, D1/R3) which opens on the X Desktop.
  */
 @Composable
 fun BrowserApp(
     state: BrowserState,
     onChooseBrowser: (String) -> Unit,
     modifier: Modifier = Modifier,
+    /** Opens (or focuses) the X Desktop window after a desktop-engine launch. */
+    onRequestXDesktop: () -> Unit = {},
 ) {
     val engine = state.engine()
     val context = LocalContext.current
+    // Readiness is evaluated on a guarded worker (no disk I/O in composition);
+    // the snapshot is Compose state, so the catalogue updates when pieces land.
+    LaunchedEffect(Unit) {
+        DesktopEngineReadiness.refreshAsync(context)
+    }
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -93,8 +103,13 @@ fun BrowserApp(
         }
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
+            val launchable = state.desktopLaunchable()
             Text(
-                text = if (state.engineBlocked()) "${engine.label} - runtime not installed" else "Opens in ${engine.label}",
+                text = when {
+                    launchable -> "${engine.label} - opens on the X Desktop"
+                    state.engineBlocked() -> "${engine.label} - runtime not installed"
+                    else -> "Opens in ${engine.label}"
+                },
                 color = if (state.engineBlocked()) Color(0xFFFFB4A6) else TextSecondary,
                 fontSize = 12.5.sp,
                 modifier = Modifier.weight(1f),
@@ -109,21 +124,29 @@ fun BrowserApp(
                     .background(AccentBlue)
                     .clickable(onClickLabel = "Open") {
                         val url = state.resolve()
-                        if (url == null) {
-                            Toast.makeText(context, "Nothing to open", Toast.LENGTH_SHORT).show()
-                        } else if (state.engineBlocked()) {
-                            Toast.makeText(
-                                context,
-                                "${engine.label} needs the container runtime (R1/R3) and the X server (D1).",
-                                Toast.LENGTH_LONG,
-                            ).show()
-                        } else {
-                            try {
-                                context.startActivity(Browsers.launchIntent(url, state.targetPackage()))
-                            } catch (error: ActivityNotFoundException) {
-                                state.markLaunchFailed()
-                                Toast.makeText(context, "No browser could open $url", Toast.LENGTH_LONG).show()
+                        when {
+                            url == null ->
+                                Toast.makeText(context, "Nothing to open", Toast.LENGTH_SHORT).show()
+                            launchable -> {
+                                val ok = state.launchDesktop()
+                                state.desktopMessage?.let {
+                                    Toast.makeText(context, it, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
+                                }
+                                if (ok) onRequestXDesktop()
                             }
+                            state.engineBlocked() ->
+                                Toast.makeText(
+                                    context,
+                                    "${engine.label} needs the container runtime (R1/R3) and the X server (D1).",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            else ->
+                                try {
+                                    context.startActivity(Browsers.launchIntent(url, state.targetPackage()))
+                                } catch (error: ActivityNotFoundException) {
+                                    state.markLaunchFailed()
+                                    Toast.makeText(context, "No browser could open $url", Toast.LENGTH_LONG).show()
+                                }
                         }
                     }
                     .padding(horizontal = 18.dp, vertical = 8.dp),
@@ -132,6 +155,10 @@ fun BrowserApp(
         if (state.launchFailed) {
             Spacer(Modifier.height(8.dp))
             Text("No browser answered. Install Firefox, or pick one below.", color = Color(0xFFFF8A7A), fontSize = 12.sp)
+        }
+        state.desktopMessage?.let { message ->
+            Spacer(Modifier.height(8.dp))
+            Text(message, color = TextSecondary, fontSize = 12.sp)
         }
 
         Spacer(Modifier.height(18.dp))
@@ -182,14 +209,21 @@ fun BrowserApp(
         Spacer(Modifier.height(10.dp))
         DesktopBrowserCatalogue.ALL.forEach { desktop ->
             val chosen = engine is BrowserEngine.DesktopBrowser && engine.id == desktop.id
+            val ready = state.desktopEngineReady(desktop.id)
+            val missing = if (ready) null else DesktopEngineReadiness.missing(desktop.id)
             BrowserCard(
                 title = desktop.label,
-                subtitle = desktop.detail,
+                subtitle = missing ?: desktop.detail,
                 iconRes = desktop.iconRes,
-                trailing = if (chosen) "Selected" else "Needs " + desktop.requirement.substringBefore(' '),
+                trailing = when {
+                    chosen && ready -> "Selected - ready"
+                    chosen -> "Selected"
+                    ready -> "Ready"
+                    else -> "Needs " + desktop.requirement.substringBefore(' ')
+                },
                 accent = chosen,
                 badge = desktop.license,
-                locked = !desktop.available,
+                locked = !desktop.available && !ready,
                 onClick = {
                     state.chooseBrowser(desktop.id)
                     onChooseBrowser(desktop.id)

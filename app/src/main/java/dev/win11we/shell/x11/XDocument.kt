@@ -66,8 +66,77 @@ object EventMask {
     const val STRUCTURE_NOTIFY = 1 shl 17
     const val SUBSTRUCTURE_NOTIFY = 1 shl 19
     const val SUBSTRUCTURE_REDIRECT = 1 shl 20
+    const val FOCUS_CHANGE = 1 shl 21
     const val PROPERTY_CHANGE = 1 shl 22
     const val OWNER_GRAB_BUTTON = 1 shl 24
+}
+
+/** Standard cursor glyph numbers from X11/cursorfont.h (the ones worth rendering). */
+object CursorGlyph {
+    const val X_CURSOR = 0
+    const val PENCIL = 1
+    const val ARROW = 2
+    const val CROSSHAIR = 34
+    const val HAND2 = 60
+    const val LEFT_PTR = 68
+    const val WATCH = 150
+    const val XTERM = 152
+}
+
+/** A cursor resource: glyph-based (CreateGlyphCursor) or pixmap-based (CreateCursor). */
+data class XCursorResource(
+    val id: Int,
+    /** The XC_* glyph number; 0 for pixmap cursors, which render as the default arrow. */
+    val glyph: Int,
+    val foreground: Int = 0x000000,
+    val background: Int = 0xFFFFFF,
+)
+
+/** An active pointer grab (XGrabPointer): all pointer events go to [window] until ungrab. */
+data class PointerGrab(
+    val window: Int,
+    val ownerEvents: Boolean,
+    val eventMask: Int,
+    val confineTo: Int,
+    val cursor: Int,
+    val connection: XConnection,
+    /** True when a passive grab (XGrabButton) activated it: a release ends it. */
+    val implicit: Boolean = false,
+)
+
+/** An active keyboard grab (XGrabKeyboard). */
+data class KeyboardGrab(
+    val window: Int,
+    val ownerEvents: Boolean,
+    val connection: XConnection,
+    val implicit: Boolean = false,
+)
+
+/**
+ * A passive grab (XGrabButton/XGrabKey): activates when a matching press would
+ * reach [window] or one of its descendants. [detail] 0 = AnyButton/AnyKey;
+ * [modifiers] 0x8000 = AnyModifier.
+ */
+data class PassiveGrab(
+    val window: Int,
+    val eventMask: Int,
+    val detail: Int,
+    val modifiers: Int,
+    val isKey: Boolean,
+    val connection: XConnection,
+    val ownerEvents: Boolean = false,
+    val confineTo: Int = 0,
+    val cursor: Int = 0,
+) {
+    fun matches(detail: Int, stateMask: Int): Boolean =
+        (this.detail == 0 || this.detail == detail) &&
+            (modifiers == ANY_MODIFIER ||
+                (modifiers and MODIFIER_BITS) == (stateMask and MODIFIER_BITS))
+
+    companion object {
+        const val ANY_MODIFIER = 1 shl 15
+        const val MODIFIER_BITS = 0x1F // Shift..Mod5, as X compares them
+    }
 }
 
 /** A window in the server's tree. Geometry is in screen pixels. */
@@ -86,6 +155,8 @@ data class XWindow(
     var eventMask: Int = 0,
     var backgroundPixel: Int = 0,
     var doNotPropagateMask: Int = 0,
+    /** CWCursor: cursor resource id, 0 = inherit from the parent (X semantics). */
+    var cursor: Int = 0,
     val children: MutableList<Int> = mutableListOf(),
     val properties: MutableMap<Int, WindowProperty> = mutableMapOf(),
 ) {
@@ -126,6 +197,191 @@ class XDocument(
     /** Which connection holds SubstructureRedirect on a window (X allows only one). */
     private val redirectOwners = HashMap<Int, XConnection>()
 
+    /**
+     * Which connection created which window. SendEvent and focus/grab events may
+     * target a window owned by *another* connection, and events must reach the
+     * owner's socket - not the sender's. Root-owned windows map to nobody; the
+     * server broadcasts structure events to every connection separately.
+     */
+    private val windowOwners = HashMap<Int, XConnection>()
+
+    fun ownerOf(windowId: Int): XConnection? = synchronized(windowOwners) { windowOwners[windowId] }
+
+    fun setOwner(windowId: Int, connection: XConnection) = synchronized(windowOwners) {
+        windowOwners[windowId] = connection
+        Unit
+    }
+
+    /** Called when a connection dies: its windows lose their owner tag. */
+    fun releaseOwners(connection: XConnection) = synchronized(windowOwners) {
+        windowOwners.entries.removeAll { it.value === connection }
+    }
+
+    // --- input focus (server-wide, like X) ---------------------------------
+
+    companion object FocusDefaults {
+        /** SetInputFocus revert/focus values: None = no events, PointerRoot = follow the pointer. */
+        const val FOCUS_NONE = 0
+        const val FOCUS_POINTER_ROOT = 1
+    }
+
+    /** The current input focus: [FOCUS_NONE], [FOCUS_POINTER_ROOT] or a window id. */
+    @Volatile
+    var focus: Int = FOCUS_POINTER_ROOT
+        private set
+
+    /** Where focus reverts when the focused window becomes unviewable. */
+    @Volatile
+    var focusRevertTo: Int = FOCUS_POINTER_ROOT
+        private set
+
+    /** @return the old focus, or null when the request was invalid (BadWindow/BadMatch). */
+    fun setInputFocus(windowId: Int, revertTo: Int): Int? {
+        if (windowId != FOCUS_NONE && windowId != FOCUS_POINTER_ROOT && !windows.containsKey(windowId)) return null
+        if (revertTo !in 0..2) return null
+        val old = focus
+        focus = windowId
+        focusRevertTo = revertTo
+        return old
+    }
+
+    /** Focus reverts when its window is destroyed or unmapped. */
+    private fun revertFocusIf(lostId: Int) {
+        if (focus == lostId) {
+            focus = if (focusRevertTo == 2) {
+                windows[lostId]?.parent ?: FOCUS_POINTER_ROOT // RevertToParent
+            } else {
+                focusRevertTo
+            }
+        }
+    }
+
+    // --- grabs (server-wide) ------------------------------------------------
+
+    @Volatile
+    var pointerGrab: PointerGrab? = null
+        private set
+
+    @Volatile
+    var keyboardGrab: KeyboardGrab? = null
+        private set
+
+    private val passiveGrabs = mutableListOf<PassiveGrab>()
+
+    fun grabPointer(grab: PointerGrab): Boolean {
+        if (pointerGrab != null) return false // AlreadyGrabbed
+        pointerGrab = grab
+        return true
+    }
+
+    fun ungrabPointer(connection: XConnection) {
+        pointerGrab?.takeIf { it.connection === connection }?.let { pointerGrab = null }
+    }
+
+    /** Ends a grab only when it was implicitly activated by a passive grab. */
+    fun ungrabImplicitPointer(connection: XConnection) {
+        pointerGrab?.takeIf { it.connection === connection && it.implicit }?.let { pointerGrab = null }
+    }
+
+    fun ungrabImplicitKeyboard(connection: XConnection) {
+        keyboardGrab?.takeIf { it.connection === connection && it.implicit }?.let { keyboardGrab = null }
+    }
+
+    fun changePointerGrab(connection: XConnection, eventMask: Int, cursor: Int): Boolean {
+        val current = pointerGrab ?: return false
+        if (current.connection !== connection) return false
+        pointerGrab = current.copy(eventMask = eventMask, cursor = cursor)
+        return true
+    }
+
+    fun grabKeyboard(grab: KeyboardGrab): Boolean {
+        if (keyboardGrab != null) return false
+        keyboardGrab = grab
+        return true
+    }
+
+    fun ungrabKeyboard(connection: XConnection) {
+        keyboardGrab?.takeIf { it.connection === connection }?.let { keyboardGrab = null }
+    }
+
+    fun addPassiveGrab(grab: PassiveGrab) = synchronized(passiveGrabs) {
+        // A re-grab replaces the identical (window, detail, modifiers, isKey) entry.
+        passiveGrabs.removeAll {
+            it.window == grab.window && it.detail == grab.detail &&
+                it.modifiers == grab.modifiers && it.isKey == grab.isKey
+        }
+        passiveGrabs.add(grab)
+    }
+
+    fun removePassiveGrab(window: Int, detail: Int, modifiers: Int, isKey: Boolean) =
+        synchronized(passiveGrabs) {
+            passiveGrabs.removeAll {
+                it.window == window && it.detail == detail && it.modifiers == modifiers && it.isKey == isKey
+            }
+        }
+
+    fun passiveGrabs(): List<PassiveGrab> = synchronized(passiveGrabs) { passiveGrabs.toList() }
+
+    /** First passive grab on [windowId] or an ancestor that matches the press. */
+    fun passiveGrabFor(windowId: Int, detail: Int, stateMask: Int, isKey: Boolean): PassiveGrab? {
+        var current: Int? = windowId
+        val grabs = passiveGrabs()
+        while (current != null) {
+            grabs.firstOrNull { it.window == current && it.isKey == isKey && it.matches(detail, stateMask) }
+                ?.let { return it }
+            current = windows[current]?.parent
+        }
+        return null
+    }
+
+    /** Drops every grab held by a connection that just disconnected (no stuck grabs). */
+    fun releaseGrabs(connection: XConnection) {
+        ungrabPointer(connection)
+        ungrabKeyboard(connection)
+        synchronized(passiveGrabs) { passiveGrabs.removeAll { it.connection === connection } }
+    }
+
+    // --- cursors (server-wide: the renderer resolves them from any thread) ---
+
+    private val cursors = HashMap<Int, XCursorResource>()
+
+    fun addCursor(cursor: XCursorResource) = synchronized(cursors) { cursors[cursor.id] = cursor }
+
+    fun removeCursor(id: Int) = synchronized(cursors) { cursors.remove(id) }
+
+    fun cursor(id: Int): XCursorResource? = synchronized(cursors) { cursors[id] }
+
+    /**
+     * The cursor glyph in effect at a root-coordinate point: the topmost window
+     * under the point and its ancestors are walked until one sets CWCursor,
+     * exactly like X. Unknown ids (pixmap cursors) render as the default arrow.
+     */
+    fun effectiveCursorGlyph(px: Int, py: Int): Int {
+        var window = windowAt(px, py)
+        while (window != null) {
+            if (window.cursor != 0) return cursor(window.cursor)?.glyph ?: CursorGlyph.LEFT_PTR
+            window = window.parent?.let { windows[it] }
+        }
+        return CursorGlyph.LEFT_PTR
+    }
+
+    // --- keyboard physical state (for QueryKeymap) ---------------------------
+
+    private val pressedKeycodes = HashSet<Int>()
+
+    fun noteKey(keycode: Int, pressed: Boolean) = synchronized(pressedKeycodes) {
+        if (pressed) pressedKeycodes.add(keycode) else pressedKeycodes.remove(keycode)
+    }
+
+    /** The 32-byte (256-bit) map QueryKeymap returns: bit N = keycode N is down. */
+    fun keymapBits(): ByteArray = synchronized(pressedKeycodes) {
+        val out = ByteArray(32)
+        pressedKeycodes.forEach { code ->
+            if (code in 0..255) out[code / 8] = (out[code / 8].toInt() or (1 shl (code % 8))).toByte()
+        }
+        out
+    }
+
     fun redirectOwner(windowId: Int): XConnection? = synchronized(redirectOwners) { redirectOwners[windowId] }
 
     /** @return false when another connection already owns the redirect (Access error). */
@@ -148,6 +404,13 @@ class XDocument(
 
     /** Set by XServer: invoked when an event was queued onto another connection. */
     var externalFlush: ((XConnection) -> Unit)? = null
+
+    /**
+     * Set by XServer: invoked when a client warped the pointer (WarpPointer or
+     * XTest FakeInput), so the server can sync the other connections and the
+     * software cursor. [origin] already moved itself and must be skipped.
+     */
+    var onWarp: ((x: Int, y: Int, origin: XConnection) -> Unit)? = null
 
     init {
         // The root window exists before any client connects. It listens for structure
@@ -215,7 +478,22 @@ class XDocument(
         window.children.toList().forEach { destroyWindow(it) }
         window.parent?.let { parent -> windows[parent]?.children?.remove(id) }
         windows.remove(id)
+        revertFocusIf(id)
         synchronized(redirectOwners) { redirectOwners.remove(id) }
+        synchronized(windowOwners) { windowOwners.remove(id) }
+        synchronized(passiveGrabs) { passiveGrabs.removeAll { it.window == id } }
+        pointerGrab?.takeIf { it.window == id }?.let { pointerGrab = null }
+        keyboardGrab?.takeIf { it.window == id }?.let { keyboardGrab = null }
+        return true
+    }
+
+    /** CirculateWindow: move a child to the top (place=0) or bottom (place=1) of the stack. */
+    fun circulate(id: Int, place: Int): Boolean {
+        val window = windows[id] ?: return false
+        val parent = window.parent?.let { windows[it] } ?: return false
+        if (parent.children.size < 2) return true
+        parent.children.remove(id)
+        if (place == 0) parent.children.add(id) else parent.children.add(0, id)
         return true
     }
 
@@ -233,6 +511,7 @@ class XDocument(
         val window = windows[id] ?: return false
         if (!window.mapped) return false
         window.mapped = false
+        revertFocusIf(id)
         return true
     }
 

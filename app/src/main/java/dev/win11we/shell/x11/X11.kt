@@ -21,11 +21,14 @@ object X11 {
     const val RESOURCE_SHIFT = 20
 
     // --- core request opcodes (X11 protocol numbers) -------------------------
-    // 1-52 are contiguous; the protocol inserts the drawable/GC requests
-    // (CreatePixmap 53 .. SetClipRectangles 59) before FreeGC at 60.
-    // Opcode 98 is shared by SetCloseDownMode and QueryExtension in the tail block;
-    // only the ones this server dispatches are declared, everything else is
-    // answered with BadRequest and logged - never silently misinterpreted.
+    // Numbers verified against xorgproto 2024.1 include/X11/Xproto.h (the X_*
+    // defines). 1-52 are contiguous except for the two ListFontsWithInfo slots;
+    // the protocol inserts the drawable/GC requests (CreatePixmap 53 ..
+    // SetClipRectangles 59) before FreeGC at 60, then the drawing block 61-77,
+    // colormaps/colours 78-92, cursors 93-97, extensions 98-99, keyboard /
+    // pointer / screensaver / host control 100-119, NoOperation 127.
+    // Opcodes 128-255 belong to extensions (QueryExtension hands out the
+    // major opcode; see XConnection's extension registry).
     const val REQ_CREATE_WINDOW = 1
     const val REQ_CHANGE_WINDOW_ATTRIBUTES = 2
     const val REQ_GET_WINDOW_ATTRIBUTES = 3
@@ -76,6 +79,8 @@ object X11 {
     const val REQ_QUERY_TEXT_EXTENTS = 48
     const val REQ_LIST_FONTS = 49
     const val REQ_LIST_FONTS_WITH_INFO = 50
+    const val REQ_SET_FONT_PATH = 51
+    const val REQ_GET_FONT_PATH = 52
     const val REQ_CREATE_PIXMAP = 53
     const val REQ_FREE_PIXMAP = 54
     const val REQ_CREATE_GC = 55
@@ -92,14 +97,15 @@ object X11 {
     const val REQ_POLY_SEGMENT = 66
     const val REQ_POLY_RECTANGLE = 67
     const val REQ_POLY_ARC = 68
+    const val REQ_FILL_POLY = 69
     const val REQ_POLY_FILL_RECTANGLE = 70
     const val REQ_POLY_FILL_ARC = 71
     const val REQ_PUT_IMAGE = 72
     const val REQ_GET_IMAGE = 73
     const val REQ_POLY_TEXT8 = 74
     const val REQ_POLY_TEXT16 = 75
-    const val REQ_IMAGE_TEXT8 = 76
     const val REQ_IMAGE_TEXT16 = 77
+    const val REQ_IMAGE_TEXT8 = 76
     const val REQ_CREATE_COLORMAP = 78
     const val REQ_FREE_COLORMAP = 79
     const val REQ_COPY_COLORMAP_AND_FREE = 80
@@ -114,33 +120,43 @@ object X11 {
     const val REQ_STORE_COLORS = 89
     const val REQ_STORE_NAMED_COLOR = 90
     const val REQ_QUERY_COLORS = 91
-    const val REQ_QUERY_BEST_SIZE = 92
-    const val REQ_SET_SCREEN_SAVER = 93
-    const val REQ_GET_SCREEN_SAVER = 94
-    // 95-113: the host/access-control, keyboard-control and extension-query block.
-    // Only QueryExtension, ListExtensions, GetKeyboardMapping and Bell are dispatched
-    // today; the rest are answered with BadRequest and logged rather than guessed at.
-    // XProtocolTest pins every opcode the server actually handles.
-    const val REQ_CHANGE_HOSTS = 95
-    const val REQ_LIST_HOSTS = 96
-    const val REQ_SET_ACCESS_CONTROL = 97
-    const val REQ_SET_CLOSE_DOWN_MODE = 98
-    const val REQ_KILL_CLIENT = 99
-    const val REQ_ROTATE_PROPERTIES = 100
-    const val REQ_CHANGE_KEYBOARD_MAPPING = 101
-    const val REQ_GET_KEYBOARD_MAPPING = 102
-    const val REQ_CHANGE_KEYBOARD_CONTROL = 103
-    const val REQ_GET_KEYBOARD_CONTROL = 104
-    const val REQ_BELL = 105
-    const val REQ_CHANGE_POINTER_CONTROL = 106
-    const val REQ_GET_POINTER_CONTROL = 107
-    const val REQ_SET_POINTER_MAPPING = 108
-    const val REQ_GET_POINTER_MAPPING = 109
-    const val REQ_SET_MODIFIER_MAPPING = 110
-    const val REQ_GET_MODIFIER_MAPPING = 111
-    const val REQ_QUERY_EXTENSION = 112
-    const val REQ_LIST_EXTENSIONS = 113
+    const val REQ_LOOKUP_COLOR = 92
+    const val REQ_CREATE_CURSOR = 93
+    const val REQ_CREATE_GLYPH_CURSOR = 94
+    const val REQ_FREE_CURSOR = 95
+    const val REQ_RECOLOR_CURSOR = 96
+    const val REQ_QUERY_BEST_SIZE = 97
+    const val REQ_QUERY_EXTENSION = 98
+    const val REQ_LIST_EXTENSIONS = 99
+    const val REQ_CHANGE_KEYBOARD_MAPPING = 100
+    const val REQ_GET_KEYBOARD_MAPPING = 101
+    const val REQ_CHANGE_KEYBOARD_CONTROL = 102
+    const val REQ_GET_KEYBOARD_CONTROL = 103
+    const val REQ_BELL = 104
+    const val REQ_CHANGE_POINTER_CONTROL = 105
+    const val REQ_GET_POINTER_CONTROL = 106
+    const val REQ_SET_SCREEN_SAVER = 107
+    const val REQ_GET_SCREEN_SAVER = 108
+    const val REQ_CHANGE_HOSTS = 109
+    const val REQ_LIST_HOSTS = 110
+    const val REQ_SET_ACCESS_CONTROL = 111
+    const val REQ_SET_CLOSE_DOWN_MODE = 112
+    const val REQ_KILL_CLIENT = 113
+    const val REQ_ROTATE_PROPERTIES = 114
+    const val REQ_FORCE_SCREEN_SAVER = 115
+    const val REQ_SET_POINTER_MAPPING = 116
+    const val REQ_GET_POINTER_MAPPING = 117
+    const val REQ_SET_MODIFIER_MAPPING = 118
+    const val REQ_GET_MODIFIER_MAPPING = 119
     const val REQ_NO_OPERATION = 127
+
+    /**
+     * The major opcode this server hands out for the XTest extension. Extension
+     * opcodes live in 128-255 and are assigned dynamically by the server; real
+     * X.org servers tend to give XTest something in the 130s. Clients learn the
+     * number from QueryExtension, so any free value >= 128 works.
+     */
+    const val EXT_XTEST_OPCODE = 130
 
     // --- events ------------------------------------------------------------
     const val EV_KEY_PRESS = 2
@@ -177,7 +193,7 @@ object X11 {
     const val MASK_BUTTON2 = 1 shl 9
     const val MASK_BUTTON3 = 1 shl 10
 
-    // --- error codes -------------------------------------------------------
+    // --- error codes (X11/X.h) ---------------------------------------------
     const val ERR_SUCCESS = 0
     const val ERR_BAD_REQUEST = 1
     const val ERR_BAD_VALUE = 2
@@ -189,10 +205,13 @@ object X11 {
     const val ERR_BAD_MATCH = 8
     const val ERR_BAD_DRAWABLE = 9
     const val ERR_ACCESS = 10
-    const val ERR_BAD_GC = 11
-    const val ERR_BAD_COLORMAP = 12
-    const val ERR_BAD_ALLOC = 17
+    const val ERR_BAD_ALLOC = 11
+    const val ERR_BAD_COLORMAP = 12 // BadColor
+    const val ERR_BAD_GC = 13
+    const val ERR_BAD_ID_CHOICE = 14
+    const val ERR_BAD_NAME = 15 // font or colour name does not exist
     const val ERR_BAD_LENGTH = 16
+    const val ERR_BAD_IMPLEMENTATION = 17
     const val ERR_NOT_IMPLEMENTED = 127 // not an X error: our own marker
 
     /** Rounds a byte length up to the 4-byte boundary X requires. */
@@ -225,6 +244,9 @@ class XReader(private val data: ByteArray, private val littleEndian: Boolean, va
         val b = data[position++].toInt() and 0xFF
         return if (littleEndian) a or (b shl 8) else (a shl 8) or b
     }
+
+    /** An INT16 field, sign-extended (coordinates and angles are signed in X). */
+    fun shortSigned(): Int = short().toShort().toInt()
 
     fun int(): Int {
         need(4)

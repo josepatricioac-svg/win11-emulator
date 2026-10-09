@@ -21,6 +21,13 @@ data class RuntimeRequest(
     /** Guest command, e.g. ["wine64", "cmd"] - the launcher adds box64 when needed. */
     val guestCommand: List<String>,
     val binds: List<Bind> = emptyList(),
+    /** Bind target of the container's state directory (`/root/.wine` for Wine). */
+    val guestPrefix: String = ProotCommand.GUEST_PREFIX,
+    /**
+     * Fully explicit environment for non-Wine guests (e.g. [FirefoxEnvironment]);
+     * null builds the Wine environment from the container settings.
+     */
+    val environment: Map<String, String>? = null,
 )
 
 enum class LaunchFailure {
@@ -122,7 +129,7 @@ class ContainerLauncher(
         return LaunchResult.ok("${request.container.name} started (pid stream attached)")
     }
 
-    /** `proot --rootfs … --bind <prefix>:/root/.wine … -- [box64] <guest command>` */
+    /** `proot --rootfs … --bind <prefix>:<guestPrefix> … -- [box64] <guest command>` */
     fun buildCommand(request: RuntimeRequest): List<String> {
         val proot = File(binaries.nativeLibraryDir, BinaryRole.PROOT.fileName)
         val guest = if (needsBox64(request.guestCommand)) {
@@ -136,19 +143,22 @@ class ContainerLauncher(
             prefixDir = File(request.container.prefixPath),
             binds = request.binds + request.container.drives.map { Bind(it.hostPath, "/mnt/${it.letter.lowercaseChar()}") },
             guestCommand = guest,
+            guestPrefix = request.guestPrefix,
         )
     }
 
-    /** The fully explicit environment, with this container's proot loader paths. */
+    /** The fully explicit environment, with this session's proot loader paths. */
     fun buildEnvironment(request: RuntimeRequest): Map<String, String> {
-        val env = WineEnvironment.build(
-            container = request.container,
-            xDisplay = request.xDisplay,
-            prootRootfs = request.rootfsDir.absolutePath,
-            nativeLibraryDir = binaries.nativeLibraryDir.absolutePath,
-            locale = request.locale,
-            audioSocket = request.audioSocket,
-        ).toMutableMap()
+        val env = (
+            request.environment ?: WineEnvironment.build(
+                container = request.container,
+                xDisplay = request.xDisplay,
+                prootRootfs = request.rootfsDir.absolutePath,
+                nativeLibraryDir = binaries.nativeLibraryDir.absolutePath,
+                locale = request.locale,
+                audioSocket = request.audioSocket,
+            )
+            ).toMutableMap()
         env.putAll(binaries.loaderPaths())
         return env.toSortedMap()
     }

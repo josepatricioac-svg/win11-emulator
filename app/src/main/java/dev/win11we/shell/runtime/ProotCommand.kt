@@ -29,6 +29,8 @@ object ProotCommand {
         link2symlink: Boolean = true,
         killOnExit: Boolean = true,
         extraArgs: List<String> = emptyList(),
+        /** Bind target of [prefixDir]; Wine's fixed `/root/.wine`, or a session's own state dir. */
+        guestPrefix: String = GUEST_PREFIX,
     ): List<String> {
         require(guestCommand.isNotEmpty()) { "a guest command is required" }
         val command = mutableListOf(prootBinary.absolutePath)
@@ -37,7 +39,7 @@ object ProotCommand {
         if (link2symlink) command += "--link2symlink"
         if (killOnExit) command += "--kill-on-exit"
         command += "--bind"
-        command += "${prefixDir.absolutePath}:$GUEST_PREFIX"
+        command += "${prefixDir.absolutePath}:$guestPrefix"
         binds.forEach { bind ->
             command += "--bind"
             command += bind.argument

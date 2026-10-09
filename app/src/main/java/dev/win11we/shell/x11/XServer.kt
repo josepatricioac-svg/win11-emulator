@@ -60,6 +60,35 @@ object XServer {
     private var acceptThread: Thread? = null
     private var windowManager: XWindowManager? = null
 
+    /**
+     * The authoritative pointer position in screen coordinates (D1c): updated by
+     * input dispatch and by client warps, read by the software-cursor renderer.
+     */
+    @Volatile
+    var pointerX: Int = 0
+        private set
+
+    @Volatile
+    var pointerY: Int = 0
+        private set
+
+    init {
+        // Keep every connection's pointer in sync when a client warps it
+        // (WarpPointer / XTest FakeInput), and wake the renderer for the cursor.
+        document.onWarp = { x, y, origin -> warpSync(x, y, origin) }
+    }
+
+    private fun warpSync(x: Int, y: Int, origin: XConnection) {
+        pointerX = x
+        pointerY = y
+        contentRevision++
+        connections().forEach { connection ->
+            if (connection === origin) return@forEach
+            runCatching { connection.onPointerMove(x, y) }
+            pushOutbox(connection)
+        }
+    }
+
     fun defaultDocument(widthPx: Int, heightPx: Int): XDocument {
         val rootId = X11.RESOURCE_ID_BASE
         return XDocument(
@@ -97,7 +126,27 @@ object XServer {
         }
     }
 
-    /** Starts listening. Returns false with [lastError] set when the socket cannot be bound. */
+    /**
+     * Makes sure a display exists even when no X Desktop window is open yet:
+     * attaches the shell WM and starts at a default screen size. Guest launches
+     * (the Firefox ESR desktop-browser session) call this before spawning; an
+     * X Desktop window opened later resizes the screen, keeping clients alive.
+     */
+    fun ensureRunning(widthPx: Int = 1280, heightPx: Int = 800): Boolean {
+        if (document.windowManager == null) attachWindowManager(ShellWindowManager.forServer())
+        return if (running) true else start(widthPx, heightPx)
+    }
+
+    /**
+     * Starts listening on the abstract-namespace socket. Returns false with
+     * [lastError] set when it cannot be bound.
+     *
+     * There is deliberately no path-form (`/tmp/.X11-unix/X100`) listener:
+     * `LocalServerSocket` only binds the abstract namespace through public API,
+     * and none is needed - libX11 tries the filesystem path first, fails (proot
+     * translates it to the bound-but-empty host directory), and falls back to
+     * the abstract socket, which proot passes through untouched.
+     */
     fun start(widthPx: Int = 1280, heightPx: Int = 800): Boolean {
         if (running) return true
         resizeScreen(widthPx, heightPx)
@@ -125,6 +174,14 @@ object XServer {
         runCatching { serverSocket?.close() }
         serverSocket = null
         synchronized(connections) {
+            // A dead connection must not leave a stale grab behind: an active
+            // pointer/keyboard grab suppresses delivery to everyone else, so the
+            // next session would see a server that swallows all input.
+            connections.forEach { connection ->
+                document.releaseRedirect(connection)
+                document.releaseOwners(connection)
+                document.releaseGrabs(connection)
+            }
             connections.clear()
         }
         synchronized(outputs) { outputs.clear() }
@@ -189,6 +246,8 @@ object XServer {
             synchronized(connections) { connections.remove(connection) }
             synchronized(outputs) { outputs.remove(connection) }
             document.releaseRedirect(connection)
+            document.releaseOwners(connection)
+            document.releaseGrabs(connection)
             clientCount = synchronized(connections) { connections.size }
             runCatching { client.close() }
         }
@@ -275,14 +334,23 @@ object XServer {
         synchronized(connections) { connections.removeAll { it === connection } }
         synchronized(outputs) { outputs.remove(connection) }
         document.releaseRedirect(connection)
+        document.releaseOwners(connection)
+        document.releaseGrabs(connection)
         clientCount = synchronized(connections) { connections.size }
     }
 
     /** Feeds one input event to all clients that care (single-app server: usually one). */
-    fun dispatchPointerMove(x: Int, y: Int) = connections().forEach { it.onPointerMove(x, y) }
+    fun dispatchPointerMove(x: Int, y: Int) {
+        pointerX = x
+        pointerY = y
+        connections().forEach { it.onPointerMove(x, y) }
+    }
 
-    fun dispatchButton(x: Int, y: Int, button: Int, pressed: Boolean, mask: Int) =
+    fun dispatchButton(x: Int, y: Int, button: Int, pressed: Boolean, mask: Int) {
+        pointerX = x
+        pointerY = y
         connections().forEach { it.onButton(x, y, button, pressed, mask) }
+    }
 
     fun dispatchKey(keycode: Int, keysym: Int, pressed: Boolean, mask: Int) =
         connections().forEach { it.onKey(keycode, keysym, pressed, mask) }

@@ -87,7 +87,28 @@ object RuntimeManifest {
         incompleteAlone = true,
     )
 
-    val ALL = listOf(ROOTFS, WINE64_DEB, WINE_ALL_DEB)
+    /**
+     * Mozilla's official self-contained Firefox ESR for linux-aarch64 (bundles its
+     * own libs; links the rootfs's GTK3 stack). The SHA-256 was computed from the
+     * release tarball after its SHA-512 was verified against Mozilla's own
+     * `SHA512SUMS` file for 140.17.0esr (retrieved 2026-10-10; see
+     * docs/THIRD_PARTY.md). Unpacked with the guest's tar+xz to
+     * `<rootfs>/opt/firefox-esr` (tarball root `firefox/` stripped).
+     */
+    val FIREFOX_ESR = Artifact(
+        id = "firefox-esr",
+        label = "Firefox ESR 140.17.0 (linux-aarch64)",
+        url = "https://archive.mozilla.org/pub/firefox/releases/140.17.0esr/" +
+            "linux-aarch64/en-US/firefox-140.17.0esr.tar.xz",
+        sha256 = "dd579f48405a7065f0f643ddb71a8de0f48a9d984c2783dee2ca173081850084",
+        sizeBytes = 66_921_712L,
+        requiredFreeBytes = 500L * 1024 * 1024, // ~64 MB file, ~260 MB unpacked
+        description = "The desktop browser engine: unpacks into the rootfs, runs under proot on the " +
+            "shell's X server (:100). Needs the rootfs GUI libraries (same provisioning step as Wine).",
+        incompleteAlone = true,
+    )
+
+    val ALL = listOf(ROOTFS, WINE64_DEB, WINE_ALL_DEB, FIREFOX_ESR)
 
     fun byId(id: String): Artifact? = ALL.firstOrNull { it.id == id }
 

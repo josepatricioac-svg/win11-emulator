@@ -6,6 +6,8 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.Snapshot
+import dev.win11we.shell.runtime.FirefoxSession
+import dev.win11we.shell.runtime.RuntimePaths
 import dev.win11we.shell.ui.terminal.LineKind
 import dev.win11we.shell.ui.terminal.LogBuffer
 import dev.win11we.shell.ui.terminal.TerminalLine
@@ -74,14 +76,24 @@ class RootfsManager(
 
     /** Rootfs is usable only when it has been unpacked. */
     val rootfsReady: Boolean
-        get() = rootfsDir.isDirectory && File(rootfsDir, "bin").isDirectory && File(rootfsDir, "usr").isDirectory
+        get() = RuntimePaths.rootfsExtracted(rootfsDir)
+
+    /**
+     * Whether an artifact's install result is already on disk: the unpacked
+     * rootfs tree for ROOTFS, the unpacked Mozilla build for FIREFOX_ESR.
+     */
+    private fun installedCheck(artifact: Artifact): Boolean = when (artifact.id) {
+        RuntimeManifest.ROOTFS.id -> rootfsReady
+        RuntimeManifest.FIREFOX_ESR.id -> FirefoxSession.isInstalled(rootfsDir)
+        else -> false
+    }
 
     /** Reads what is already on disk without touching the network. May hash a file. */
     fun scan(artifact: Artifact): ArtifactState {
         val target = artifact.targetFile(downloadDir)
         val partial = artifact.partialFile(downloadDir)
         return when {
-            artifact.id == RuntimeManifest.ROOTFS.id && rootfsReady -> ArtifactState.READY
+            installedCheck(artifact) -> ArtifactState.READY
             target.isFile -> if (cachedSha256(target) == artifact.sha256) {
                 ArtifactState.VERIFIED
             } else {
@@ -279,13 +291,16 @@ class RootfsManager(
         }
         setState(artifact.id, ArtifactState.EXTRACTING)
         val ok = runCatching { extractor(archive, rootfsDir) }.getOrDefault(false)
-        val ready = ok && rootfsReady
+        val ready = ok && installedCheck(artifact)
         setState(artifact.id, if (ready) ArtifactState.READY else ArtifactState.FAILED)
-        val message = if (ready) {
-            "Extracted to ${rootfsDir.absolutePath}."
-        } else {
-            "Extraction did not produce a usable rootfs. proot-based untar arrives with the R1 binaries " +
-                "(device nodes and root ownership need `proot --rootfs / -0 tar`)."
+        val message = when {
+            ready && artifact.id == RuntimeManifest.FIREFOX_ESR.id ->
+                "Installed to ${File(rootfsDir, "opt/firefox-esr").absolutePath}."
+            ready -> "Extracted to ${rootfsDir.absolutePath}."
+            else ->
+                "Extraction did not produce a usable ${if (artifact.id == RuntimeManifest.ROOTFS.id) "rootfs" else artifact.label} install. " +
+                    "proot-based untar arrives with the R1 binaries " +
+                    "(device nodes and root ownership need `proot --rootfs / -0 tar`)."
         }
         Snapshot.withMutableSnapshot { messages[artifact.id] = message }
         log.add(
@@ -294,11 +309,14 @@ class RootfsManager(
         return ready
     }
 
-    /** Removes the archive, its partial download and (for the rootfs) the unpacked tree. */
+    /** Removes the archive, its partial download and the artifact's unpacked tree. */
     fun remove(artifact: Artifact): Boolean {
         val removed = runCatching { session.remove(artifact, downloadDir) }.getOrDefault(false)
         if (artifact.id == RuntimeManifest.ROOTFS.id && rootfsDir.isDirectory) {
             runCatching { rootfsDir.deleteRecursively() }
+        }
+        if (artifact.id == RuntimeManifest.FIREFOX_ESR.id) {
+            runCatching { File(rootfsDir, "opt/firefox-esr").deleteRecursively() }
         }
         hashCache.clear()
         val state = scan(artifact)

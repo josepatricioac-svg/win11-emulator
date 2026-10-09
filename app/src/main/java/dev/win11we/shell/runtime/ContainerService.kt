@@ -29,11 +29,29 @@ object RuntimePaths {
     const val X_DISPLAY = ":100"
 
     fun xSocketDir(filesDir: File) = File(filesDir, "tmp")
-    fun xSocket(filesDir: File) = File(xSocketDir(filesDir), ".X11-unix-100")
+
+    /**
+     * Host directory bound at the guest's `/tmp/.X11-unix` so the conventional
+     * socket directory exists inside the rootfs. The server itself listens on the
+     * **abstract** socket (which proot passes through untouched): Android offers
+     * no public API to bind a path-form local server socket, and libX11 falls
+     * back from the missing path form to the abstract one automatically.
+     */
+    fun xSocketUnixDir(filesDir: File) = File(xSocketDir(filesDir), ".X11-unix")
+
+    /** Where a path-form socket would live; kept for docs/tools, not bound (see above). */
+    fun xSocket(filesDir: File) = File(xSocketUnixDir(filesDir), "X100")
     fun pulseSocket(filesDir: File) = File(xSocketDir(filesDir), "pulse-native")
 
     /** Where R3 downloads and unpacks the Ubuntu rootfs. */
     fun defaultRootfs(filesDir: File) = File(filesDir, "rootfs")
+
+    /** The Firefox ESR session's persistent profile host directory (D1/R3). */
+    fun browserProfileDir(filesDir: File) = File(filesDir, "browser/firefox-profile")
+
+    /** True when the rootfs archive has been unpacked (bin/ and usr/ exist). */
+    fun rootfsExtracted(rootfsDir: File): Boolean =
+        rootfsDir.isDirectory && File(rootfsDir, "bin").isDirectory && File(rootfsDir, "usr").isDirectory
 
     /** R3/R4 create the prefix with `wineboot` before the first real launch. */
     fun ensurePrefix(prefixPath: String): File = File(prefixPath).also { it.mkdirs() }
@@ -73,6 +91,28 @@ object RuntimeHolder {
             xDisplay = RuntimePaths.X_DISPLAY,
             audioSocket = RuntimePaths.pulseSocket(filesDir).absolutePath,
             guestCommand = guestCommand,
+        )
+    }
+
+    /**
+     * Builds the desktop-browser session request (Firefox ESR): native arm64, so
+     * no box64 and no Wine environment - [FirefoxEnvironment] instead. The
+     * profile directory doubles as the request's "prefix" and is created here so
+     * the launcher's validation passes on first launch.
+     */
+    fun firefoxRequest(context: Context, url: String? = null, rootfsOverride: String? = null): RuntimeRequest {
+        val appContext = context.applicationContext
+        val filesDir = appContext.filesDir
+        val profile = RuntimePaths.browserProfileDir(filesDir)
+        RuntimePaths.ensurePrefix(profile.absolutePath)
+        return RuntimeRequest(
+            container = Container.defaults(FirefoxSession.SESSION_ID, FirefoxSession.SESSION_NAME, profile.absolutePath),
+            rootfsDir = rootfsOverride?.let { File(it) } ?: rootfsDir ?: RuntimePaths.defaultRootfs(filesDir),
+            xDisplay = RuntimePaths.X_DISPLAY,
+            guestCommand = FirefoxSession.guestCommand(url),
+            guestPrefix = FirefoxSession.GUEST_PROFILE_DIR,
+            binds = FirefoxSession.binds(profile, RuntimePaths.xSocketUnixDir(filesDir)),
+            environment = FirefoxEnvironment.build(RuntimePaths.X_DISPLAY),
         )
     }
 }

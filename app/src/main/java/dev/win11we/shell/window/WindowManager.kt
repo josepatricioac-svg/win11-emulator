@@ -25,6 +25,8 @@ import dev.win11we.shell.ui.settings.SettingsState
 import dev.win11we.shell.container.ContainerStore
 import dev.win11we.shell.container.NotInstalledRuntime
 import dev.win11we.shell.runtime.ContainerService
+import dev.win11we.shell.runtime.DesktopBrowserLauncher
+import dev.win11we.shell.runtime.DesktopEngineReadiness
 import dev.win11we.shell.runtime.LauncherRuntime
 import dev.win11we.shell.runtime.NativeBinaries
 import dev.win11we.shell.runtime.RuntimeHolder
@@ -202,6 +204,12 @@ fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager
                 installed = Browsers.installed(appContext),
                 preferredPackage = store.browserPackage.ifBlank { null },
                 chosenEngineId = store.browserEngine.ifBlank { null },
+                // Cheap state reads only (rule 6): the readiness snapshot is
+                // filled by DesktopEngineReadiness' guarded worker.
+                desktopEngineReady = { engineId -> DesktopEngineReadiness.ready(engineId) },
+                launchDesktopBrowser = { engineId, url ->
+                    DesktopBrowserLauncher.launch(appContext, engineId, url, store.rootfsLocation.ifBlank { null })
+                },
             )
             "settings" -> SettingsState()
             // Task Manager observes the window list, so it gets the manager itself.

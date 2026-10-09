@@ -93,17 +93,52 @@ class XInput(
         return keycode
     }
 
-    fun modifierBitFor(keysym: Int): Int = when (keysym) {
-        XKeyboard.KEYSYM_SHIFT_L, 0xFFE2 -> X11.MASK_SHIFT
-        XKeyboard.KEYSYM_CONTROL_L, 0xFFE4 -> X11.MASK_CONTROL
-        XKeyboard.KEYSYM_ALT_L, 0xFFEA -> X11.MASK_MOD1
-        XKeyboard.KEYSYM_SUPER_L, 0xFFEC -> X11.MASK_MOD4
-        else -> 0
-    }
+    fun modifierBitFor(keysym: Int): Int = modifierBit(keysym)
 
     fun reset() {
         modifiers = 0
         buttons = 0
+    }
+
+    /**
+     * Injects committed IME text as real X key events (D1c): every character is
+     * looked up in the keyboard map ([XKeyboard.stepsForChar]), Shift is pressed
+     * around the characters that need it, and each key goes down and up through
+     * the same dispatcher hardware keys use - so clients see ordinary KeyPress/
+     * KeyRelease with consistent modifier masks, no XTest or XIM involved.
+     *
+     * @return the number of characters injected; the rest are outside the
+     * server's Latin-1 reach (documented limit: CJK etc. need XIM/XKB, P1+).
+     */
+    fun injectText(text: String): Int {
+        var injected = 0
+        for (c in text) {
+            val step = keyboard.stepsForChar(c) ?: continue
+            val shiftHere = step.needsShift && modifiers and X11.MASK_SHIFT == 0
+            if (shiftHere) {
+                modifiers = modifiers or X11.MASK_SHIFT
+                dispatcher.key(SHIFT_KEYCODE, XKeyboard.KEYSYM_SHIFT_L, true, state())
+            }
+            dispatcher.key(step.keycode, step.keysym, true, state())
+            dispatcher.key(step.keycode, step.keysym, false, state())
+            if (shiftHere) {
+                modifiers = modifiers and X11.MASK_SHIFT.inv()
+                dispatcher.key(SHIFT_KEYCODE, XKeyboard.KEYSYM_SHIFT_L, false, state())
+            }
+            injected++
+        }
+        return injected
+    }
+
+    /**
+     * Injects one special key (Return, BackSpace, arrows ...) by keysym, for
+     * IME actions that never produce characters. @return false when unmappable.
+     */
+    fun injectKeysym(keysym: Int): Boolean {
+        val keycode = keyboard.keycodeForKeysym(keysym) ?: return false
+        dispatcher.key(keycode, keysym, true, state())
+        dispatcher.key(keycode, keysym, false, state())
+        return true
     }
 
     companion object {
@@ -113,5 +148,17 @@ class XInput(
         const val BUTTON_TERTIARY = 4
         const val BUTTON_BACK = 8
         const val BUTTON_FORWARD = 16
+
+        /** The physical Left Shift keycode injection presses around shifted characters. */
+        const val SHIFT_KEYCODE = XKeyboard.XKEY_SHIFT_L
+
+        fun modifierBit(keysym: Int): Int = when (keysym) {
+            XKeyboard.KEYSYM_SHIFT_L, XKeyboard.KEYSYM_SHIFT_R -> X11.MASK_SHIFT
+            XKeyboard.KEYSYM_CONTROL_L, XKeyboard.KEYSYM_CONTROL_R -> X11.MASK_CONTROL
+            XKeyboard.KEYSYM_ALT_L, XKeyboard.KEYSYM_ALT_R -> X11.MASK_MOD1
+            XKeyboard.KEYSYM_SUPER_L, XKeyboard.KEYSYM_SUPER_R -> X11.MASK_MOD4
+            XKeyboard.KEYSYM_CAPS_LOCK -> X11.MASK_LOCK
+            else -> 0
+        }
     }
 }

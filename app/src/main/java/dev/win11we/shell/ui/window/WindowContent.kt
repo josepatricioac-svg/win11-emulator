@@ -51,6 +51,7 @@ import java.io.File
 import dev.win11we.shell.ui.settings.SettingsState
 import dev.win11we.shell.ui.notepad.NotepadScreen
 import dev.win11we.shell.ui.notepad.NotepadState
+import dev.win11we.shell.window.ShellApps
 import dev.win11we.shell.window.WindowState
 import dev.win11we.shell.window.explorerState
 
@@ -113,6 +114,15 @@ private fun WindowBody(
                     store.browserEngine = engineId
                     if (engineId.startsWith("android:")) {
                         store.browserPackage = engineId.removePrefix("android:")
+                    }
+                },
+                onRequestXDesktop = {
+                    // A launched desktop engine is only visible on the X surface:
+                    // focus the running X Desktop window or open one.
+                    val spec = ShellApps.firstOrNull { it.id == "xdesktop" }
+                    if (spec != null) {
+                        val running = manager.windows.firstOrNull { it.app.id == "xdesktop" && !it.closing }
+                        if (running != null) manager.focus(running) else manager.open(spec, desktopSize)
                     }
                 },
             )

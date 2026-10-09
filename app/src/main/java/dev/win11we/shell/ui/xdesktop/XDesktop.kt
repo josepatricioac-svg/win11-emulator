@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
@@ -13,8 +14,13 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -25,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -33,23 +40,33 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import dev.win11we.shell.x11.CursorGlyph
 import dev.win11we.shell.x11.DrawOp
+import dev.win11we.shell.x11.ImeCommitExtractor
 import dev.win11we.shell.x11.ShellWindowManager
 import dev.win11we.shell.x11.XDisplayList
 import dev.win11we.shell.x11.XDocument
 import dev.win11we.shell.x11.XInput
+import dev.win11we.shell.x11.XKeyboard
 import dev.win11we.shell.x11.XServer
 import kotlinx.coroutines.isActive
 
 /**
- * Bitmap/Canvas renderer for the X document (D1b). Every drawable gets its own
- * bitmap; recorded [DrawOp]s are replayed incrementally (a cursor per drawable),
- * then the bitmaps are composited in [XDocument.paintOrder] - root first,
- * children back-to-front - exactly like X's stacking order.
+ * Bitmap/Canvas renderer for the X document (D1b, extended in D1c). Every
+ * drawable gets its own bitmap; recorded [DrawOp]s are replayed incrementally
+ * (a cursor per drawable), then the bitmaps are composited in
+ * [XDocument.paintOrder] - root first, children back-to-front - exactly like
+ * X's stacking order. D1c adds the vector primitives (points, lines, arcs,
+ * polygons), ImageText backgrounds and the software cursor.
  */
 class XCanvasRenderer {
     private class Cache(val bitmap: Bitmap, val canvas: Canvas, var drawn: Int)
@@ -60,6 +77,9 @@ class XCanvasRenderer {
     private val paint = Paint().apply { isAntiAlias = true }
     private val srcRect = Rect()
     private val dstRect = RectF()
+    private val arcRect = RectF()
+    private val path = Path()
+    private val fontMetrics = Paint.FontMetrics()
 
     fun draw(dst: Canvas, document: XDocument, lists: XDisplayList) {
         caches.keys.retainAll { id -> document.window(id) != null || lists.sizeOf(id) != null }
@@ -67,6 +87,63 @@ class XCanvasRenderer {
             val cache = bitmapFor(window.id, window.width, window.height, window.backgroundPixel, document, lists)
                 ?: continue
             dst.drawBitmap(cache.bitmap, window.x.toFloat(), window.y.toFloat(), null)
+        }
+    }
+
+    /**
+     * Draws the software cursor at a *surface* position (already scaled by the
+     * caller), in the shape the document says is in effect. Drawn unscaled so
+     * it stays a usable size at any letterbox scale.
+     */
+    fun drawCursor(dst: Canvas, glyph: Int, x: Float, y: Float) {
+        path.reset()
+        val strokeShape: Boolean
+        when (glyph) {
+            CursorGlyph.XTERM -> {
+                // I-beam, centred on the hot point.
+                path.moveTo(x, y - 9f); path.lineTo(x, y + 9f)
+                path.moveTo(x - 4f, y - 9f); path.lineTo(x + 4f, y - 9f)
+                path.moveTo(x - 4f, y + 9f); path.lineTo(x + 4f, y + 9f)
+                strokeShape = true
+            }
+            CursorGlyph.CROSSHAIR -> {
+                path.moveTo(x - 9f, y); path.lineTo(x + 9f, y)
+                path.moveTo(x, y - 9f); path.lineTo(x, y + 9f)
+                strokeShape = true
+            }
+            CursorGlyph.WATCH -> {
+                path.addCircle(x + 8f, y + 8f, 7f, Path.Direction.CW)
+                strokeShape = true
+            }
+            else -> {
+                // Classic arrow (XC_left_ptr and everything we approximate with it).
+                path.moveTo(x, y)
+                path.lineTo(x, y + 17f)
+                path.lineTo(x + 4.2f, y + 13.2f)
+                path.lineTo(x + 7.2f, y + 20.2f)
+                path.lineTo(x + 10.4f, y + 18.8f)
+                path.lineTo(x + 7.4f, y + 11.9f)
+                path.lineTo(x + 12.6f, y + 11.9f)
+                path.close()
+                strokeShape = false
+            }
+        }
+        if (strokeShape) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 3.5f
+            paint.color = Color.BLACK
+            dst.drawPath(path, paint)
+            paint.strokeWidth = 1.4f
+            paint.color = Color.WHITE
+            dst.drawPath(path, paint)
+        } else {
+            paint.style = Paint.Style.FILL
+            paint.color = Color.BLACK
+            dst.drawPath(path, paint)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 1.6f
+            paint.color = Color.WHITE
+            dst.drawPath(path, paint)
         }
     }
 
@@ -145,9 +222,20 @@ class XCanvasRenderer {
                 }
                 is DrawOp.Text -> {
                     paint.style = Paint.Style.FILL
-                    paint.color = op.argb
                     paint.textSize = TEXT_PX
                     paint.typeface = Typeface.MONOSPACE
+                    if (op.background != null) {
+                        // ImageText semantics: the GC background box first.
+                        paint.getFontMetrics(fontMetrics)
+                        val textWidth = paint.measureText(op.text)
+                        paint.color = op.background
+                        canvas.drawRect(
+                            op.x.toFloat(), op.y + fontMetrics.ascent,
+                            op.x + textWidth, op.y + fontMetrics.descent,
+                            paint,
+                        )
+                    }
+                    paint.color = op.argb
                     // X ImageText8 y is the character baseline; so is Canvas.drawText's.
                     canvas.drawText(op.text, op.x.toFloat(), op.y.toFloat(), paint)
                 }
@@ -159,6 +247,54 @@ class XCanvasRenderer {
                         (op.dstX + op.width).toFloat(), (op.dstY + op.height).toFloat(),
                     )
                     canvas.drawBitmap(src.bitmap, srcRect, dstRect, null)
+                }
+                is DrawOp.Points -> if (op.coords.size >= 2) {
+                    paint.style = Paint.Style.FILL
+                    paint.strokeWidth = 1f
+                    paint.color = op.argb
+                    canvas.drawPoints(FloatArray(op.coords.size) { op.coords[it].toFloat() }, paint)
+                }
+                is DrawOp.Line -> if (op.coords.size >= 4) {
+                    paint.style = Paint.Style.STROKE
+                    paint.strokeWidth = 1f
+                    paint.color = op.argb
+                    if (op.pairs) {
+                        canvas.drawLines(FloatArray(op.coords.size) { op.coords[it].toFloat() }, paint)
+                    } else {
+                        path.reset()
+                        path.moveTo(op.coords[0].toFloat(), op.coords[1].toFloat())
+                        for (i in 2 until op.coords.size - 1 step 2) {
+                            path.lineTo(op.coords[i].toFloat(), op.coords[i + 1].toFloat())
+                        }
+                        canvas.drawPath(path, paint)
+                    }
+                }
+                is DrawOp.Arc -> if (op.width > 0 && op.height > 0) {
+                    arcRect.set(
+                        op.x.toFloat(), op.y.toFloat(),
+                        (op.x + op.width).toFloat(), (op.y + op.height).toFloat(),
+                    )
+                    paint.color = op.argb
+                    if (op.filled) {
+                        paint.style = Paint.Style.FILL
+                    } else {
+                        paint.style = Paint.Style.STROKE
+                        paint.strokeWidth = 1f
+                    }
+                    // X angles are 1/64 degrees counter-clockwise from 3 o'clock;
+                    // Canvas angles are degrees clockwise - so the sweep negates.
+                    canvas.drawArc(arcRect, op.angle1 / 64f, -op.angle2 / 64f, op.filled, paint)
+                }
+                is DrawOp.Polygon -> if (op.coords.size >= 6) {
+                    path.reset()
+                    path.moveTo(op.coords[0].toFloat(), op.coords[1].toFloat())
+                    for (i in 2 until op.coords.size - 1 step 2) {
+                        path.lineTo(op.coords[i].toFloat(), op.coords[i + 1].toFloat())
+                    }
+                    path.close()
+                    paint.style = Paint.Style.FILL
+                    paint.color = op.argb
+                    canvas.drawPath(path, paint)
                 }
             }
         }
@@ -199,12 +335,22 @@ class XCanvasRenderer {
 /**
  * Glue between the shell window and the global [XServer]: starts the server at
  * the surface size the first time it is measured, scales the X screen into the
- * window, and translates Compose pointer/key input through [XInput].
+ * window, translates Compose pointer/key input through [XInput], and (D1c)
+ * injects soft-keyboard commits as real X key events.
  */
 class XDesktopState {
     val renderer = XCanvasRenderer()
     val input = XInput()
     val focusRequester = FocusRequester()
+
+    // --- D1c: soft keyboard (IME) ------------------------------------------
+    val ime = ImeCommitExtractor()
+    val imeFocusRequester = FocusRequester()
+    var imeValue by mutableStateOf(TextFieldValue(""))
+        private set
+
+    /** Set by the composable: focuses the hidden field and shows the soft keyboard. */
+    var showIme: (() -> Unit)? = null
 
     var started by mutableStateOf(false)
         private set
@@ -215,6 +361,14 @@ class XDesktopState {
     var frame by mutableLongStateOf(-1L)
         private set
     var clients by mutableIntStateOf(0)
+        private set
+
+    /**
+     * Bumped on every pointer event. The drawing lambda reads it, so the
+     * software cursor follows the pointer in the draw phase - no recomposition
+     * (crash-safety rule 5: values read in draw must be Compose state).
+     */
+    var cursorTick by mutableLongStateOf(0L)
         private set
 
     private var scale = 1f
@@ -257,6 +411,20 @@ class XDesktopState {
         canvas.clipRect(0, 0, screen.widthPx, screen.heightPx)
         renderer.draw(canvas, document, XServer.displayList)
         canvas.restore()
+        // The software cursor is drawn unscaled so it stays usable at any zoom,
+        // at the server-side pointer position (which client warps move too).
+        if (XServer.clientCount > 0) {
+            val px = XServer.pointerX
+            val py = XServer.pointerY
+            if (px in 0 until screen.widthPx && py in 0 until screen.heightPx) {
+                renderer.drawCursor(
+                    canvas,
+                    document.effectiveCursorGlyph(px, py),
+                    offsetX + px * scale,
+                    offsetY + py * scale,
+                )
+            }
+        }
     }
 
     /**
@@ -273,7 +441,8 @@ class XDesktopState {
                 val pressed = event.buttonState and lastButtons.inv()
                 input.onButton(x, y, lowestButton(pressed) ?: MotionEvent.BUTTON_PRIMARY, true)
                 lastButtons = event.buttonState
-                runCatching { focusRequester.requestFocus() }
+                cursorTick++
+                requestImeFocus()
                 return true
             }
             MotionEvent.ACTION_BUTTON_PRESS -> {
@@ -282,13 +451,15 @@ class XDesktopState {
                 val button = lowestButton(pressed)
                 if (button != null) input.onButton(x, y, button, true)
                 lastButtons = event.buttonState
-                runCatching { focusRequester.requestFocus() }
+                cursorTick++
+                requestImeFocus()
                 return button != null
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                 val released = lastButtons and event.buttonState.inv()
                 input.onButton(x, y, lowestButton(released) ?: MotionEvent.BUTTON_PRIMARY, false)
                 lastButtons = event.buttonState
+                cursorTick++
                 return true
             }
             MotionEvent.ACTION_BUTTON_RELEASE -> {
@@ -296,10 +467,12 @@ class XDesktopState {
                 val button = lowestButton(released)
                 if (button != null) input.onButton(x, y, button, false)
                 lastButtons = event.buttonState
+                cursorTick++
                 return button != null
             }
             MotionEvent.ACTION_MOVE, MotionEvent.ACTION_HOVER_MOVE -> {
                 input.onMove(x, y)
+                cursorTick++
                 return true
             }
             MotionEvent.ACTION_SCROLL -> {
@@ -328,6 +501,54 @@ class XDesktopState {
         else -> null
     }
 
+    /** Focuses the hidden IME field and asks the system to show the soft keyboard. */
+    fun requestImeFocus() {
+        runCatching { imeFocusRequester.requestFocus() }
+        runCatching { showIme?.invoke() }
+    }
+
+    /**
+     * A hidden-field value change: inject whatever the IME committed since the
+     * last change, then clear the field so it never grows (the extractor's
+     * pending buffer is reset in step, so the clear itself injects nothing).
+     */
+    fun onImeValueChanged(value: TextFieldValue) {
+        val committed = ime.onChanged(value.text, value.composition != null)
+        if (committed.isNotEmpty()) {
+            input.injectText(committed)
+        }
+        if (value.composition == null && value.text.isNotEmpty()) {
+            imeValue = TextFieldValue("")
+            ime.onReset()
+        } else {
+            imeValue = value
+        }
+    }
+
+    /** IME action keys (Done/Go/Next/Send/Search) become a Return keypress. */
+    fun onImeAction() {
+        input.injectKeysym(XKeyboard.KEYSYM_RETURN)
+        imeValue = TextFieldValue("")
+        ime.onReset()
+    }
+
+    /**
+     * Preview pass over hardware keys while the hidden IME field holds focus.
+     * Printable characters without Ctrl/Meta fall through to the text field
+     * (they arrive as committed text and are injected by [onImeValueChanged]);
+     * everything else - arrows, function keys, Enter, modifiers, chords - is
+     * consumed here and dispatched as real X keys. When the field does *not*
+     * have focus this returns false and the classic [onKey] path handles them.
+     */
+    fun onPreviewKey(event: KeyEvent): Boolean {
+        if (!started) return false
+        val native = event.nativeKeyEvent
+        val printable = native.unicodeChar != 0 &&
+            native.keyCode != android.view.KeyEvent.KEYCODE_ENTER
+        if (printable && !native.isCtrlPressed && !native.isMetaPressed) return false
+        return onKey(event)
+    }
+
     fun onKey(event: KeyEvent): Boolean {
         if (!started) return false
         val native = event.nativeKeyEvent
@@ -350,11 +571,16 @@ class XDesktopState {
 @Composable
 fun XDesktopWindow(modifier: Modifier = Modifier) {
     val state = remember { XDesktopState() }
+    val keyboardController = LocalSoftwareKeyboardController.current
     LaunchedEffect(state.started) {
         if (!state.started) return@LaunchedEffect
         while (isActive) {
             withFrameNanos { state.onPoll() }
         }
+    }
+    DisposableEffect(keyboardController, state) {
+        state.showIme = { keyboardController?.show() }
+        onDispose { state.showIme = null }
     }
     Box(
         modifier = modifier
@@ -362,16 +588,45 @@ fun XDesktopWindow(modifier: Modifier = Modifier) {
             .background(androidx.compose.ui.graphics.Color.Black)
             .onSizeChanged { state.onSurfaceSize(it.width, it.height) }
             .drawBehind {
-                // Reading frame subscribes this draw to the server signature poll.
+                // Reading frame subscribes this draw to the server signature poll;
+                // reading cursorTick re-draws the software cursor on pointer moves
+                // (both are Compose state read in the draw phase - no recomposition).
                 state.frame.let {
                     state.render(drawContext.canvas.nativeCanvas, size.width.toInt(), size.height.toInt())
                 }
+                @Suppress("UNUSED_EXPRESSION")
+                state.cursorTick
             }
             .pointerInteropFilter { event -> state.onMotionEvent(event) }
+            .onPreviewKeyEvent { state.onPreviewKey(it) }
             .focusRequester(state.focusRequester)
             .focusable()
             .onKeyEvent { state.onKey(it) },
     ) {
+        // The hidden IME field: a 1dp transparent BasicTextField that owns the
+        // input connection. Committed text becomes X key events (XInput.injectText),
+        // so any guest app that takes keyboard focus can be typed into.
+        BasicTextField(
+            value = state.imeValue,
+            onValueChange = state::onImeValueChanged,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .size(1.dp)
+                .alpha(0f)
+                .focusRequester(state.imeFocusRequester),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Text,
+                imeAction = ImeAction.Default,
+                autoCorrectEnabled = false,
+            ),
+            keyboardActions = KeyboardActions(
+                onDone = { state.onImeAction() },
+                onGo = { state.onImeAction() },
+                onNext = { state.onImeAction() },
+                onSearch = { state.onImeAction() },
+                onSend = { state.onImeAction() },
+            ),
+        )
         if (!state.started) {
             Text(
                 text = state.startError?.let { "X server failed to start: $it" }
@@ -381,7 +636,7 @@ fun XDesktopWindow(modifier: Modifier = Modifier) {
             )
         } else if (state.clients == 0) {
             Text(
-                text = "X server running on ${XServer.DISPLAY}\nWaiting for clients - start a container to run Windows apps.",
+                text = "X server running on ${XServer.DISPLAY}\nWaiting for clients - start a container to run Windows apps.\nTap the desktop, then use the soft keyboard to type into guest apps.",
                 color = androidx.compose.ui.graphics.Color(0xFFB8B8B8),
                 modifier = Modifier.align(Alignment.Center).padding(16.dp),
             )
