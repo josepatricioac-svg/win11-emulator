@@ -153,6 +153,10 @@ class XProtocolTest {
 
     @Test
     fun `the opcode table matches the X11 protocol`() {
+        // Reference: xorgproto include/X11/Xproto.h (X_* defines). The tail block
+        // (92+) was wrong until D1c and silently broke real clients: libX11 sends
+        // QueryExtension as opcode 98, which this server used to treat as
+        // SetCloseDownMode - a no-op with no reply, hanging the client forever.
         assertEquals(1, X11.REQ_CREATE_WINDOW)
         assertEquals(8, X11.REQ_MAP_WINDOW)
         assertEquals(10, X11.REQ_UNMAP_WINDOW)
@@ -162,23 +166,48 @@ class XProtocolTest {
         assertEquals(16, X11.REQ_INTERN_ATOM)
         assertEquals(18, X11.REQ_CHANGE_PROPERTY)
         assertEquals(20, X11.REQ_GET_PROPERTY)
+        assertEquals(21, X11.REQ_LIST_PROPERTIES)
+        assertEquals(25, X11.REQ_SEND_EVENT)
         assertEquals(38, X11.REQ_QUERY_POINTER)
+        assertEquals(41, X11.REQ_WARP_POINTER)
+        assertEquals(42, X11.REQ_SET_INPUT_FOCUS)
+        assertEquals(43, X11.REQ_GET_INPUT_FOCUS)
+        assertEquals(45, X11.REQ_OPEN_FONT)
+        assertEquals(47, X11.REQ_QUERY_FONT)
+        assertEquals(49, X11.REQ_LIST_FONTS)
+        assertEquals(51, X11.REQ_SET_FONT_PATH)
+        assertEquals(52, X11.REQ_GET_FONT_PATH)
         assertEquals(53, X11.REQ_CREATE_PIXMAP)
         assertEquals(55, X11.REQ_CREATE_GC)
         assertEquals(56, X11.REQ_CHANGE_GC)
         assertEquals(60, X11.REQ_FREE_GC)
         assertEquals(61, X11.REQ_CLEAR_AREA)
         assertEquals(67, X11.REQ_POLY_RECTANGLE)
+        assertEquals(69, X11.REQ_FILL_POLY)
         assertEquals(70, X11.REQ_POLY_FILL_RECTANGLE)
         assertEquals(72, X11.REQ_PUT_IMAGE)
+        assertEquals(73, X11.REQ_GET_IMAGE)
         assertEquals(76, X11.REQ_IMAGE_TEXT8)
-        assertEquals(102, X11.REQ_GET_KEYBOARD_MAPPING)
-        assertEquals(105, X11.REQ_BELL)
-        assertEquals(112, X11.REQ_QUERY_EXTENSION)
-        assertEquals(113, X11.REQ_LIST_EXTENSIONS)
-        assertEquals(98, X11.REQ_SET_CLOSE_DOWN_MODE)
-        assertEquals(53, X11.REQ_CREATE_PIXMAP)
-        assertEquals(55, X11.REQ_CREATE_GC)
+        assertEquals(77, X11.REQ_IMAGE_TEXT16)
+        assertEquals(92, X11.REQ_LOOKUP_COLOR)
+        assertEquals(93, X11.REQ_CREATE_CURSOR)
+        assertEquals(94, X11.REQ_CREATE_GLYPH_CURSOR)
+        assertEquals(95, X11.REQ_FREE_CURSOR)
+        assertEquals(97, X11.REQ_QUERY_BEST_SIZE)
+        assertEquals(98, X11.REQ_QUERY_EXTENSION)
+        assertEquals(99, X11.REQ_LIST_EXTENSIONS)
+        assertEquals(100, X11.REQ_CHANGE_KEYBOARD_MAPPING)
+        assertEquals(101, X11.REQ_GET_KEYBOARD_MAPPING)
+        assertEquals(103, X11.REQ_GET_KEYBOARD_CONTROL)
+        assertEquals(104, X11.REQ_BELL)
+        assertEquals(107, X11.REQ_SET_SCREEN_SAVER)
+        assertEquals(108, X11.REQ_GET_SCREEN_SAVER)
+        assertEquals(112, X11.REQ_SET_CLOSE_DOWN_MODE)
+        assertEquals(113, X11.REQ_KILL_CLIENT)
+        assertEquals(116, X11.REQ_SET_POINTER_MAPPING)
+        assertEquals(117, X11.REQ_GET_POINTER_MAPPING)
+        assertEquals(118, X11.REQ_SET_MODIFIER_MAPPING)
+        assertEquals(119, X11.REQ_GET_MODIFIER_MAPPING)
         assertEquals(127, X11.REQ_NO_OPERATION)
     }
 
@@ -610,13 +639,19 @@ class XProtocolTest {
     @Test
     fun `keycodes follow the evdev plus eight convention`() {
         val keyboard = XKeyboard.default()
-        assertEquals(38 to 'a'.code, keyboard.xKeycodeFor(29, 'a'.code)) // AKEY_A -> X 38
-        assertEquals(39 to 'b'.code, keyboard.xKeycodeFor(30, 'b'.code))
-        assertEquals(56 to 's'.code, keyboard.xKeycodeFor(47, 's'.code))
-        assertEquals(17 to '1'.code, keyboard.xKeycodeFor(8, '1'.code)) // AKEY_1 -> X 17
-        assertEquals(16 to '0'.code, keyboard.xKeycodeFor(7, '0'.code)) // AKEY_0 -> X 16
+        // D1c: the map is the real evdev+8 layout now (keyboard order, not the
+        // old alphabetical android+9 block that collided with Shift_L at 50).
+        assertEquals(38 to 'a'.code, keyboard.xKeycodeFor(29, 'a'.code)) // AKEY_A -> X 38 (evdev 30)
+        assertEquals(56 to 'b'.code, keyboard.xKeycodeFor(30, 'b'.code)) // AKEY_B -> X 56 (evdev 48)
+        assertEquals(39 to 's'.code, keyboard.xKeycodeFor(47, 's'.code)) // AKEY_S -> X 39 (evdev 31)
+        assertEquals(58 to 'm'.code, keyboard.xKeycodeFor(41, 'm'.code)) // AKEY_M -> X 58 (evdev 50)
+        assertEquals(10 to '1'.code, keyboard.xKeycodeFor(8, '1'.code)) // AKEY_1 -> X 10 (evdev 2)
+        assertEquals(19 to '0'.code, keyboard.xKeycodeFor(7, '0'.code)) // AKEY_0 -> X 19 (evdev 11)
+        assertEquals(20 to '-'.code, keyboard.xKeycodeFor(69, '-'.code)) // AKEY_MINUS -> X 20 (evdev 12)
         assertEquals(67 to XKeyboard.KEYSYM_F1, keyboard.xKeycodeFor(131, 0))
-        assertEquals(0xE9 + 8, keyboard.xKeycodeFor(0, 0xE9)?.first) // é falls back to keysym+8
+        // A shifted hardware key keeps the *base* keycode; Shift arrives separately.
+        assertEquals(10 to '!'.code, keyboard.xKeycodeFor(8, '!'.code))
+        assertEquals(0xE9 + 8, keyboard.xKeycodeFor(0, 0xE9)?.first) // é uses the dynamic Latin-1 range
         assertNull(keyboard.xKeycodeFor(999, 0)) // unmapped and unprintable
     }
 
@@ -636,14 +671,21 @@ class XProtocolTest {
         assertEquals(keyboard.keysymsPerKeycode * (keyboard.maxKeycode - keyboard.minKeycode + 1), keyboard.mapping().size)
         assertEquals('a'.code, keyboard.keysymFor(38, 0))
         assertEquals('A'.code, keyboard.keysymFor(38, 1)) // shifted slot is the upper case
-        assertEquals('z'.code, keyboard.keysymFor(63, 0))
-        assertEquals('1'.code, keyboard.keysymFor(17, 0))
+        assertEquals('m'.code, keyboard.keysymFor(58, 0)) // 'm' no longer sits under Shift_L
+        assertEquals('z'.code, keyboard.keysymFor(52, 0)) // evdev layout: z=52 .. m=58
+        assertEquals('1'.code, keyboard.keysymFor(10, 0)) // digits are 10..19, as on a real server
+        assertEquals('!'.code, keyboard.keysymFor(10, 1))
         assertEquals(XKeyboard.KEYSYM_F1, keyboard.keysymFor(67, 0))
         assertEquals(XKeyboard.KEYSYM_SHIFT_L, keyboard.keysymFor(50, 0))
-        assertEquals(XKeyboard.KEYSYM_SHIFT_R, keyboard.keysymFor(50, 1))
+        // Modifier keys repeat their keysym in slot 1 (evdev behaviour); the
+        // physical right Shift is keycode 62.
+        assertEquals(XKeyboard.KEYSYM_SHIFT_L, keyboard.keysymFor(50, 1))
+        assertEquals(XKeyboard.KEYSYM_SHIFT_R, keyboard.keysymFor(62, 0))
         assertEquals(XKeyboard.KEYSYM_RETURN, keyboard.keysymFor(36, 0))
+        // The dynamic Latin-1 range round-trips: keycode = code point + 8.
+        assertEquals(0xE9, keyboard.keysymFor(0xE9 + 8, 0)) // é
         assertEquals(0, keyboard.keysymFor(999, 0))
-        assertEquals(0, keyboard.keysymFor(200, 0)) // unbound keycode
+        assertEquals(0, keyboard.keysymFor(200, 1)) // no shifted slot in the Latin-1 range
     }
 
     // --- input translation -------------------------------------------------
