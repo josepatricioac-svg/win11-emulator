@@ -47,6 +47,54 @@ contract — and each one gets a licence entry in `THIRD_PARTY.md` when it lands
 - Settings ▸ Apps stores the same preference; Task Manager can end a browser window like
   any other.
 
+## Firefox ESR launch path — fully plumbed (D1c), gated on the R1 binaries
+
+Everything that can exist without the vendored native binaries now exists; the engine
+unlocks itself the moment the runtime is complete:
+
+1. **Pinned artifact (R3)**: `RuntimeManifest.FIREFOX_ESR` — Mozilla's official
+   self-contained `linux-aarch64` build, 140.17.0esr, SHA-256
+   `dd579f48…850084` (the download's SHA-512 was verified against Mozilla's own
+   `SHA512SUMS` before the SHA-256 was pinned; retrieved 2026-10-10). It appears in
+   Settings ▸ Storage ▸ Runtime download with the usual resume/hash/space/cancel
+   contract, and extracts (behind the same proot-tar gate as the rootfs) to
+   `<rootfs>/opt/firefox-esr`.
+2. **Readiness (`DesktopEngineReadiness`)**: a guarded low-priority worker evaluates
+   R1 binaries (pinned + exec'able) → rootfs extracted → Firefox installed →
+   rootfs GTK3 stack provisioned, and publishes a Compose-state snapshot. The Browser
+   window's catalogue card shows **Ready** or the exact missing step; no disk I/O ever
+   runs during composition (crash-safety rules 1–2).
+3. **Launch (`FirefoxSession` + `DesktopBrowserLauncher`)**: pure, unit-tested command
+   and environment plans. The session runs through R2's `ContainerLauncher` —
+   `proot --rootfs … --link2symlink --kill-on-exit --bind <profile>:/root/.mozilla
+   --bind <x11 dir>:/tmp/.X11-unix --cwd /root -- /opt/firefox-esr/firefox -P shell
+   <url>` — **no box64** (native arm64), an explicit `FirefoxEnvironment`
+   (`DISPLAY=:100`, `MOZ_ENABLE_WAYLAND=0`, the `MOZ_DISABLE_*_SANDBOX` switches proot
+   deployments need, sorted for Diagnostics diffs, plus the `PROOT_LOADER*` paths).
+   The X server is ensured first (`XServer.ensureRunning`), the foreground service
+   starts on success, output streams into the shared log, and every refusal names its
+   reason (`BINARIES_NOT_READY`, `ROOTFS_MISSING`, …).
+4. **UI**: a ready engine turns the Open button into a desktop launch — the URL from
+   the address bar goes to the guest, the result is toasted and shown in the window,
+   and the X Desktop window opens/focuses so the browser is actually visible. An
+   unready choice keeps the old fallback (Android Firefox / system default), exactly
+   as `RoadmapGatingTest` pins it.
+5. **Profile**: persistent at `<files>/browser/firefox-profile`, bound over
+   `/root/.mozilla` — cookies, extensions and downloads survive app restarts.
+
+Honest limits while gated (each named by the readiness message, nothing silent):
+
+- The rootfs must carry the GTK3/dbus-glib/ALSA stack Firefox links against; the bare
+  Ubuntu base does not. That is the same dependency-provisioning step Wine needs
+  (R4/P2) and readiness reports it as such.
+- One session at a time (`ALREADY_RUNNING` while alive); handing a second URL to the
+  *running* instance needs a guest D-Bus session bus (P1).
+- Audio waits on P1's PulseAudio socket; the env already accepts it.
+- The path-form X socket cannot be bound with public Android API
+  (`LocalServerSocket` is abstract-namespace only); libX11's path→abstract→TCP
+  fallback chain makes this a non-issue for Firefox, and the bound host directory
+  keeps `/tmp/.X11-unix` existing inside the guest.
+
 ## Licensing / policy notes (read before R3)
 
 - **Firefox / Firefox ESR**: MPL-2.0. Redistribution allowed with source offer; we only
@@ -65,9 +113,11 @@ contract — and each one gets a licence entry in `THIRD_PARTY.md` when it lands
 
 ## Open decisions for you
 
-1. Which engine do we make the **default download** in R3 — Firefox ESR (Linux arm64) is
-   my recommendation: smallest risk, best extension story, clean licence.
+1. ~~Which engine do we make the **default download** in R3~~ — **decided (D1c)**:
+   Firefox ESR (Linux arm64), now pinned in the manifest with the full launch path
+   plumbed. Smallest risk, best extension story, clean licence.
 2. Do we pursue **Edge Windows/arm64** at all, given the proprietary licence and the D2
    dependency? (It is the only route to a Copilot sidebar.)
 3. Rootfs flavour for the browser path: the Ubuntu 22.04 rootfs from R3 is enough for
-   Firefox ESR; Chromium may want a newer mesa/libGL than the rootfs ships.
+   Firefox ESR once the GTK3/dbus-glib stack is provisioned (same dependency step Wine
+   needs, R4/P2); Chromium may want a newer mesa/libGL than the rootfs ships.

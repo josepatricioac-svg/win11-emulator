@@ -4,115 +4,171 @@ Goal (D1): the app owns an X server on a private unix socket, one fullscreen nat
 surface runs `explorer.exe /desktop`, and touch/mouse/keyboard become X input.
 No Termux, no XSDL, no adb.
 
-## What is in the tree now (D1a: protocol core + socket)
+**Milestone status:** D1a (protocol core + socket) done, D1b (renderer + input + WM)
+done, **D1c (real-client compatibility) done**. What remains for D1 is the guest
+launch itself, which is blocked on vendoring the R1 native binaries - not on server code.
 
-| Piece | File | Status |
-| --- | --- | --- |
-| Wire primitives: byte-order aware reader/writer, `pad4`, opcode/event/error/mask constants | `x11/X11.kt` | written, unit-tested for marshalling and padding |
-| Document model: resource ids, window tree, map/unmap rules, atoms, properties, paint order, hit testing | `x11/XDocument.kt` | written, **unit-tested and passing** |
-| Connection setup: parse the client's setup request, emit success/failure | `x11/XConnection.kt` | written, **byte layout not yet verified** |
-| Request dispatch: window/atom/property/GC/drawing/extension/keyboard requests, replies, errors, events | `x11/XConnection.kt` | written, **reply framing not yet verified** |
-| Keyboard: X keycode = evdev + 8, Latin-1 keysyms, Android→X mapping, `GetKeyboardMapping` table | `x11/XKeyboard.kt` | written, **unit-tested and passing** |
-| Input translation: pointer move/button/key → X events with correct modifier and button masks | `x11/XInput.kt` | written, **unit-tested and passing** |
-| Transport: `LocalServerSocket` on the abstract name `/tmp/.X11-unix/X100`, accept loop, per-client thread, handshake then request loop | `x11/XServer.kt` | written, **never run against a real client** |
-| Renderer sink interface (`fillRect`/`putImage`/`imageText`/`clearArea`) + a recording sink | `x11/XConnection.kt` | interface only |
+## D1c: what changed and why it was blocking real clients
 
-The abstract-namespace socket is what makes this work under proot without a bind mount:
-proot does not isolate the abstract namespace, so a guest process connecting to
-`DISPLAY=:100` reaches the app's socket directly. A filesystem socket path
-(`<files>/tmp/.X11-unix/X100`) is also provided for clients that only try the path form;
-that one needs `--bind <host dir>:/tmp/.X11-unix` in the proot command line (R2's
-`ProotCommand.build(binds = …)` already takes it).
+### The opcode tail was wrong (fixed)
 
-## Wire-format status: all 37 `XProtocolTest` tests pass
+Before D1c the request table in `x11/X11.kt` diverged from the X11R6 specification
+from opcode 92 upward - e.g. it put `QueryExtension` at 112 and `SetCloseDownMode`
+at 98. The truth (xorgproto `Xproto.h`) is the opposite: **QueryExtension is 98** and
+**SetCloseDownMode is 112**. A real libX11 client asks `QueryExtension` (98) early in
+`XOpenDisplay`; the server treated that as a no-op *without a reply*, so the client
+would block forever. `GetKeyboardMapping` (101), `ListExtensions` (99), `Bell` (104),
+the screensaver pair (107/108) and the mapping requests (116-119) were all off too.
+The whole 1-127 table is now spec-accurate and `XProtocolTest` pins the numbers with
+their provenance. Error codes were corrected the same way (BadAlloc is 11, BadGC 13,
+BadName 15; the repo had BadAlloc=17 and BadGC=11).
 
-The 13 byte-layout tests that were `@Ignore`d during D1a are un-ignored and green
-(full suite: **304 tests, 0 failures, 0 skipped**; `assembleDebug` OK). Getting there
-fixed a set of real protocol bugs plus a few wrong test expectations:
+### The keymap collided with itself (fixed)
 
-**Server fixes**
+The old map derived letter keycodes as `androidKeyCode + 9`, which lays a-z out
+alphabetically at 38..63. That block contained the server's own modifier keycodes:
+keycode 50 was both 'm' and Shift_L (hardware 'm' typed Shift), and punctuation fell
+back to `unicodeChar + 8`, so hardware '-' arrived as keycode 53 = 'p'. The map is
+now the true **evdev+8** layout a real X.org server advertises (q-p = 24..33,
+a-l = 38..46, z-m = 52..58, digits 10..19, symbols at their evdev positions,
+Shift_L = 50, Shift_R = 62), with a complete US-layout ASCII table including shifted
+keysyms, and a dynamic Latin-1 range (keycode = code point + 8 for 0xA0..0xF7) so
+accented characters round-trip through `GetKeyboardMapping`. Tests were updated to
+the spec positions - deliberately, as with the D1b test fixes.
 
-- `reply()` now takes an explicit `dataByte` and writes the body verbatim at offset 8.
-  The old implementation hoisted the body's first byte into offset 1, which shifted
-  every reply whose handler also compensated with a leading byte/pad (GetGeometry,
-  QueryPointer, TranslateCoordinates, GetProperty, GetImage, …) by 4 bytes.
-- Setup reply is spec-shaped: release-number@8, resource-id-base@12, mask@16,
-  motion-buffer@20, vendor-length@24, screens@28, formats@29, scanline unit/pad@32/33,
-  min/max keycode@34/35, vendor@40; additional-length includes the 32 fixed bytes.
-  `setupFailed`'s additional-length no longer counts the 8-byte header.
-- Removed bogus `reader.skip(4)` calls in the handlers for GetSelectionOwner,
-  QueryPointer, TranslateCoordinates, DeleteProperty, ChangeProperty and
-  GetKeyboardMapping (`XReader` already starts at offset 4); ImageText8 now reads
-  x/y@12/14 and the string@16.
-- ConfigureWindow reads the value-mask at offset 8 (was 12); CreateWindow/
-  ChangeWindowAttributes consume value-mask words in ascending bit order
-  (background 0x2 → override-redirect 0x200 → event-mask 0x800), as does `applyGcValues`.
-- GetWindowAttributes answers with the full 52-byte spec reply (map-state@26,
-  your-event-mask@36, extra length 5); QueryTree reports parent 0 for the root.
-- Pointer/key events put root@8 and event-window@12 (were swapped); key events pass
-  root coordinates (window-relative was subtracted twice); `WM_DELETE_WINDOW`
-  ClientMessage carries format@1, window@4, type@8, data@12; SelectionNotify gained
-  its time field.
-- Server-originated events (`sendEvent`, `onPointerMove`, `onButton`, `onKey`,
-  `sendDeleteWindow`) flush to the outbox immediately instead of waiting for the next
-  client request; MapWindow sends MapNotify on the un→mapped transition even while an
-  unmapped ancestor keeps the window from becoming viewable; structure events reach
-  parents that selected `STRUCTURE_NOTIFY` **or** `SUBSTRUCTURE_NOTIFY`; the root
-  window now selects `SUBSTRUCTURE_NOTIFY` by default. Map/Unmap/Reparent notify use
-  their own spec layouts instead of the Create/Destroy geometry shape.
+### Newly implemented core requests
 
-**Test fixes** (the tests had the wrong bytes, verified against the X11R6 spec)
+- **Focus**: `SetInputFocus`/`GetInputFocus` with FocusIn/FocusOut events, focus
+  reverting on destroy/unmap, and keyboard events going to the *focus* window
+  (PointerRoot by default, which follows the pointer - the old behaviour).
+  `QueryKeymap` reports the real physical key state (256-bit map).
+- **Grabs**: `GrabPointer`/`GrabKeyboard` now redirect events to the grab window for
+  every connection (other clients see nothing while grabbed - what Wine's menus
+  rely on), with owner-events dual delivery, confine-to clamping,
+  `ChangeActivePointerGrab`, and AlreadyGrabbed statuses. `GrabButton`/`GrabKey`
+  passive grabs activate into implicit grabs on a matching press and end on release
+  (same-connection activation only; cross-client passive grabs stay recorded but
+  inert - documented limit). `AllowEvents`/`GrabServer` are accepted no-ops (we
+  never freeze).
+- **Pointer**: `WarpPointer` (with the source-rect containment rule), warps generate
+  MotionNotify and sync every connection plus the software cursor through
+  `XDocument.onWarp`. EnterNotify/LeaveNotify fire on window crossings.
+  `GetMotionEvents` answers with an empty (legal) history.
+- **Fonts**: `OpenFont` accepts any name and serves it with the built-in **fixed
+  6x13** metrics; `QueryFont` returns the spec 60-byte reply, `QueryTextExtents`
+  computes 6px-per-char widths, `ListFonts`/`ListFontsWithInfo` (info + terminator
+  reply pair) answer "fixed", `SetFontPath`/`GetFontPath` are handled, `CloseFont`
+  frees. Glyph rasterisation itself stays the monospace approximation in the
+  renderer - metrics are now consistent with what clients measure.
+- **Colours**: a ~90-entry rgb.txt table (`x11/XColors.kt`) plus `rgb:RR/GG/BB` and
+  `#RGB`/`#RRGGBB` parsing power `LookupColor`, `AllocNamedColor` (TrueColor pixel =
+  the RGB value) and `QueryColors`; `AllocColor` now returns the real pixel instead
+  of 0; cells/planes/store/free/install/list-colormaps are answered spec-shaped.
+- **Cursors**: `CreateCursor`/`CreateGlyphCursor`/`FreeCursor`/`RecolorCursor`
+  resources live server-wide in `XDocument`; `CWCursor` is parsed in
+  Create/ChangeWindowAttributes (previously an unconsumed value-list word);
+  `QueryBestSize` clamps cursors to 64x64; `effectiveCursorGlyph()` resolves the
+  X inherit-from-ancestor rule and the X Desktop surface draws a **software cursor**
+  (arrow, I-beam, crosshair, watch approximation) at the server-side pointer
+  position, unscaled for usability. Pixmap-based cursors render as the arrow.
+- **SendEvent**: real delivery - destination resolution (root/PointerWindow/
+  InputFocus/window), the 0x80 send-event flag, sequence restamping, propagate
+  walking with do-not-propagate masks, and SubstructureRedirect routing for
+  structure events. Cross-client delivery goes to the *owner* connection's socket
+  (window ownership is tracked from CreateWindow).
+- **Properties**: `ListProperties`, `RotateProperties` (with PropertyNotify).
+- **Drawing**: `PolyLine`, `PolySegment`, `PolyPoint`, `PolyArc`, `PolyFillArc` and
+  `FillPoly` become first-class `DrawOp`s (Canvas paths in the renderer, scanline/
+  Bresenham/parametric fills in the pure-Kotlin rasteriser); `ImageText16` and
+  `PolyText8/16` (CHAR2B + TEXTITEM parsing with deltas and font-shift items) draw
+  text - this is how Wine's `XDrawImageString16` output reaches the screen;
+  `ImageText8` now paints the GC background box first; `CopyPlane` best-effort maps
+  onto CopyArea; all INT16 wire fields are sign-extended (negative blit offsets
+  previously wrapped to huge positives).
+- **GetImage** returns real pixels: `XDisplayList.snapshot()` is a dependency-free
+  rasteriser (fills, ZPixmap blits, clears, copies with recursion guard, lines,
+  points, polygons, sampled arcs; text glyphs stay the platform renderer's job).
+- **Control tail**: `GetKeyboardControl`, `Get/SetPointerControl`,
+  `Set/GetScreenSaver`, `ChangeHosts`/`ListHosts`/`SetAccessControl`,
+  `SetCloseDownMode`, `KillClient` (accepted; no per-client resource tracking),
+  `ForceScreenSaver`, `Set/GetPointerMapping` (identity 1,2,3),
+  `Set/GetModifierMapping` (evdev positions: Shift 50, Lock 66, Control 37,
+  Mod1 64, Mod4 133), `ChangeSaveSet`, `CirculateWindow` (real restacking),
+  `ChangeKeyboardMapping`/`ChangeKeyboardControl` accepted (fixed map).
 
-- Setup reply: base@12 (release-number occupies 8), vendor-length@24, keycodes@34/35,
-  vendor@40.
-- GetProperty value-length is the CARD32 at offset 16, not a CARD16 at 20.
-- QueryTree extra-length counts the child list (1 unit for one child).
-- Pointer-event and ClientMessage assertions moved to the spec offsets.
-- The keyboard-mapping assertion addressed a 64-byte reply at offset 808
-  (unreachable); it now requests keycode 38 and checks `'a'`/`'A'` at offsets 32/36
-  with keysyms-per-keycode in the reply's data byte.
-- The pointer-input test maps the window before moving the pointer — hit testing only
-  considers mapped windows, as in X.
+### XTest extension
 
-**Environment note:** in the ~1 GB sandbox, compile with
-`-Xmx380m -XX:MaxMetaspaceSize=200m -XX:ReservedCodeCacheSize=64m -Xss512k
--XX:+UseSerialGC -XX:SoftRefLRUPolicyMSPerMB=0` and
-`-Pkotlin.compiler.execution.strategy=in-process`; bigger heaps get the daemon
-OOM-killed mid-compile. After a sandbox reset, `rm -rf app/build .gradle .kotlin`
-first — stale incremental state produced phantom "protocol bugs" more than once.
+`QueryExtension("XTEST")` now answers *present* with major opcode 130 (dynamically
+assigned, as extensions are). Implemented: `GetVersion` (2.1), `CompareCursor`,
+`GrabControl` (no-op) and **`FakeInput`** - synthesised key/button/motion events
+routed through the same focus/grab machinery as real input, with keycode-derived
+keysyms and modifier-mask updates. This gives Wine its synthetic-input path
+(`SendInput`, cursor warping) and any X automation tool a working surface.
 
-## What D1b needs (in order)
+### Soft keyboard (the D1b open item)
 
-1. ~~Fix the 13 ignored tests.~~ **Done** (see above). Still worth verifying with a real
-   client: `xclock`/`xeyes` inside the rootfs, or `xinit` from a Linux box over the socket.
-2. ~~**Renderer**~~ **Done (D1b).** `XDisplayList` (pure Kotlin) records every drawing
-   request per drawable as `DrawOp`s (`Fill`/`Image`/`Text`/`Clear`/`Copy`); ZPixmap
-   depth 24/32 is converted BGRX→ARGB at record time. `XCanvasRenderer`
-   (`ui/xdesktop/XDesktop.kt`) replays ops incrementally into a per-drawable `Bitmap`
-   cache and composites `XDocument.paintOrder()` onto the Compose surface, letterboxed
-   and scaled to the window. `CopyArea` blits between drawable bitmaps (pixmap sizes
-   come from `CreatePixmap` via `XSink.setSize`). The `PutImage` wire read was fixed:
-   byte 1 is the *format*, depth lives at offset 21.
-3. ~~**Input surface**~~ **Done (D1b).** The X Desktop window forwards raw
-   `MotionEvent`s (`pointerInteropFilter`): touch/mouse moves → `MotionNotify`, button
-   state diffs → `ButtonPress/Release` (Android button constants map 1:1 onto X via
-   `XInput.buttonFor`), `AXIS_VSCROLL` → buttons 4/5, hardware keys via `onKeyEvent` →
-   `XKeyboard`. IME/soft-keyboard text injection is still open (needs XIM or XTest).
-4. ~~**Window-manager side**~~ **Done (D1b).** `SUBSTRUCTURE_REDIRECT` is honoured:
-   a client `MapWindow`/`ConfigureWindow` on a top-level, non-override-redirect window
-   no longer applies; it becomes a `MapRequest`(20)/`ConfigureRequest`(23) event for a
-   client WM, or a call into the in-process `XWindowManager` (only one redirect owner;
-   the second selector gets `Access`(10)). `ShellWindowManager` places windows in a
-   centered cascade and maps through `XServer.wmMapWindow`, which broadcasts
-   `MapNotify`+`Expose` (and `ConfigureNotify` for resizes) to every connection,
-   pushing to idle sockets via per-connection output streams. Close still goes through
-   `sendDeleteWindow` (WM_DELETE_WINDOW).
-5. **Launch**: R2's `ContainerService` starts `wine64 explorer.exe /desktop=Shell,<W>x<H>`
+No XIM/XKB is needed for Latin-1 text: the X Desktop window hosts a 1dp transparent
+`BasicTextField`; taps focus it and show the soft keyboard. Committed text is
+diffed by the pure-Kotlin `ImeCommitExtractor` (composition-aware: preview text is
+never injected, commits inject whole words), then `XInput.injectText` turns each
+character into real KeyPress/KeyRelease pairs - Shift pressed around shifted
+characters - through `XKeyboard.stepsForChar`. IME action keys become Return.
+Hardware keys while the field holds focus go through `onPreviewKeyEvent`: printable
+characters fall through to the field (and arrive as commits), everything else
+(arrows, F-keys, Enter, Ctrl/Meta chords) is dispatched directly as X keys.
+**Limit:** characters outside Latin-1 (CJK, emoji) are skipped - they need XIM/XKB
+(P1+). The extractor and the whole injection path are unit-tested; the Compose
+wiring follows the existing input-surface patterns.
+
+### Verification
+
+The x11 suites (98 tests: `XProtocolTest`, `XDisplayListTest`, `XRedirectTest`,
+`ExplorerSmokeTest`, `XCompatTest`, `XTextInjectionTest`, `XSnapshotTest`) were
+**compiled and executed** with Kotlin 2.1.10/JDK 17 against minimal Android stubs
+(only `LocalServerSocket`/`LocalSocket`/`Log`, which the wire tests never touch) -
+the first time this project's protocol code was actually run rather than written
+blind. Everything is green. The Compose/Android half (`XDesktop.kt`) still needs a
+CI `assembleDebug` + device check.
+
+## What D1 still needs
+
+1. **Launch**: R2's `ContainerService` starts `wine64 explorer.exe /desktop=Shell,<W>x<H>`
    with `DISPLAY=:100` and `PROOT_LOADER*` from `NativeBinaries.loaderPaths()`.
    Blocked on vendoring the native binaries (R1 decision, see `docs/NATIVE_RUNTIME.md`).
    Until then, `ExplorerSmokeTest` scripts the same request sequence `explorer.exe`
    sends over the wire and asserts WM redirect, placement, Expose, pixels in the
-   display list, input dispatch and WM_DELETE_WINDOW — 316 unit tests, all green.
+   display list, input dispatch and WM_DELETE_WINDOW.
+2. **First contact with a real client**: once binaries exist, run `xclock`/`xeyes`
+   from the rootfs (`DISPLAY=:100`) before Wine - they exercise fonts, arcs,
+   exposures and the WM path with a fraction of Wine's surface. `xinit` from a Linux
+   box over an adb-forwarded socket is an alternative that needs no rootfs.
+   The **Firefox ESR desktop-browser session** is fully plumbed on top of this
+   server (`XServer.ensureRunning` exists precisely for it) - see
+   `docs/BROWSER_ENGINES.md`; it becomes launchable when the readiness checks
+   (R1 binaries, rootfs, Firefox install, GTK3 stack) all pass.
+3. **On-device check of the D1c UI half**: software cursor position/scaling, hidden
+   IME field focus behaviour with Gboard/Samsung keyboard, `onPreviewKeyEvent`
+   routing with a hardware keyboard. None of this is verifiable without a device.
+
+## Deliberate non-goals / known limits (D1c)
+
+- No RENDER/Composite/XRandr/XShm/XKB/XInput2 (`QueryExtension` answers "not
+  present" for all but XTEST, so clients fall back to core protocol).
+- One built-in font ("fixed", 6x13 metrics); `OpenFont` never refuses a name and
+  glyph shapes are monospace approximations - `QueryFont` metrics match the
+  renderer's advance, so layout maths stays consistent.
+- Passive grabs by *other* connections are recorded but not activated (single-app
+  server; Wine grabs on its own connection). No grab freezing, so `AllowEvents` is
+  a no-op.
+- Text injection covers Latin-1 (plus the printable ASCII set); CJK needs XIM/XKB.
+- GetImage ignores XYBitmap/XYPixmap (serves ZPixmap) and returns background pixels
+  where only text was drawn; GetImage on pixmaps needs the display-list sink.
+- Pixmap cursors render as the default arrow; border widths, backing store,
+  save-under, bit gravity and subwindow clipping are not modelled.
+- `SendEvent` bytes are delivered verbatim: two clients with *different* byte orders
+  would see a mis-ordered synthesised event (single-app reality: one order).
+- KillClient is accepted but does not tear down resources (no per-client ownership
+  of pixmaps/GCs yet).
 
 ## How to look at it on a device
 
@@ -120,12 +176,5 @@ Open **Start → X Desktop** (not pinned to the taskbar). The window starts the 
 `:100` at its own pixel size and shows "Waiting for clients" until a guest connects.
 Anything that speaks core X11 to the abstract socket `@/tmp/.X11-unix/X100` — e.g.
 `xclock` from a proot rootfs with `DISPLAY=:100` — appears as a shell-placed window.
-
-## Deliberate non-goals for D1
-
-No RENDER/Composite/XRandr/XShm extensions (`QueryExtension` answers "not present", so
-clients fall back to core `PutImage`), no XIM, no multi-screen, no colour maps beyond a
-stub `AllocColor`, no cursors, no real font metrics (`ImageText8` is rasterised with a
-monospace approximation; `OpenFont`/`PolyText8`/`ImageText16` are accepted but not
-drawn). Those are the things that make a real X server big; they are not needed to run
-`explorer.exe /desktop` with Wine's core-protocol path.
+Tap the surface to focus it, then type with the soft keyboard; the pointer shows the
+client-chosen cursor shape.

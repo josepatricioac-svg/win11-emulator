@@ -19,7 +19,7 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | R2 | `ContainerService` (foreground, Stop all), `proot -> box64 -> wine` launch with the explicit env, per-container status, logs into the shared buffer | done (inert until R1 binaries + R3 rootfs exist) |
 | R3 | Rootfs/Wine download: pinned SHA-256 (fail closed), resumable via `Range`, free-space check, progress UI, SAF import | done (extraction needs R1's proot) |
 | R4 | Diagnostics self-test: `box64 --version`, `wine64 --version`, `wine64 cmd /c echo hello`, green/red/skipped with the failing command + log excerpt | done |
-| D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a+D1b done: protocol core, socket, renderer, input surface, SubstructureRedirect WM — 37+12 wire tests green; guest launch waits on the R1 binaries; see `docs/X_SERVER.md`) |
+| D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a+D1b+D1c done: spec-accurate protocol core, socket, renderer, input, soft-keyboard text injection, focus/grabs/cursors/fonts/colours, XTest, SubstructureRedirect WM — 98 x11 wire tests green, verified by running them on a JVM; guest launch waits on the R1 binaries; see `docs/X_SERVER.md`) |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | — |
 
 ## Animation
@@ -60,16 +60,35 @@ input translation with correct modifier masks, and a `LocalServerSocket` on the 
 name `/tmp/.X11-unix/X100` (which proot does not isolate, so a guest `DISPLAY=:100`
 reaches it with no bind mount).
 
-**The server runs, renders and takes input; nothing guest-side connects yet.** All 37
-protocol tests plus the D1b suites pass: a `XDisplayList` records every drawing request
-per drawable (PutImage ZPixmap depth 24/32 → ARGB), `XCanvasRenderer` composites the
-window stack into the **Start ▸ X Desktop** window, raw MotionEvents/key events are
-translated through `XInput`, and top-level maps/configures are redirected to
-`ShellWindowManager` (SubstructureRedirect) so the shell places guest windows. What is
-still missing is a real client: the native binaries (R1) are not vendored, so
-`explorer.exe /desktop` cannot be started yet — `ExplorerSmokeTest` scripts its exact
-wire sequence instead. See `docs/X_SERVER.md` for limits (no RENDER/Composite/XShm, no
-XIM/soft keyboard, no real font metrics).
+**D1c made the server speak to real clients.** The opcode table now matches the X11R6
+specification exactly (it was silently wrong from opcode 92 up: a real libX11 client's
+`QueryExtension` - opcode 98 - used to hit our `SetCloseDownMode` no-op and the client
+would hang waiting for a reply that never came). Added on top: input focus
+(SetInputFocus/GetInputFocus with FocusIn/FocusOut and focus-directed keys), real
+pointer/keyboard grabs with event redirection (what Wine needs for menus), passive
+button/key grabs, WarpPointer, Enter/LeaveNotify, a built-in "fixed" font served through
+OpenFont/QueryFont/QueryTextExtents/ListFonts, an rgb.txt colour table
+(LookupColor/AllocNamedColor/QueryColors), cursor resources with a software cursor drawn
+on the surface, SendEvent delivery, ListProperties/RotateProperties, vector drawing
+(PolyLine/PolySegment/PolyPoint/PolyArc/PolyFillArc/FillPoly/ImageText16/PolyText8/16),
+a pure-Kotlin rasteriser that makes GetImage return real pixels, the whole
+keyboard/pointer/screensaver/host control tail block, and the **XTest extension**
+(QueryExtension reports it; FakeInput synthesises key/button/motion events).
+The soft keyboard now works: the X Desktop window owns a hidden IME field and commits
+become real KeyPress/KeyRelease sequences via `XInput.injectText` (Latin-1 reach;
+CJK needs XIM/XKB later). The keymap itself was fixed to the true evdev+8 layout - the
+old android+9 letter block collided with the server's own modifiers ('m' *was* Shift_L)
+and hardware punctuation landed on letters ('-' typed 'p').
+
+**The server runs, renders, takes input and passes 98 wire tests (run for real on a
+JVM with Kotlin 2.1.10); nothing guest-side connects yet.** The native binaries (R1)
+are not vendored, so `explorer.exe /desktop` cannot be started - `ExplorerSmokeTest`
+scripts its exact wire sequence instead. `XDisplayList` records every drawing request
+per drawable, `XCanvasRenderer` composites the window stack into the **Start ▸ X
+Desktop** window, raw MotionEvents/key events are translated through `XInput`, and
+top-level maps/configures are redirected to `ShellWindowManager` (SubstructureRedirect)
+so the shell places guest windows. See `docs/X_SERVER.md` for the remaining limits
+(no RENDER/Composite/XShm/XKB/XIM, fixed font metrics, Latin-1 text injection).
 
 ## What is deliberately not usable yet
 
@@ -81,7 +100,7 @@ fails if that ever changes silently:
 | --- | --- | --- |
 | Container Manager | Real UI, real persisted containers; Start/Stop answer "no runtime yet" and mark the container *Not ready* | R1 binaries + **R2** service |
 | Wine prefix, `wineboot`, installing apps | Not created | R2 + R3 |
-| Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Listed with licence + gating step; selecting one falls back to an Android browser, or reports "needs the container runtime and X server" | **R3 + D1** (Firefox ESR), **R1/R2/R3 + D2** (Edge) |
+| Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Firefox ESR is **fully plumbed**: pinned R3 artifact, readiness checks that name the missing piece, proot launch plan through R2's launcher on the shell's X server. Until the runtime exists, selecting it falls back to an Android browser; Edge/Chromium stay listed with their gating steps | **R1 binaries** + R3 rootfs/GUI libs (Firefox ESR), **R1/R2/R3 + D2** (Edge) |
 | Terminal `wine`/`box64`/`proot`/`cmd` | Answer "not available yet" and name the step | R1 + R2 |
 | Task Manager container rows | Absent (no processes to show) | R2 |
 | Diagnostics wine64 self-test | Command lines are built and shown, not executed | R2 + R3 + **R4** |
@@ -135,7 +154,10 @@ zero exit code without the output is a failure.
 
 Settings ▸ Storage ▸ **Runtime download** lists the pinned artifacts with their size,
 SHA-256 prefix and URL, plus Download / Resume / Cancel / Import / Extract / Remove and a
-free-space check for the whole set.
+free-space check for the whole set. The manifest covers the Ubuntu 22.04.5 arm64 rootfs,
+the two Wine 9.0 loader `.deb`s and **Firefox ESR 140.17.0 (linux-aarch64)** - the
+desktop browser engine, whose pin was anchored to Mozilla's own SHA512SUMS before the
+SHA-256 was recorded.
 
 Rules the code enforces (all unit-tested): a file is written to `<name>.part` and only
 promoted to its real name after its SHA-256 matches the pin; a mismatch deletes the
@@ -247,13 +269,21 @@ Firefox is never bundled in the APK.
 
 For desktop-class browsing (profiles, extensions, AI/Copilot-style sidebars) the shell
 models a second engine family - **Linux arm64 Firefox ESR / Chromium** in the rootfs and
-**Windows arm64 Edge** under Wine - selectable now, launchable once R1/R3/D1 land.
-See `docs/BROWSER_ENGINES.md` for the feasibility write-up, the licensing constraints
-(Edge is proprietary and must not be redistributed) and the three open decisions.
+**Windows arm64 Edge** under Wine. **Firefox ESR's launch path is fully plumbed (D1c)**:
+Mozilla's official self-contained arm64 build is a pinned R3 artifact, a guarded worker
+evaluates readiness (R1 binaries → rootfs → Firefox installed → GTK3 stack) into a
+Compose-state snapshot, and a ready engine launches through R2's `ContainerLauncher` as
+`proot → /opt/firefox-esr/firefox -P shell <url>` with an explicit sandbox-off
+environment on `DISPLAY=:100` - no box64, persistent profile, foreground service, X
+Desktop window focused automatically. Until the runtime is vendored the card names the
+missing piece and selection falls back to an Android browser, exactly as
+`RoadmapGatingTest` pins it. See `docs/BROWSER_ENGINES.md` for the feasibility write-up,
+the licensing constraints (Edge is proprietary and must not be redistributed) and the
+open decisions.
 
 ## UI tests
 
-`./gradlew testDebugUnitTest` runs the 259 pure-JVM tests (window geometry, snap zones,
+`./gradlew testDebugUnitTest` runs the 380 pure-JVM tests (window geometry, snap zones,
 Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing, argv
 splitting, the log buffer, the built-in commands, the terminal transcript/history, the
 container codec/store, guest<->host path mapping, the Wine environment builder, the
@@ -265,7 +295,13 @@ environment, stop/restart/stopAll, exit-code -> status mapping, and R3's downloa
 resume offsets, hash fail-closed, space refusal, cancellation, servers that ignore
 `Range`, SAF import verification, the extract gate, and the R4 self-test: command order,
 proot wrapping, prefix binding, "printed hello" assertion, and skip-instead-of-pass when
-box64/proot/rootfs are missing).
+box64/proot/rootfs are missing; plus the D1c x11 suites: the spec opcode table, focus and
+grab event routing, warps, fonts/colours/cursors, SendEvent, GetImage against the
+pure-Kotlin rasteriser, XTest FakeInput, soft-keyboard text injection and the IME commit
+extractor; and the Firefox ESR session: native (never box64) proot command shape, profile
+and X11 binds, the explicit sandbox-off environment, install/GTK checks, the R3 state
+machine's READY marker, the pinned Mozilla artifact, and the desktop-engine launch seam
+with its gating contract).
 
 Compose tests that actually **compose** the taskbar (Robolectric) are opt-in because they
 need a couple of GB of RAM:
@@ -339,24 +375,30 @@ app/src/main/java/dev/win11we/shell/
   ui/diagnostics/…             Diagnostics window (binaries, probes, log excerpt)
   runtime/ProcessLauncher.kt   start/stream/destroy seam (real ProcessBuilder + fakes in tests)
   runtime/ContainerLauncher.kt validate -> build command+env -> start -> track status/logs (R2)
+  runtime/FirefoxSession.kt  Firefox ESR desktop-browser session: guest command, env, binds, install checks
+  runtime/DesktopBrowserLauncher.kt readiness worker (named missing step) + the gated launch path
   runtime/ContainerService.kt  foreground service, notification, Stop all, RuntimePaths/RuntimeHolder
   runtime/download/Artifact.kt   pinned manifest (Ubuntu 22.04.5 arm64, Wine 9.0 debs) + real hashes
   runtime/download/Downloader.kt resume/hash/space/cancel logic + https Transfer seam
   runtime/download/RootfsManager.kt per-artifact state machine, SAF import, extract gate
-  x11/X11.kt                 wire primitives, opcodes, events, masks (D1a)
-  x11/XDocument.kt           window tree, atoms, properties, hit testing, WM hooks
-  x11/XConnection.kt         handshake, request dispatch, replies/errors/events, XSink
-  x11/XDisplayList.kt        per-drawable DrawOp store: the server's pixel memory (D1b)
+  x11/X11.kt                 wire primitives, spec-accurate opcodes, events, masks (D1a/D1c)
+  x11/XDocument.kt           window tree, atoms, properties, hit testing, focus/grabs/cursors, WM hooks
+  x11/XConnection.kt         handshake, request dispatch, replies/errors/events, XTest, XSink
+  x11/XDisplayList.kt        per-drawable DrawOp store + pure-Kotlin rasteriser for GetImage (D1b/D1c)
+  x11/XColors.kt             rgb.txt named-colour table + rgb:/#hex parsing (D1c)
+  x11/XIme.kt                IME commit extraction for the soft-keyboard path (D1c)
   x11/ShellWindowManager.kt  SubstructureRedirect WM: cascaded placement of guest windows
-  x11/XKeyboard.kt           X keycode = evdev+8, keysym table, GetKeyboardMapping
-  x11/XInput.kt              device input -> X events with modifier/button masks
-  x11/XServer.kt             LocalServerSocket on /tmp/.X11-unix/X100, accept + serve
-  ui/xdesktop/XDesktop.kt    Bitmap/Canvas renderer + Compose input surface (D1b)
+  x11/XKeyboard.kt           true evdev+8 keycode map, US ASCII table, Latin-1 range (D1c)
+  x11/XInput.kt              device input -> X events, modifier masks, injectText/injectKeysym (D1c)
+  x11/XServer.kt             LocalServerSocket on /tmp/.X11-unix/X100, accept + serve, warp sync
+  ui/xdesktop/XDesktop.kt    Bitmap/Canvas renderer + input surface + software cursor + hidden IME field (D1b/D1c)
   ui/settings/RootfsPage.kt    Settings ▸ Storage ▸ Runtime download (progress, actions)
   runtime/SelfTestRunner.kt    the R4 self-test: 3 steps, verdicts, reasons, report/log excerpt
 ```
 
-Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 316 tests): snap zones,
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 380 tests; during D1c the
+whole suite was additionally compiled and executed off-device against android.jar 35 and
+the pinned Compose artifacts, so the counts are measured, not estimated): snap zones,
 maximize/restore, halves snapping, edge/corner resize with minimums, on-screen clamping,
 z-order/focus, taskbar toggle open-minimize-restore, Explorer listing/filtering/sorting,
 Windows-style size and type labels, back/forward/up/trail navigation, selection,
