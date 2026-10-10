@@ -33,11 +33,6 @@ jobs:
       - name: Unit tests
         run: ./gradlew testDebugUnitTest
 
-      # Compose/Robolectric UI tests are opt-in (a couple of GB of heap);
-      # CI always opts in, local sandboxes usually cannot.
-      - name: UI tests
-        run: ./gradlew testDebugUnitTest -PuiTests=true
-
       - name: Build debug APK
         run: ./gradlew assembleDebug
 
@@ -47,3 +42,16 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
+
+      # Compose/Robolectric UI tests are opt-in (a couple of GB of heap);
+      # CI always opts in. Runs after the APK is built and uploaded so a UI
+      # test failure still shows red but never blocks the download.
+      - name: UI tests
+        run: ./gradlew testDebugUnitTest -PuiTests=true
+
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: app/build/reports/tests/
