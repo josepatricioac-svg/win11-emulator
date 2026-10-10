@@ -1,0 +1,20 @@
+# Gradle / build outputs
+.gradle/
+build/
+.kotlin/
+captures/
+
+# JVM crash logs (a real OOM-kill once committed two of these)
+hs_err_pid*
+replay_pid*.log
+*.hprof
+
+# Local SDK location
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# APKs are CI artifacts, never sources
+*.apk

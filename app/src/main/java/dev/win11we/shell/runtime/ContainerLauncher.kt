@@ -80,7 +80,7 @@ class ContainerLauncher(
         if (isRunning(request.container.id)) {
             return LaunchResult.fail(LaunchFailure.ALREADY_RUNNING, "\"${request.container.name}\" is already running.")
         }
-        val prepare = binaries.prepare()
+        val prepare = binaries.prepare(requiredFor(request.guestCommand))
         if (prepare.status != PrepareStatus.READY) {
             return LaunchResult.fail(LaunchFailure.BINARIES_NOT_READY, prepare.message)
         }
@@ -160,6 +160,15 @@ class ContainerLauncher(
             )
             ).toMutableMap()
         env.putAll(binaries.loaderPaths())
+        // proot itself links the vendored libtalloc.so: the Android linker only
+        // finds it through LD_LIBRARY_PATH, so the host dir goes first; guest
+        // library paths stay reachable behind it (host dirs do not exist inside
+        // the jail and vice versa, so neither side shadows the other).
+        val hostDir = binaries.nativeLibraryDir.absolutePath
+        env["LD_LIBRARY_PATH"] = (listOf(hostDir) + (env["LD_LIBRARY_PATH"]?.split(":") ?: emptyList()))
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString(":")
         return env.toSortedMap()
     }
 
@@ -173,6 +182,15 @@ class ContainerLauncher(
             else -> false
         }
     }
+
+    /**
+     * The binaries THIS guest needs: box64 only carries x86/x64 payloads, so a
+     * native arm64 guest (Firefox ESR) must not be refused for box64's absence.
+     */
+    fun requiredFor(guestCommand: List<String>): Set<BinaryRole> =
+        BinaryRole.entries.filter { it.required }
+            .filter { it != BinaryRole.BOX64 || needsBox64(guestCommand) }
+            .toSet()
 
     fun stop(id: String, reason: String = "stopped by user"): LaunchResult {
         val handle = handles.remove(id) ?: return LaunchResult.ok("Not running.")

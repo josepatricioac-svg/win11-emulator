@@ -299,8 +299,8 @@ class RootfsManager(
             ready -> "Extracted to ${rootfsDir.absolutePath}."
             else ->
                 "Extraction did not produce a usable ${if (artifact.id == RuntimeManifest.ROOTFS.id) "rootfs" else artifact.label} install. " +
-                    "proot-based untar arrives with the R1 binaries " +
-                    "(device nodes and root ownership need `proot --rootfs / -0 tar`)."
+                    "The app's own TAR reader ran in-process (no proot needed); check the log for the failing entry. " +
+                    "Device nodes are skipped on purpose - proot emulates the standard /dev entries at runtime."
         }
         Snapshot.withMutableSnapshot { messages[artifact.id] = message }
         log.add(

@@ -72,14 +72,19 @@ class RuntimeProbe(
     private val runner: ProcessRunner = JvmProcessRunner(),
     private val timeoutMillis: Long = 8_000L,
 ) {
-    /** Minimal explicit environment: these probes do not need Wine or the rootfs. */
+    /**
+     * Minimal explicit environment: these probes do not need Wine or the rootfs.
+     * LD_LIBRARY_PATH is NOT optional here - the vendored proot links libtalloc.so
+     * and the loader paths let proot find its ptrace loaders.
+     */
     private val environment: Map<String, String> = mapOf(
         "PATH" to "/system/bin:/vendor/bin:/usr/bin:/bin",
         "HOME" to "/data/local/tmp",
         "TMPDIR" to "/data/local/tmp",
         "LANG" to "C.UTF-8",
         "BOX64_NOBANNER" to "1",
-    )
+        "LD_LIBRARY_PATH" to binaries.nativeLibraryDir.absolutePath,
+    ) + binaries.loaderPaths()
 
     fun runAll(): List<ProbeResult> = listOf(runBox64(), runProot())
 

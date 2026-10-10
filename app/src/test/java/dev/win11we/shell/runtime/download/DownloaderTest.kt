@@ -299,7 +299,7 @@ class RootfsManagerTest {
         manager.download(artifact)
         assertFalse(manager.extract(artifact))
         assertEquals(ArtifactState.FAILED, manager.stateOf(artifact.id))
-        assertTrue(manager.messages[artifact.id]!!.contains("proot"))
+        assertTrue(manager.messages[artifact.id]!!.contains("did not produce a usable"))
     }
 
     @Test

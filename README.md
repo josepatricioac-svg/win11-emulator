@@ -15,9 +15,9 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | N0 | Gradle project + Compose shell screen (wallpaper + taskbar), CI debug APK | done |
 | N1 | Native taskbar (Start menu, tray, clock) + window manager (drag/resize/snap/z-order) | done |
 | N2 | Apps: Explorer, Notepad, Settings, Browser, Task Manager, Terminal, Container Manager | **done** |
-| R1 | proot/box64 exec from `nativeLibraryDir`, inventory/permissions, SHA-256 pins, `--version` probes, proot command builder, Diagnostics window | done (binaries not vendored) |
+| R1 | proot/box64 exec from `nativeLibraryDir`, inventory/permissions, SHA-256 pins, `--version` probes, proot command builder, Diagnostics window | done — **proot + loader + libtalloc vendored & pinned** (arm64, NDK r27c, provenance in `docs/NATIVE_RUNTIME.md`); box64 pending one `build-native` CI run (only x86/x64 Wine needs it) |
 | R2 | `ContainerService` (foreground, Stop all), `proot -> box64 -> wine` launch with the explicit env, per-container status, logs into the shared buffer | done (inert until R1 binaries + R3 rootfs exist) |
-| R3 | Rootfs/Wine download: pinned SHA-256 (fail closed), resumable via `Range`, free-space check, progress UI, SAF import | done (extraction needs R1's proot) |
+| R3 | Rootfs/Wine download: pinned SHA-256 (fail closed), resumable via `Range`, free-space check, progress UI, SAF import | done — **extraction runs in-app** (pure-Kotlin TAR reader + xz-java, verified against the real pinned ubuntu-base and Firefox archives); Firefox ESR artifact pinned from Mozilla |
 | R4 | Diagnostics self-test: `box64 --version`, `wine64 --version`, `wine64 cmd /c echo hello`, green/red/skipped with the failing command + log excerpt | done |
 | D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a+D1b+D1c done: spec-accurate protocol core, socket, renderer, input, soft-keyboard text injection, focus/grabs/cursors/fonts/colours, XTest, SubstructureRedirect WM — 98 x11 wire tests green, verified by running them on a JVM; guest launch waits on the R1 binaries; see `docs/X_SERVER.md`) |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | **partial** (P1 clipboard: the X selections ↔ Android text bridge is done and wire-tested — guest copies push out, Android-side changes reclaim PRIMARY/CLIPBOARD; rich targets and the remaining P1/P2 items are not started) |
@@ -98,17 +98,20 @@ fails if that ever changes silently:
 
 | Thing | State today | Unlocked by |
 | --- | --- | --- |
-| Container Manager | Real UI, real persisted containers; Start/Stop answer "no runtime yet" and mark the container *Not ready* | R1 binaries + **R2** service |
-| Wine prefix, `wineboot`, installing apps | Not created | R2 + R3 |
+| Container Manager (Wine) | Real UI, real persisted containers; Start now validates the *per-guest* binary set — Wine still refuses with "missing libbox64.so" until the CI build is vendored, and the wine payload/prefix provisioning (R4/P2) is not built | box64 + wine provisioning |
+| Wine prefix, `wineboot`, installing apps | Not created | box64 + R2 + R3 |
 | Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Firefox ESR is **fully plumbed**: pinned R3 artifact, readiness checks that name the missing piece, proot launch plan through R2's launcher on the shell's X server. Until the runtime exists, selecting it falls back to an Android browser; Edge/Chromium stay listed with their gating steps | **R1 binaries** + R3 rootfs/GUI libs (Firefox ESR), **R1/R2/R3 + D2** (Edge) |
 | Terminal `wine`/`box64`/`proot`/`cmd` | Answer "not available yet" and name the step | R1 + R2 |
 | Task Manager container rows | Absent (no processes to show) | R2 |
-| Diagnostics wine64 self-test | Command lines are built and shown, not executed | R2 + R3 + **R4** |
+| Diagnostics wine64 self-test | Command lines are built and shown, not executed; the `proot --version` probe now has a real vendored proot to run | box64 + wine provisioning |
 
-The single blocker for all of it is the native payload: **no `libbox64.so` / `libproot.so`
-is committed** (see `docs/NATIVE_RUNTIME.md`). box64 builds from `.github/workflows/build-native.yml`
-(`workflow_dispatch`); proot needs a patched Android fork and is GPL-2.0, so vendoring it
-is a decision for you, not something I will slip into the repo.
+The native payload is **partially vendored**: `libproot.so` + `libproot-loader.so`
+(termux/proot `v5.1.107.96`, GPL-2.0, owner-approved for the browser milestone, exec'd
+only as a separate process) and `libtalloc.so` (LGPL-3.0+, SONAME-respelled) are committed
+and SHA-256-pinned; **`libbox64.so` is the remaining piece** and only x86/x64 Wine guests
+need it — one `build-native` (`workflow_dispatch`) CI run produces it (the dev sandbox
+OOMs on box64's `gtkclass.c`). Provenance and the exact build recipe:
+`docs/NATIVE_RUNTIME.md`.
 
 ## Performance
 
@@ -163,10 +166,16 @@ Rules the code enforces (all unit-tested): a file is written to `<name>.part` an
 promoted to its real name after its SHA-256 matches the pin; a mismatch deletes the
 download; a server that ignores `Range` is treated as an error rather than producing a
 corrupt tail; an interrupted download keeps its `.part` and resumes; SAF imports are held
-to the same pin as network downloads; and extraction refuses to run until proot's tar
-exists, because unpacking a rootfs needs `proot --rootfs / -0 tar` for device nodes and
-root ownership. Hashes come from the publishers (Ubuntu `SHA256SUMS`, the Ubuntu archive
-`Packages` index) and are recorded in `docs/THIRD_PARTY.md`.
+to the same pin as network downloads. **Extraction is in-app and needs no root and no
+native tar**: a pure-Kotlin TAR reader (ustar + GNU long names + PAX overrides, verified
+checksums, Zip-Slip-safe, exec bits and symlinks preserved, device nodes skipped because
+proot emulates the standard `/dev` entries) unpacks the gzip rootfs, and xz-java (public
+domain) unpacks Mozilla's `.tar.xz` straight into `<rootfs>/opt/firefox-esr`. Both paths
+were run against the real pinned archives during development. Hashes come from the
+publishers (Ubuntu `SHA256SUMS`, the Ubuntu archive `Packages` index, Mozilla
+`SHA512SUMS`) and are recorded in `docs/THIRD_PARTY.md`. After extraction, the
+**Provision** card installs the browser's GTK3/X11/font/CA-cert stack with `apt-get`
+inside proot (`RootfsProvisioner`, package list pinned in code, every line logged).
 
 ## Container runtime (R2)
 
@@ -204,12 +213,14 @@ and `jniLibs.useLegacyPackaging = true` keeps them extracted.
 
 Every shipped binary must be pinned by SHA-256 in `app/src/main/assets/native/checksums.txt`;
 a required binary that is unpinned or mismatched is **refused** (`CHECKSUM_NOT_PINNED` /
-`CHECKSUM_MISMATCH`) rather than exec'd. `.github/workflows/build-native.yml`
-(`workflow_dispatch` only, so it can never affect `build-apk`) builds box64 from a pinned
-ref with `-DANDROID=ON -DWINLATOR_GLIBC=ON` and uploads `libbox64.so` + provenance +
-`SHA256SUMS.txt`. No binary is committed in git yet, and proot needs a patched Android fork
-(upstream does not build against bionic). `docs/NATIVE_RUNTIME.md` has the full procedure
-and the licence rules (proot is GPL-2.0 and is only ever exec'd, never linked).
+`CHECKSUM_MISMATCH`) rather than exec'd — the three vendored files (proot, its loader,
+libtalloc) are pinned. `prepare()` is per-launch now: `ContainerLauncher.requiredFor()`
+demands box64 only for x86/x64 guests, so the native-arm64 Firefox session is not held
+hostage by it. `.github/workflows/build-native.yml` (`workflow_dispatch` only, so it can
+never affect `build-apk`) builds box64 from a pinned ref and uploads `libbox64.so` +
+`SHA256SUMS.txt`. `docs/NATIVE_RUNTIME.md` has the full build recipe (reproduced once in a
+1 GB sandbox with NDK r27c) and the licence rules (proot is GPL-2.0 and is only ever
+exec'd, never linked; talloc is LGPL-3.0+ and dynamically linked by proot, not by the app).
 
 ## Container Manager
 
@@ -283,7 +294,7 @@ open decisions.
 
 ## UI tests
 
-`./gradlew testDebugUnitTest` runs the 390 pure-JVM tests (window geometry, snap zones,
+`./gradlew testDebugUnitTest` runs the 408 pure-JVM tests (window geometry, snap zones,
 Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing, argv
 splitting, the log buffer, the built-in commands, the terminal transcript/history, the
 container codec/store, guest<->host path mapping, the Wine environment builder, the
@@ -379,6 +390,8 @@ app/src/main/java/dev/win11we/shell/
   runtime/ProcessLauncher.kt   start/stream/destroy seam (real ProcessBuilder + fakes in tests)
   runtime/ContainerLauncher.kt validate -> build command+env -> start -> track status/logs (R2)
   runtime/FirefoxSession.kt  Firefox ESR desktop-browser session: guest command, env, binds, install checks
+  runtime/RootfsProvisioner.kt apt-inside-proot provisioning of the browser's GTK3/X11/font/CA stack
+  runtime/download/TarExtractor.kt pure-Kotlin TAR reader (gzip + xz) - the on-device extraction engine
   runtime/DesktopBrowserLauncher.kt readiness worker (named missing step) + the gated launch path
   runtime/ContainerService.kt  foreground service, notification, Stop all, RuntimePaths/RuntimeHolder
   runtime/download/Artifact.kt   pinned manifest (Ubuntu 22.04.5 arm64, Wine 9.0 debs) + real hashes
@@ -401,7 +414,7 @@ app/src/main/java/dev/win11we/shell/
   runtime/SelfTestRunner.kt    the R4 self-test: 3 steps, verdicts, reasons, report/log excerpt
 ```
 
-Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 390 tests; during D1c the
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 408 tests; during D1c the
 whole suite was additionally compiled and executed off-device against android.jar 35 and
 the pinned Compose artifacts, so the counts are measured, not estimated): snap zones,
 maximize/restore, halves snapping, edge/corner resize with minimums, on-screen clamping,

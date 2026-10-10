@@ -31,52 +31,63 @@ The **Diagnostics** app (Start ▸ All apps ▸ Diagnostics) shows all of this: 
 `nativeLibraryDir`, per-binary rows, probe results with PASS/FAIL and the failing command,
 and the log excerpt.
 
-## What to put in `jniLibs/arm64-v8a/`
+## What is in `jniLibs/arm64-v8a/` (updated 2026-10-10)
 
-| File | Upstream | Licence | Required |
+| File | Upstream | Licence | Status |
 | --- | --- | --- | --- |
-| `libbox64.so` | [box64](https://github.com/ptitSeb/box64) (rename of the `box64` executable) | MIT | yes |
-| `libproot.so` | proot, Android fork (see below) | **GPL-2.0** | yes |
-| `libproot-loader.so` | proot's ptrace loader | **GPL-2.0** | yes |
-| `libproot-loader32.so` | proot's 32-bit loader | **GPL-2.0** | optional |
+| `libproot.so` | [termux/proot](https://github.com/termux/proot) tag `v5.1.107.96` (commit `a179d3e8a4e045aaa1fb8cc3284f23509d96d353`) | **GPL-2.0** | **VENDORED + pinned** (owner approved: the desktop-browser request requires it; exec'd as a separate process, never linked into app code) |
+| `libproot-loader.so` | same build (`src/loader/loader`) | **GPL-2.0** | **VENDORED + pinned** |
+| `libtalloc.so` | Termux `libtalloc_2.5.0_aarch64.deb` (talloc 2.5.0, samba.org) | LGPL-3.0+ | **VENDORED + pinned** — proot's only dynamic dependency; SONAME respelled `libtalloc.so.2` → `libtalloc.so` (same byte length, NUL-padded) so AGP packages it and `-l:` linking records that exact name as DT_NEEDED. Found at runtime via `LD_LIBRARY_PATH=nativeLibraryDir`, which every launch/probe environment now sets. |
+| `libbox64.so` | [box64](https://github.com/ptitSeb/box64) (rename of the `box64` executable) | MIT | **NOT vendored yet** — only x86/x64 Wine payloads need it; the arm64 browser path does not (`ContainerLauncher.requiredFor()` excludes it for native guests). Build it with `.github/workflows/build-native.yml` (default ref now `v0.4.4`). |
+| `libproot-loader32.so` | proot's 32-bit loader | **GPL-2.0** | **not built, deliberately**: it needs an arm32 compile target and the rootfs is arm64-only. The role is optional; 32-bit guests are unsupported until someone needs WoW64. |
 
-Nothing is committed in this repository yet — the directory holds a `README.txt` only.
-Until binaries are vendored the APK contains no native payload, and Diagnostics says
-"Not installed" with a pointer to this file. **The main build never depends on them**, so
-CI stays green either way.
+All three vendored files are pinned in `app/src/main/assets/native/checksums.txt`
+(fail closed: unpinned/mismatched required binaries are refused, never exec'd), and the
+APK build does not depend on them otherwise — CI stays green either way.
 
-### Where the binaries come from
+### How the vendored proot was built (exact recipe, reproduced once in a 1 GB sandbox)
 
-**Preferred: `.github/workflows/build-native.yml`** (`workflow_dispatch` only — it can
-never affect `build-apk`). It builds box64 from a pinned ref with the flags below, strips
-the binary, renames it to `libbox64.so`, writes `PROVENANCE-box64.txt` (upstream URL, ref,
-commit, licence) and `SHA256SUMS.txt`, and uploads an artifact:
+Toolchain: **Android NDK r27c**, `aarch64-linux-android28-clang` (minSdk 28), binaries
+stripped with `llvm-strip`.
 
 ```bash
-cmake -S box64 -B box64/build \
-  -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
-  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 \
-  -DCMAKE_BUILD_TYPE=Release -DANDROID=ON \
-  -DWINLATOR_GLIBC=ON \            # glibc rootfs mode: exactly this project's architecture
-  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-  -DCMAKE_C_FLAGS_RELEASE="-O1 -DNDEBUG" -DCMAKE_CXX_FLAGS_RELEASE="-O1 -DNDEBUG"
+# 1. libtalloc: Termux's prebuilt Android aarch64 package (only needs libc.so):
+#    https://packages.termux.dev/apt/termux-main/pool/main/libtalloc/libtalloc_2.5.0_aarch64.deb
+#    sha256(deb) = 556591f43bb773ad8777e1a29522640866a55f95dab71914418b94a8c58ad5a7
+#    Extract usr/lib/libtalloc.so.2.5.0, then respell the SONAME in .dynstr:
+#    bytes "libtalloc.so.2\0" -> "libtalloc.so\0\0\0" (exactly one occurrence).
+
+# 2. proot (termux fork = the bionic patches upstream lacks):
+git clone --branch v5.1.107.96 https://github.com/termux/proot.git
+cd proot
+# 2a. disable the 32-bit loader (needs an arm32 target we don't ship):
+sed -i 's/^(\s*)#define HAS_LOADER_32BIT true/\1\/\/ disabled/' src/arch.h   # both occurrences
+# 2b. point the makefile at the staged talloc (lib/ + include/):
+sed -i 's|^LDFLAGS  += -ltalloc .*|LDFLAGS  += -L$TALLOC_OUT/lib -l:libtalloc.so -Wl,-z,noexecstack|' src/GNUmakefile
+sed -i 's|^CPPFLAGS += \(.*\)$|CPPFLAGS += -DARG_MAX=131072 -I$TALLOC_OUT/include \1|' src/GNUmakefile
+# 2c. build (needs gawk on PATH for loader-info.awk's strtonum):
+make -C src -j2 CC=aarch64-linux-android28-clang LD=aarch64-linux-android28-clang \
+  STRIP=llvm-strip OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump \
+  CFLAGS="-Wall -Wextra -O2 -Wno-error" \
+  PROOT_UNBUNDLE_LOADER=libproot-loader.so
+# 2d. results: src/proot -> libproot.so, src/loader/loader -> libproot-loader.so
 ```
 
-`WINLATOR_GLIBC=ON` is box64's own option for a glibc-based container (it changes the
-libc wrapping and the dynacache default). `-O1` is box64's Android cap; without it the
-default `-O3` is used. Box64 default pin: **`v0.4.5-1`**, commit
-`e99ca51299ec897e6a96da6d00983d90406a836f`.
+`PROOT_UNBUNDLE_LOADER` means the loader is not embedded in the binary; proot finds it
+through the `PROOT_LOADER` environment variable, which `NativeBinaries.loaderPaths()`
+always supplies. `VERSION` reports `v5.1.107.96-dirty` (the two patches above) — honest.
+`-DARG_MAX=131072` is the bionic fix from Termux's recipe; clang-18 needed
+`-Wno-error` for two implicit-declaration warnings in the fork's ashmem extension.
 
-The same workflow has a `proot` job that is `continue-on-error: true`, because **upstream
-proot does not build against bionic**: it needs `libtalloc` (whose soname must also be
-renamed to satisfy the `lib*.so` rule) plus assorted glibc-isms — which is why every
-Android project carries a patched fork. Vendor proot + loaders from such a fork and record
-its URL, commit, licence (GPL-2.0) and SHA-256.
+**GPL-2.0 compliance (proot):** the binary is exec'd as a separate process, never
+linked into app code. The complete corresponding source is the public upstream tag
+above plus the two mechanical patches reproduced verbatim in this file, and
+`build-native.yml` re-runs an equivalent build on demand.
 
-I could not produce the binaries in my sandbox to prove the flags: clang runs out of
-memory on `src/tools/gtkclass.c` (270 KB) even at `-O1 -g0` with ~890 MB free. The flag
-set above is what that attempt validated up to the OOM, so treat the workflow as
-**untested** until it has produced an artifact once. Nothing is vendored in git.
+**box64 remains unbuilt here for a hard reason:** its `src/tools/gtkclass.c` (270 KB of
+tables) OOMs clang at `-O1` with ~900 MB free — the same wall hit during D1c. The CI
+runner (16 GB) has no such problem; the workflow renames the output to `libbox64.so` and
+writes `SHA256SUMS.txt` for pinning.
 
 ### After the files are in place
 
@@ -104,15 +115,16 @@ R2 then reuses `ProotCommand.build()` and `WineEnvironment.build()` (with
 | Piece | State |
 | --- | --- |
 | Exec-from-`nativeLibraryDir` model, packaging settings | done |
-| SHA-256 pinning of shipped binaries (fail closed) | done, 6 unit tests |
-| `build-native.yml` (opt-in box64 build, proot attempt) | written, **untested** |
-| Inventory / permissions / `PrepareResult` | done, 9 unit tests |
-| `ProcessRunner` seam + `--version` probes with explicit env | done, 7 unit tests |
-| proot command line incl. fixed prefix bind + extra drives | done, 6 unit tests |
-| R4's self-test plan (box64, `wine64 --version`, `wine64 cmd /c echo hello`) | plan built + tested, execution needs R2/R3 |
-| Diagnostics window | done (UI shows real inventory/probe state) |
-| R2 launch path (validate -> command -> env -> stream -> status) | done, 18 unit tests; refuses to run without binaries/rootfs |
-| R2 `ContainerService` (foreground, Stop all, kills children on destroy) | done; never started in practice until binaries exist |
-| R3 download (pinned SHA-256, resume, space check, SAF import) | done, 25 unit tests; extraction gated on proot |
-| R4 self-test (3 steps, verdicts, failing command + excerpt) | done, 12 unit tests; can only go green once R1 binaries + R3 rootfs exist |
-| The binaries themselves | **not vendored** — see above; box64 v0.4.5-1 could not be compiled in this sandbox (clang OOM) |
+| SHA-256 pinning of shipped binaries (fail closed) | done; the three vendored files are pinned in `checksums.txt` |
+| `build-native.yml` (box64 build, default `v0.4.4`) | updated with the flags validated by the D1c build attempt; still needs one CI run to produce the artifact |
+| Inventory / permissions / `PrepareResult` | done; `prepare(required)` is now per-launch: box64 is only required for x86/x64 guests (`ContainerLauncher.requiredFor`) |
+| `ProcessRunner` seam + `--version` probes with explicit env | done; probe/self-test environments now carry `LD_LIBRARY_PATH` + `PROOT_LOADER*` (libtalloc resolution) |
+| proot command line incl. fixed prefix bind + extra drives | done; `guestPrefix` parameter added for non-Wine sessions (Firefox binds `/root/.mozilla`) |
+| R4's self-test plan (box64, `wine64 --version`, `wine64 cmd /c echo hello`) | plan built + tested; `proot --version` now really runs once installed; wine steps wait on box64 + wine provisioning |
+| Diagnostics window | done (now shows the vendored proot set incl. libtalloc) |
+| R2 launch path (validate -> command -> env -> stream -> status) | done; validates the per-guest binary set |
+| R2 `ContainerService` (foreground, Stop all, kills children on destroy) | done; the Firefox session also runs through it |
+| R3 download (pinned SHA-256, resume, space check, SAF import) | done; **extraction no longer needs proot** - the in-app `TarExtractor` (gzip + xz via org.tukaani) was verified against the real pinned ubuntu-base and Firefox archives (2615 files / 207 symlinks / 0 skipped; launcher + libxul intact) |
+| Rootfs provisioning (GTK3/X11/fonts/CA-certs via apt inside proot) | `RootfsProvisioner` + Settings ▸ Runtime download action; needs a device to run |
+| R4 self-test (3 steps, verdicts, failing command + excerpt) | done, execution needs box64 + wine provisioning for the wine rows |
+| The binaries themselves | **proot + loader + talloc vendored & pinned** (recipe above); **box64 pending one CI run** of `build-native.yml`; loader32 deliberately not built |

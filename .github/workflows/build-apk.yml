@@ -33,6 +33,11 @@ jobs:
       - name: Unit tests
         run: ./gradlew testDebugUnitTest
 
+      # Compose/Robolectric UI tests are opt-in (a couple of GB of heap);
+      # CI always opts in, local sandboxes usually cannot.
+      - name: UI tests
+        run: ./gradlew testDebugUnitTest -PuiTests=true
+
       - name: Build debug APK
         run: ./gradlew assembleDebug
 

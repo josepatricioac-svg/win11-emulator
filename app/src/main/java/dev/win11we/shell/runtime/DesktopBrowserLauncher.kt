@@ -56,7 +56,8 @@ object DesktopEngineReadiness {
             pins = NativeBinaries.loadPinsFromAssets(appContext.assets),
         )
         val rootfsDir = RuntimeHolder.rootfsDir ?: RuntimePaths.defaultRootfs(appContext.filesDir)
-        val prepare = binaries.prepare()
+        // The browser session is native arm64: it needs proot's set, not box64.
+        val prepare = binaries.prepare(NativeBinaries.REQUIRED_PROOT_ONLY)
         val firefox = when {
             prepare.status != PrepareStatus.READY ->
                 EngineReadiness(false, "R1 native binaries missing or unpinned: ${prepare.message}")

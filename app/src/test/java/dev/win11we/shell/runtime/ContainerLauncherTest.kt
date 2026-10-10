@@ -70,7 +70,7 @@ class ContainerLauncherTest {
         nativeDir = tmp.newFolder("lib")
         rootfs = tmp.newFolder("rootfs")
         prefix = tmp.newFolder("prefix")
-        listOf(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER).forEach { role ->
+        listOf(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER, BinaryRole.TALLOC).forEach { role ->
             File(nativeDir, role.fileName).writeBytes(ByteArray(2048) { 0x41 })
         }
         container = Container(

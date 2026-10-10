@@ -57,13 +57,16 @@ unlocks itself the moment the runtime is complete:
    `dd579f48…850084` (the download's SHA-512 was verified against Mozilla's own
    `SHA512SUMS` before the SHA-256 was pinned; retrieved 2026-10-10). It appears in
    Settings ▸ Storage ▸ Runtime download with the usual resume/hash/space/cancel
-   contract, and extracts (behind the same proot-tar gate as the rootfs) to
-   `<rootfs>/opt/firefox-esr`.
+   contract, and extracts **in-app** (pure-Kotlin TAR + xz-java, `--strip-components=1`)
+   to `<rootfs>/opt/firefox-esr` — no proot needed for the unpack, verified against the
+   real archive (50 files, launcher executable, libxul.so intact).
 2. **Readiness (`DesktopEngineReadiness`)**: a guarded low-priority worker evaluates
-   R1 binaries (pinned + exec'able) → rootfs extracted → Firefox installed →
-   rootfs GTK3 stack provisioned, and publishes a Compose-state snapshot. The Browser
-   window's catalogue card shows **Ready** or the exact missing step; no disk I/O ever
-   runs during composition (crash-safety rules 1–2).
+   the proot binary set (pinned + exec'able — **vendored 2026-10-10**: proot v5.1.107.96
+   + loader + libtalloc; box64 is NOT required for this native-arm64 guest) → rootfs
+   extracted → Firefox installed → GTK3 stack provisioned (one-tap **Provision** card in
+   Runtime download runs `RootfsProvisioner`: apt-get inside proot), and publishes a
+   Compose-state snapshot. The Browser window's catalogue card shows **Ready** or the
+   exact missing step; no disk I/O ever runs during composition (crash-safety rules 1–2).
 3. **Launch (`FirefoxSession` + `DesktopBrowserLauncher`)**: pure, unit-tested command
    and environment plans. The session runs through R2's `ContainerLauncher` —
    `proot --rootfs … --link2symlink --kill-on-exit --bind <profile>:/root/.mozilla
@@ -85,8 +88,10 @@ unlocks itself the moment the runtime is complete:
 Honest limits while gated (each named by the readiness message, nothing silent):
 
 - The rootfs must carry the GTK3/dbus-glib/ALSA stack Firefox links against; the bare
-  Ubuntu base does not. That is the same dependency-provisioning step Wine needs
-  (R4/P2) and readiness reports it as such.
+  Ubuntu base does not. The **Provision** action installs it with apt inside proot
+  (pinned package list, `--no-install-recommends`, full log in Terminal ▸ log); this
+  step is unpinned-by-hash by design (distro-side dependency resolution, like every
+  proot-distro tool) and needs network on the device.
 - One session at a time (`ALREADY_RUNNING` while alive); handing a second URL to the
   *running* instance needs a guest D-Bus session bus (P1).
 - Audio waits on P1's PulseAudio socket; the env already accepts it.

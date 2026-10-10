@@ -14,6 +14,14 @@ enum class BinaryRole(val fileName: String, val required: Boolean) {
     /** proot's ptrace loaders; without them proot cannot run anything. */
     PROOT_LOADER("libproot-loader.so", true),
     PROOT_LOADER_32("libproot-loader32.so", false),
+
+    /**
+     * talloc (LGPL-3.0+): proot links it dynamically. Vendored from Termux's
+     * Android build with its SONAME respelled to `libtalloc.so` so AGP packages
+     * it and the dynamic linker resolves it from nativeLibraryDir via
+     * LD_LIBRARY_PATH (docs/THIRD_PARTY.md records the provenance).
+     */
+    TALLOC("libtalloc.so", true),
 }
 
 /** One shipped binary: where it is, whether we can exec it, how big it is. */
@@ -147,7 +155,7 @@ class NativeBinaries(
      * drops the +x bit, and `exec()` then fails with EACCES - which is exactly the
      * failure R4's self-test has to be able to name.
      */
-    fun prepare(): PrepareResult {
+    fun prepare(required: Set<BinaryRole> = REQUIRED_DEFAULT): PrepareResult {
         if (!exists) {
             return PrepareResult(
                 PrepareStatus.NO_DIRECTORY,
@@ -173,7 +181,7 @@ class NativeBinaries(
                     nativeLibraryDir.absolutePath,
             )
         }
-        val missing = missingRequired()
+        val missing = required.filter { !record(it).present }
         if (missing.isNotEmpty()) {
             return PrepareResult(
                 PrepareStatus.PARTIAL,
@@ -182,7 +190,7 @@ class NativeBinaries(
         }
         // Fail closed: an unpinned or mismatched required binary is never exec'd.
         val checksums = verifyChecksums()
-        val mismatched = checksums.filter { it.status == ChecksumStatus.MISMATCH && it.role.required }
+        val mismatched = checksums.filter { it.status == ChecksumStatus.MISMATCH && it.role in required }
         if (mismatched.isNotEmpty()) {
             return PrepareResult(
                 PrepareStatus.CHECKSUM_MISMATCH,
@@ -190,7 +198,7 @@ class NativeBinaries(
                     "Expected the hash pinned in assets/native/checksums.txt.",
             )
         }
-        val unpinned = checksums.filter { it.status == ChecksumStatus.NOT_PINNED && it.role.required }
+        val unpinned = checksums.filter { it.status == ChecksumStatus.NOT_PINNED && it.role in required }
         if (unpinned.isNotEmpty()) {
             return PrepareResult(
                 PrepareStatus.CHECKSUM_NOT_PINNED,
@@ -213,6 +221,13 @@ class NativeBinaries(
         }
 
     companion object {
+        /** The full required set (Wine semantics); narrower launches pass their own. */
+        val REQUIRED_DEFAULT: Set<BinaryRole> get() = BinaryRole.entries.filter { it.required }.toSet()
+
+        /** What a non-box64 guest (Firefox ESR) needs: proot, its loader and talloc. */
+        val REQUIRED_PROOT_ONLY: Set<BinaryRole>
+            get() = setOf(BinaryRole.PROOT, BinaryRole.PROOT_LOADER, BinaryRole.TALLOC)
+
         /** The directory the PackageManager gave us; this is where exec is allowed. */
         fun from(nativeLibraryDirPath: String, pins: Map<String, String> = emptyMap()): NativeBinaries =
             NativeBinaries(File(nativeLibraryDirPath), pins)

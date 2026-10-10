@@ -84,7 +84,11 @@ class SelfTestRunner(
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
-    /** Minimal explicit environment: the guest brings its own, the host needs almost nothing. */
+    /**
+     * Minimal explicit environment: the guest brings its own, the host needs
+     * almost nothing - except LD_LIBRARY_PATH (the vendored proot links
+     * libtalloc.so) and the proot loader paths.
+     */
     private val environment: Map<String, String> = mapOf(
         "PATH" to "/system/bin:/vendor/bin:/usr/bin:/bin",
         "HOME" to "/data/local/tmp",
@@ -92,7 +96,8 @@ class SelfTestRunner(
         "LANG" to "C.UTF-8",
         "BOX64_NOBANNER" to "1",
         "PROOT_NO_SECCOMP" to "1",
-    )
+        "LD_LIBRARY_PATH" to binaries.nativeLibraryDir.absolutePath,
+    ) + binaries.loaderPaths()
 
     fun steps(): List<SelfTestStep> {
         val results = mutableListOf<SelfTestStep>()

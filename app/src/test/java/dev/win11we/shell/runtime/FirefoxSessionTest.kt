@@ -112,6 +112,9 @@ class FirefoxSessionTest {
         // proot's loader paths are still injected and everything is sorted for diffing.
         assertTrue(env.containsKey("PROOT_LOADER"))
         assertTrue(env.containsKey("PROOT_LOADER_32"))
+        // The vendored proot links libtalloc.so: the host library dir must lead
+        // LD_LIBRARY_PATH or the exec dies with CANNOT LINK EXECUTABLE.
+        assertTrue(env.getValue("LD_LIBRARY_PATH").startsWith(binaries.nativeLibraryDir.absolutePath))
         assertEquals(env.keys.toList(), env.keys.sorted())
         // FirefoxEnvironment itself is pure and sorted.
         val pure = FirefoxEnvironment.build(":100")

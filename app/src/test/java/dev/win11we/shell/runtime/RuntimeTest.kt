@@ -30,6 +30,7 @@ class NativeBinariesTest {
         writeBinary(tmp.root, BinaryRole.BOX64)
         writeBinary(tmp.root, BinaryRole.PROOT)
         writeBinary(tmp.root, BinaryRole.PROOT_LOADER)
+        writeBinary(tmp.root, BinaryRole.TALLOC)
     }
 
     @Test
@@ -37,7 +38,7 @@ class NativeBinariesTest {
         val binaries = NativeBinaries(tmp.root)
         assertFalse(binaries.isReady)
         assertEquals(
-            listOf(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER),
+            listOf(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER, BinaryRole.TALLOC),
             binaries.missingRequired(),
         )
         val result = binaries.prepare()
@@ -55,7 +56,7 @@ class NativeBinariesTest {
     @Test
     fun `all required binaries present and pinned means ready`() {
         shipAll()
-        val binaries = NativeBinaries(tmp.root, pinsFor(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER))
+        val binaries = NativeBinaries(tmp.root, pinsFor(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER, BinaryRole.TALLOC))
         val result = binaries.prepare()
         assertEquals(PrepareStatus.READY, result.status)
         assertTrue(result.message.contains("libbox64.so"))
@@ -64,9 +65,24 @@ class NativeBinariesTest {
     }
 
     @Test
+    fun `the proot-only requirement ignores a missing box64 - the browser case`() {
+        // Ship everything except box64: Firefox ESR (native arm64) must still be READY.
+        writeBinary(tmp.root, BinaryRole.PROOT)
+        writeBinary(tmp.root, BinaryRole.PROOT_LOADER)
+        writeBinary(tmp.root, BinaryRole.TALLOC)
+        val binaries = NativeBinaries(
+            tmp.root,
+            pinsFor(BinaryRole.PROOT, BinaryRole.PROOT_LOADER, BinaryRole.TALLOC),
+        )
+        assertEquals(PrepareStatus.PARTIAL, binaries.prepare().status) // wine semantics: box64 missing
+        assertEquals(PrepareStatus.READY, binaries.prepare(NativeBinaries.REQUIRED_PROOT_ONLY).status)
+        assertTrue(BinaryRole.BOX64 !in NativeBinaries.REQUIRED_PROOT_ONLY)
+    }
+
+    @Test
     fun `the optional 32-bit loader does not block readiness`() {
         shipAll()
-        val binaries = NativeBinaries(tmp.root, pinsFor(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER))
+        val binaries = NativeBinaries(tmp.root, pinsFor(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER, BinaryRole.TALLOC))
         assertEquals(PrepareStatus.READY, binaries.prepare().status)
         assertFalse(binaries.record(BinaryRole.PROOT_LOADER_32).present)
     }
@@ -124,7 +140,7 @@ class NativeBinariesTest {
     @Test
     fun `a hash mismatch is refused and names the file`() {
         shipAll()
-        val pins = pinsFor(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER).toMutableMap()
+        val pins = pinsFor(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER, BinaryRole.TALLOC).toMutableMap()
         pins["libbox64.so"] = "0".repeat(64)
         val result = NativeBinaries(tmp.root, pins).prepare()
         assertEquals(PrepareStatus.CHECKSUM_MISMATCH, result.status)
@@ -135,7 +151,7 @@ class NativeBinariesTest {
     fun `an unpinned optional binary does not block readiness`() {
         shipAll()
         writeBinary(tmp.root, BinaryRole.PROOT_LOADER_32) // present but deliberately unpinned
-        val binaries = NativeBinaries(tmp.root, pinsFor(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER))
+        val binaries = NativeBinaries(tmp.root, pinsFor(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER, BinaryRole.TALLOC))
         assertEquals(PrepareStatus.READY, binaries.prepare().status)
         assertEquals(
             ChecksumStatus.NOT_PINNED,

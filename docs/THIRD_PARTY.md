@@ -110,20 +110,23 @@ No new libraries: `ContainerService` uses `androidx.core` (`NotificationCompat`,
 
 ### R1 additions (native runtime)
 
-**No third-party binary is packaged in the APK yet.** `app/src/main/jniLibs/arm64-v8a/`
-contains a `README.txt` only; the Kotlin side (inventory, permissions, probes, proot
-command line) is written and unit-tested. When binaries are vendored, this table must be
-filled in at the same time, with upstream URL, tag/commit and SHA-256:
+**Vendored (2026-10-10, owner-approved for the desktop-browser milestone):**
 
-| File | Upstream | Licence | Status |
-| --- | --- | --- | --- |
-| `libbox64.so` | box64 (ptitSeb), pinned ref `v0.4.5-1` = commit `e99ca51299ec897e6a96da6d00983d90406a836f` | MIT | not vendored; `.github/workflows/build-native.yml` builds it with `-DANDROID=ON -DWINLATOR_GLIBC=ON` |
-| `libproot.so` | proot Android fork | **GPL-2.0** | not vendored; will be exec'd as a separate process, never linked |
-| `libproot-loader.so` / `libproot-loader32.so` | proot | **GPL-2.0** | not vendored |
-| Ubuntu 22.04 arm64 rootfs, Wine 9.x | R3 download | per-package / LGPL-2.1+ | not downloaded |
+| File | Upstream | Licence | SHA-256 | Status |
+| --- | --- | --- | --- | --- |
+| `libproot.so` | termux/proot tag `v5.1.107.96`, commit `a179d3e8a4e045aaa1fb8cc3284f23509d96d353` (source zip pin `75f654fe60dea92dabff2bf083ae8bfe4f91baa6a1a374786a6bf391015eebaa` from Termux's build recipe), built with NDK r27c `aarch64-linux-android28-clang`, patches: 32-bit loader disabled, talloc linked from the Termux build, `-DARG_MAX=131072` | **GPL-2.0** | `0566cc8a1d50b1284814e543f58750520e14bb7aac8929a00cc50eb4e3ab2df3` | vendored; exec'd as a separate process, never linked into app code. Complete corresponding source = the public tag + the patch recipe reproduced in `docs/NATIVE_RUNTIME.md` (GPL-2.0 source availability). |
+| `libproot-loader.so` | same build (`src/loader/loader`, statically linked, no interpreter) | **GPL-2.0** | `0738d73bc8e3c0b22f9b59a019a29087195453dcb0b73ced979b00fafe1caefe` | vendored |
+| `libtalloc.so` | Termux `libtalloc_2.5.0_aarch64.deb` (deb sha256 `556591f43bb773ad8777e1a29522640866a55f95dab71914418b94a8c58ad5a7`), talloc 2.5.0 from samba.org; SONAME respelled `libtalloc.so.2`→`libtalloc.so` (same-length byte patch in `.dynstr`) | LGPL-3.0+ | `160d39bc0d7ed946f22310d1d6f20addda21b02b0972dffe929fe49951543941` | vendored; proot's only dynamic dep besides libc/libdl |
+| `libbox64.so` | box64 (ptitSeb), ref `v0.4.4` | MIT | — | not vendored; `.github/workflows/build-native.yml` builds it (sandbox OOMs on `gtkclass.c`); only x86/x64 Wine guests need it |
+| `libproot-loader32.so` | proot | **GPL-2.0** | — | deliberately not built (arm64-only rootfs); optional role |
+| Ubuntu 22.04 arm64 rootfs, Wine 9.x, Firefox ESR | R3 runtime download | per-package / LGPL-2.1+ / MPL-2.0 | pinned in `RuntimeManifest` | not bundled in the APK |
+
+**Library addition (R3 extraction):** `org.tukaani:xz:1.10` (xz-java) — **public domain** —
+pure-Java XZ/LZMA2 decoder, because the JDK has gzip but no xz and Mozilla ships
+`.tar.xz`. No native code, no new repository (Maven Central was already configured).
 
 Binaries must also be pinned by SHA-256 in `app/src/main/assets/native/checksums.txt`
-(template committed, all entries commented out). An unpinned or mismatched required
+(the three vendored files are). An unpinned or mismatched required
 binary is refused, not executed.
 
 GPL note (rule 4): proot is GPL-2.0. We only `exec()` it, we do not link against it, and

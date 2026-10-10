@@ -7,6 +7,7 @@ lifecycle = "2.8.7"
 composeBom = "2025.07.00"
 junit = "4.13.2"
 robolectric = "4.14.1"
+xz = "1.10"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -23,6 +24,9 @@ androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-
 robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-test-core = { group = "androidx.test", name = "core", version = "1.6.1" }
+# Pure-Java XZ/LZMA2 decoder (public domain) - the JDK has gzip but no xz, and
+# Mozilla ships Firefox as .tar.xz. Used by R3's on-device extractor.
+xz = { group = "org.tukaani", name = "xz", version.ref = "xz" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

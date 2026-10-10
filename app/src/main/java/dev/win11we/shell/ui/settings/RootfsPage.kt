@@ -34,6 +34,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.win11we.shell.runtime.DesktopEngineReadiness
+import dev.win11we.shell.runtime.NativeBinaries
+import dev.win11we.shell.runtime.RootfsProvisioner
 import dev.win11we.shell.runtime.download.Artifact
 import dev.win11we.shell.runtime.download.ArtifactState
 import dev.win11we.shell.runtime.download.DownloadSession
@@ -100,12 +103,96 @@ fun RootfsPage(modifier: Modifier = Modifier) {
             )
             Spacer(Modifier.height(8.dp))
         }
+        ProvisionCard(rootfs, context)
+        Spacer(Modifier.height(10.dp))
         Text(
             text = "Hashes are pinned from the publishers' own checksums (Ubuntu SHA256SUMS, the Ubuntu " +
-                "archive Packages index). A download that does not match is deleted, never unpacked. " +
-                "Extraction needs proot's tar (R1 binaries).",
+                "archive Packages index, Mozilla's SHA512SUMS). A download that does not match is deleted, " +
+                "never unpacked. Extraction runs in-app (no root, no native tar): the Ubuntu rootfs and " +
+                "Firefox's .tar.xz are unpacked by the shell's own TAR reader; device nodes are emulated " +
+                "by proot at runtime.",
             color = TextTertiary,
             fontSize = 11.sp,
+        )
+    }
+}
+
+/**
+ * The apt-inside-proot step that turns the bare Ubuntu rootfs into one Firefox
+ * can run on (GTK3, X11, D-Bus, ALSA, fonts, CA certs). Runs on the page's
+ * guarded worker; every line lands in the shared log (Terminal ▸ log).
+ */
+@Composable
+private fun ProvisionCard(rootfs: RootfsManager, context: android.content.Context) {
+    var provisioning by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    val canProvision = rootfs.rootfsReady && !provisioning
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            
+            .clip(CardShape)
+            .background(CardSurface)
+            .border(1.dp, Color(0x22FFFFFF), CardShape)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                "Browser runtime libraries",
+                color = TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                text = "apt-get inside proot installs GTK3, X11, D-Bus, ALSA, fonts and CA " +
+                    "certificates into the rootfs (" + RootfsProvisioner.BROWSER_PACKAGES.size +
+                    " pinned package names, dependencies resolved by apt). Needs the extracted " +
+                    "rootfs and the R1 binaries.",
+                color = TextTertiary,
+                fontSize = 11.sp,
+            )
+            message?.let {
+                Spacer(Modifier.height(4.dp))
+                Text(it, color = TextSecondary, fontSize = 11.sp)
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = if (provisioning) "Working…" else "Provision",
+            color = if (canProvision) Color(0xFF0B1220) else TextTertiary,
+            fontSize = 12.5.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier
+                .clip(ChipShape)
+                .background(if (canProvision) AccentBlue else Color(0x22FFFFFF))
+                .then(
+                    if (canProvision) {
+                        Modifier.clickable {
+                            startWorker(rootfs, "provision") {
+                                androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot { provisioning = true }
+                                val binaries = NativeBinaries.from(
+                                    nativeLibraryDirPath = context.applicationInfo.nativeLibraryDir,
+                                    pins = NativeBinaries.loadPinsFromAssets(context.assets),
+                                )
+                                val result = RootfsProvisioner.provision(
+                                    binaries = binaries,
+                                    rootfsDir = rootfs.rootfsDir,
+                                    filesDir = context.filesDir,
+                                    log = dev.win11we.shell.ui.terminal.SharedLog.buffer,
+                                )
+                                androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+                                    provisioning = false
+                                    message = result.message
+                                }
+                                DesktopEngineReadiness.refreshAsync(context)
+                            }
+                        }
+                    } else {
+                        Modifier
+                    },
+                )
+                .padding(horizontal = 14.dp, vertical = 7.dp),
         )
     }
 }
