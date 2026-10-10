@@ -223,6 +223,14 @@ class XDocument(
         /** SetInputFocus revert/focus values: None = no events, PointerRoot = follow the pointer. */
         const val FOCUS_NONE = 0
         const val FOCUS_POINTER_ROOT = 1
+
+        /**
+         * The shell's internal window: never mapped, never parented to the root
+         * (invisible to QueryTree/paintOrder/hit-testing), but a real window so
+         * it can own selections and carry properties. Reserved near the top of
+         * the resource-id space, where client id allocation never arrives.
+         */
+        const val SHELL_WINDOW_ID = X11.RESOURCE_ID_BASE or 0x001FFFFE
     }
 
     /** The current input focus: [FOCUS_NONE], [FOCUS_POINTER_ROOT] or a window id. */
@@ -365,6 +373,80 @@ class XDocument(
         return CursorGlyph.LEFT_PTR
     }
 
+    // --- selections (server-wide ownership, P1 clipboard bridge) ------------
+
+    private val selectionOwners = HashMap<Int, SelectionOwner>()
+
+    /**
+     * Set by XServer when the Android clipboard bridge is attached: answers
+     * shell-owned conversions inline. Takes the target ATOM, returns the raw
+     * property bytes or null (unknown target -> a None conversion, as in X).
+     */
+    var clipboardTextProvider: ((targetAtom: Int) -> ByteArray?)? = null
+
+    /** Set by XServer: fired after a *client* claims a selection (guest-copy push). */
+    var onSelectionOwnerChanged: ((atom: Int, owner: SelectionOwner) -> Unit)? = null
+
+    fun selectionOwner(atom: Int): SelectionOwner? = synchronized(selectionOwners) { selectionOwners[atom] }
+
+    /**
+     * Records a new owner ([window] 0/None clears). @return the effective owner,
+     * or null when the selection now has none. The caller fires
+     * [onSelectionOwnerChanged] - kept out of here so reclaims stay silent.
+     */
+    fun setSelectionOwner(atom: Int, window: Int, connection: XConnection?): SelectionOwner? {
+        val owner = if (window == 0) null else SelectionOwner(window, connection)
+        synchronized(selectionOwners) {
+            if (owner == null) selectionOwners.remove(atom) else selectionOwners[atom] = owner
+        }
+        return owner
+    }
+
+    /**
+     * The Android clipboard changed outside the guest (shell Notepad copy,
+     * another app): the shell takes both text selections back so guest pastes
+     * get the fresh text. Only legal while the bridge is attached.
+     */
+    fun reclaimSelectionsToShell() {
+        if (clipboardTextProvider == null) return
+        val shell = SelectionOwner(SHELL_WINDOW_ID, null)
+        synchronized(selectionOwners) {
+            atomId("PRIMARY")?.let { selectionOwners[it] = shell }
+            atomId("CLIPBOARD")?.let { selectionOwners[it] = shell }
+        }
+    }
+
+    /** Ownership dies with its window (X semantics); the shell reclaims when bridged. */
+    private fun dropSelectionsOfWindow(windowId: Int) {
+        val lost = synchronized(selectionOwners) {
+            selectionOwners.entries.filter { it.value.window == windowId }.map { it.key }
+        }
+        lost.forEach { atom ->
+            val shell = if (clipboardTextProvider != null) SelectionOwner(SHELL_WINDOW_ID, null) else null
+            synchronized(selectionOwners) {
+                if (shell == null) selectionOwners.remove(atom) else selectionOwners[atom] = shell
+            }
+        }
+    }
+
+    /** Detaching the bridge: shell-owned selections go back to "nobody". */
+    fun dropShellSelections() {
+        synchronized(selectionOwners) { selectionOwners.entries.removeAll { it.value.isShell } }
+    }
+
+    /** A disconnected client's ownerships fall back the same way. */
+    fun releaseSelections(connection: XConnection) {
+        val lost = synchronized(selectionOwners) {
+            selectionOwners.entries.filter { it.value.connection === connection }.map { it.key }
+        }
+        lost.forEach { atom ->
+            val shell = if (clipboardTextProvider != null) SelectionOwner(SHELL_WINDOW_ID, null) else null
+            synchronized(selectionOwners) {
+                if (shell == null) selectionOwners.remove(atom) else selectionOwners[atom] = shell
+            }
+        }
+    }
+
     // --- keyboard physical state (for QueryKeymap) ---------------------------
 
     private val pressedKeycodes = HashSet<Int>()
@@ -430,6 +512,20 @@ class XDocument(
         // A few atoms every client expects to exist with the standard numbering.
         listOf("PRIMARY", "SECONDARY", "ATOM", "STRING", "WM_NAME", "WM_CLASS", "WM_PROTOCOLS", "WM_DELETE_WINDOW")
             .forEachIndexed { index, name -> internAtom(name, index + 1) }
+        // The selection targets the P1 clipboard bridge negotiates (no forced ids:
+        // only the eight atoms above are protocol-numbered). Every client interns
+        // by name and gets the same server-wide ids.
+        listOf("CLIPBOARD", "TARGETS", "UTF8_STRING", "TEXT").forEach { internAtom(it) }
+        // The shell's internal selection/property window (see SHELL_WINDOW_ID).
+        windows[SHELL_WINDOW_ID] = XWindow(
+            id = SHELL_WINDOW_ID,
+            parent = null,
+            x = 0,
+            y = 0,
+            width = 1,
+            height = 1,
+            depth = 0,
+        )
     }
 
     val rootId: Int get() = screen.rootId
@@ -474,11 +570,12 @@ class XDocument(
 
     fun destroyWindow(id: Int): Boolean {
         val window = windows[id] ?: return false
-        if (id == rootId) return false // the root is never destroyed
+        if (id == rootId || id == SHELL_WINDOW_ID) return false // internal windows are immortal
         window.children.toList().forEach { destroyWindow(it) }
         window.parent?.let { parent -> windows[parent]?.children?.remove(id) }
         windows.remove(id)
         revertFocusIf(id)
+        dropSelectionsOfWindow(id)
         synchronized(redirectOwners) { redirectOwners.remove(id) }
         synchronized(windowOwners) { windowOwners.remove(id) }
         synchronized(passiveGrabs) { passiveGrabs.removeAll { it.window == id } }
@@ -512,6 +609,7 @@ class XDocument(
         if (!window.mapped) return false
         window.mapped = false
         revertFocusIf(id)
+        dropSelectionsOfWindow(id)
         return true
     }
 

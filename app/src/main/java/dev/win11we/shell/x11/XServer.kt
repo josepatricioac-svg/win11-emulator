@@ -72,6 +72,115 @@ object XServer {
     var pointerY: Int = 0
         private set
 
+    // --- P1: Android clipboard <-> X selections bridge -----------------------
+
+    @Volatile
+    private var clipboardBridge: XClipboardBridge? = null
+
+    /** Internal connection that speaks the wire protocol as the shell's paste client. */
+    private var shellConnection: XConnection? = null
+
+    /** Loop guard: the last text pushed *from* a guest onto the Android clipboard. */
+    @Volatile
+    private var lastGuestClipboardText: String? = null
+
+    fun lastGuestClipboardText(): String? = lastGuestClipboardText
+
+    /**
+     * Attaches (or with null, detaches) the Android clipboard bridge. While
+     * attached, PRIMARY and CLIPBOARD default to shell ownership, guest
+     * SetSelectionOwner claims trigger a real wire-protocol fetch of the new
+     * text, and guest ConvertSelection requests are answered inline from the
+     * system clipboard. Called from the Compose layer (DesktopScreen).
+     */
+    fun setClipboardBridge(bridge: XClipboardBridge?) {
+        clipboardBridge = bridge
+        if (bridge == null) {
+            document.clipboardTextProvider = null
+            document.onSelectionOwnerChanged = null
+            shellConnection?.let { document.releaseOwners(it) }
+            shellConnection = null
+            lastGuestClipboardText = null
+            document.dropShellSelections()
+            return
+        }
+        document.clipboardTextProvider = { targetAtom ->
+            val name = document.atomName(targetAtom)
+            if (name == "TARGETS") null // handled inside the connection
+            else runCatching { SelectionCodec.encode(bridge.readText(), name) }.getOrNull()
+        }
+        val connection = shellConnection ?: XConnection(document, RecordingSink()).also { internal ->
+            internal.eventInterceptor = { message -> onShellEvent(message) }
+            document.setOwner(XDocument.SHELL_WINDOW_ID, internal) // route SelectionNotify to it
+            shellConnection = internal
+        }
+        document.reclaimSelectionsToShell()
+        document.onSelectionOwnerChanged = { atom, owner ->
+            if (owner.connection != null) requestGuestSelection(atom)
+        }
+        @Suppress("UNUSED_EXPRESSION")
+        connection
+    }
+
+    /** The Android clipboard changed outside the guest: the shell reclaims ownership. */
+    fun androidClipboardChanged() {
+        if (clipboardBridge == null) return
+        document.reclaimSelectionsToShell()
+    }
+
+    /**
+     * Guest copy: ask the new owner for UTF8_STRING through the *real* wire
+     * protocol - the internal connection sends ConvertSelection, the owner gets
+     * a SelectionRequest and answers with ChangeProperty + SendEvent, and
+     * [onShellEvent] picks the text up. Runs on the claiming client's thread.
+     */
+    private fun requestGuestSelection(atom: Int) {
+        val connection = shellConnection ?: return
+        val primary = document.atomId("PRIMARY")
+        val clipboard = document.atomId("CLIPBOARD")
+        if (atom != primary && atom != clipboard) return
+        val utf8 = document.atomId("UTF8_STRING") ?: return
+        val writer = XWriter(true)
+        writer.byte(X11.REQ_CONVERT_SELECTION)
+        writer.byte(0)
+        writer.short(6) // 24 bytes = 6 units
+        writer.int(XDocument.SHELL_WINDOW_ID) // requestor
+        writer.int(atom) // selection
+        writer.int(utf8) // target
+        writer.int(0) // property: owner's choice
+        writer.int(0) // time: CurrentTime
+        runCatching { connection.onBytes(writer.toByteArray()) }
+    }
+
+    /** The internal connection's event tap: SelectionNotify answers to its requests. */
+    private fun onShellEvent(message: ByteArray) {
+        val bridge = clipboardBridge ?: return
+        val connection = shellConnection ?: return
+        try {
+            if (message.size < 32 || (message[0].toInt() and 0x7F) != X11.EV_SELECTION_NOTIFY) return
+            val requestor = le32(message, 8)
+            if (requestor != XDocument.SHELL_WINDOW_ID) return
+            val target = le32(message, 16)
+            val property = le32(message, 20)
+            if (property == 0) return // conversion refused
+            val data = document.property(XDocument.SHELL_WINDOW_ID, property)?.data
+            document.deleteProperty(XDocument.SHELL_WINDOW_ID, property)
+            val text = data?.let { SelectionCodec.decode(it, document.atomName(target)) }
+            if (text != null && text != lastGuestClipboardText) {
+                lastGuestClipboardText = text
+                runCatching { bridge.writeText(text) }
+            }
+        } finally {
+            connection.drainOutbox() // the internal connection never writes to a socket
+        }
+    }
+
+    private fun le32(bytes: ByteArray, offset: Int): Int =
+        (bytes[offset].toInt() and 0xFF) or
+            ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
+            ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
+            ((bytes[offset + 3].toInt() and 0xFF) shl 24)
+
     init {
         // Keep every connection's pointer in sync when a client warps it
         // (WarpPointer / XTest FakeInput), and wake the renderer for the cursor.
@@ -181,6 +290,7 @@ object XServer {
                 document.releaseRedirect(connection)
                 document.releaseOwners(connection)
                 document.releaseGrabs(connection)
+                document.releaseSelections(connection)
             }
             connections.clear()
         }
@@ -248,6 +358,7 @@ object XServer {
             document.releaseRedirect(connection)
             document.releaseOwners(connection)
             document.releaseGrabs(connection)
+            document.releaseSelections(connection)
             clientCount = synchronized(connections) { connections.size }
             runCatching { client.close() }
         }
@@ -336,6 +447,7 @@ object XServer {
         document.releaseRedirect(connection)
         document.releaseOwners(connection)
         document.releaseGrabs(connection)
+        document.releaseSelections(connection)
         clientCount = synchronized(connections) { connections.size }
     }
 

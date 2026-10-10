@@ -48,7 +48,6 @@ class XConnection(
     private val pixmaps = HashMap<Int, Int>()
     private val fonts = HashMap<Int, String>()
     private val colormaps = HashSet<Int>()
-    private val selections = HashMap<Int, Int>()
     private var screenSaver = intArrayOf(600, 600, 1, 1) // timeout, interval, preferBlanking, allowExposures
 
     private class GcState(
@@ -144,11 +143,20 @@ class XConnection(
     fun outboxBytes(): Int = synchronized(outbox) { outbox.sumOf { it.size } }
 
     /**
+     * Set by XServer on its internal shell connection: inspects every event
+     * delivered from another connection (the clipboard bridge waits for the
+     * SelectionNotify answering its own ConvertSelection). Runs guarded - an
+     * interceptor failure must never break event delivery.
+     */
+    var eventInterceptor: ((ByteArray) -> Unit)? = null
+
+    /**
      * Queues a raw message from another thread (WM-driven events, redirected
      * requests) and asks the server to push it to this connection's socket now;
      * an idle client would otherwise not see it until its next request.
      */
     fun deliver(message: ByteArray) {
+        runCatching { eventInterceptor?.invoke(message) }
         synchronized(outbox) { outbox.addLast(message) }
         document.externalFlush?.invoke(this)
     }
@@ -420,28 +428,35 @@ class XConnection(
                 }
             }
             X11.REQ_SET_SELECTION_OWNER -> {
+                // owner@4 (None clears), selection@8, time@12.
                 val owner = reader.int()
                 val selection = reader.int()
-                selections[selection] = owner
+                reader.int() // time
+                if (owner != 0 && document.window(owner) == null) {
+                    return error(X11.ERR_BAD_WINDOW, opcode, owner)
+                }
+                // While the Android bridge is attached, a released text selection
+                // falls back to the shell (the system clipboard still holds the
+                // text), so guest pastes keep working - honest X would say None.
+                val effective = if (owner == 0 && document.clipboardTextProvider != null) {
+                    document.setSelectionOwner(selection, XDocument.SHELL_WINDOW_ID, null)
+                } else {
+                    document.setSelectionOwner(selection, owner, this)
+                }
+                // A client claim may trigger the shell bridge to fetch the new
+                // text (guest copy -> Android clipboard); reclaims stay silent.
+                if (effective != null && effective.connection === this) {
+                    document.onSelectionOwnerChanged?.invoke(selection, effective)
+                }
             }
             X11.REQ_GET_SELECTION_OWNER -> {
                 val selection = reader.int()
                 reply(opcode) { writer ->
-                    writer.int(selections[selection] ?: 0)
+                    writer.int(document.selectionOwner(selection)?.window ?: 0)
                     writer.pad(20)
                 }
             }
-            X11.REQ_CONVERT_SELECTION -> {
-                val requestor = reader.int()
-                val selection = reader.int()
-                val target = reader.int()
-                val property = reader.int()
-                // We own no selections yet: answer None so clients fall back instead of hanging.
-                queue(
-                    eventWriter(X11.EV_SELECTION_NOTIFY)
-                        .int(0).int(requestor).int(selection).int(target).int(property).pad(8),
-                )
-            }
+            X11.REQ_CONVERT_SELECTION -> convertSelection(opcode, reader)
             X11.REQ_SEND_EVENT -> sendEventRequest(data, opcode, reader, request)
             X11.REQ_GRAB_POINTER -> {
                 // ownerEvents in the data byte; xGrabPointerReq: grab-window@4,
@@ -1350,6 +1365,75 @@ class XConnection(
         }
     }
 
+    // --- selections ----------------------------------------------------------
+
+    /**
+     * ConvertSelection: requestor@4, selection@8, target@12, property@16, time@20.
+     * Three cases, exactly like X:
+     * - a client owns the selection: route a SelectionRequest to the owner, which
+     *   answers with ChangeProperty + SendEvent(SelectionNotify) (both work here);
+     * - the shell bridge owns it: answer inline from [XDocument.clipboardTextProvider];
+     * - nobody owns it: SelectionNotify with property None.
+     */
+    private fun convertSelection(opcode: Int, reader: XReader) {
+        val requestor = reader.int()
+        val selection = reader.int()
+        val target = reader.int()
+        val property = reader.int()
+        val time = reader.int()
+        if (document.window(requestor) == null) return error(X11.ERR_BAD_WINDOW, opcode, requestor)
+        val owner = document.selectionOwner(selection)
+        when {
+            owner == null -> sendSelectionNotify(requestor, selection, target, 0, time)
+            // Shell-owned (or a null-connection owner): answer inline; with no
+            // provider attached this degrades to an honest None conversion.
+            owner.connection == null -> shellConvert(requestor, selection, target, property, time)
+            else -> owner.connection.deliverEvent { writer ->
+                writer.byte(X11.EV_SELECTION_REQUEST); writer.byte(0); writer.short(sequence)
+                writer.int(time); writer.int(requestor); writer.int(selection)
+                writer.int(target); writer.int(property); writer.pad(8)
+            }
+        }
+    }
+
+    /** The shell answers a conversion from the Android clipboard, inline. */
+    private fun shellConvert(requestor: Int, selection: Int, target: Int, property: Int, time: Int) {
+        val propName = if (property != 0) property else target
+        val targetsAtom = document.atomId("TARGETS")
+        val data: ByteArray?
+        val format: Int
+        if (target == targetsAtom) {
+            val writer = XWriter(littleEndian)
+            SelectionCodec.TEXT_TARGETS.forEach { name -> writer.int(document.internAtom(name)) }
+            data = writer.toByteArray()
+            format = 32
+        } else {
+            data = document.clipboardTextProvider?.invoke(target)
+            format = 8
+        }
+        if (data == null) {
+            sendSelectionNotify(requestor, selection, target, 0, time)
+            return
+        }
+        document.setProperty(requestor, propName, target, format, data)
+        sendSelectionNotify(requestor, selection, target, propName, time)
+    }
+
+    /** SelectionNotify to the requestor's connection (property 0 = refused/None). */
+    private fun sendSelectionNotify(requestor: Int, selection: Int, target: Int, property: Int, time: Int) {
+        val writer = XWriter(littleEndian)
+        writer.byte(X11.EV_SELECTION_NOTIFY)
+        writer.byte(0)
+        writer.short(sequence)
+        writer.int(time)
+        writer.int(requestor)
+        writer.int(selection)
+        writer.int(target)
+        writer.int(property)
+        writer.pad(8)
+        deliverToOwner(requestor, writer.toByteArray().copyOf(32))
+    }
+
     // --- fonts ---------------------------------------------------------------
 
     /**
@@ -1507,7 +1591,11 @@ class XConnection(
         var current: Int? = target
         while (current != null) {
             val window = document.window(current) ?: break
-            if (window.eventMask and eventMask != 0) {
+            // An empty event-mask delivers to the destination unconditionally:
+            // SelectionNotify and ClientMessage have no selectable mask, and the
+            // ICCCM idiom is XSendEvent(dest, False, 0, ev) - every real server
+            // (and every selection/WM flow) depends on it.
+            if (eventMask == 0 || window.eventMask and eventMask != 0) {
                 deliverToOwner(current, event.copyOf(32))
                 break
             }

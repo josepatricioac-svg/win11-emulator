@@ -179,6 +179,8 @@ object X11 {
     const val EV_REPARENT_NOTIFY = 21
     const val EV_CONFIGURE_NOTIFY = 22
     const val EV_PROPERTY_NOTIFY = 28
+    const val EV_SELECTION_CLEAR = 29
+    const val EV_SELECTION_REQUEST = 30
     const val EV_SELECTION_NOTIFY = 31
     const val EV_CLIENT_MESSAGE = 33
 

@@ -38,6 +38,9 @@ fun DesktopScreen(store: SettingsStore) {
     var startOpen by remember { mutableStateOf(false) }
 
     Win11Theme(darkTheme = store.themeMode == ThemeMode.DARK) {
+    // P1: bridge X selections <-> the Android clipboard while the desktop lives
+    // (guest copies push out; Android-side changes reclaim selection ownership).
+    dev.win11we.shell.ui.xdesktop.ClipboardBridgeEffect()
     // Warm the caches that opening a window would otherwise pay for on the main thread:
     // the PackageManager browser query and the SHA-256 of the shipped binaries.
     LaunchedEffect(Unit) {
