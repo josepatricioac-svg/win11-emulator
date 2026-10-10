@@ -56,7 +56,7 @@ object DesktopBrowserCatalogue {
             detail = "Native arm64 build from the Ubuntu 22.04 rootfs, X11 + PulseAudio. Full desktop profile, " +
                 "extensions and sidebar - the closest thing to a PC Firefox on this device.",
             license = "MPL-2.0",
-            requirement = "R3 rootfs + D1 X server",
+            requirement = "R1 proot + R3 rootfs, Firefox and GUI libs + D1 X server",
         ),
         BrowserEngine.DesktopBrowser(
             id = "desktop:edge-arm64",
@@ -83,6 +83,22 @@ object DesktopBrowserCatalogue {
     )
 
     fun byId(id: String): BrowserEngine.DesktopBrowser? = ALL.firstOrNull { it.id == id }
+}
+
+/**
+ * UI wording for a desktop engine's state, pure so it is unit-tested. The static
+ * [BrowserEngine.DesktopBrowser.requirement] is only the fallback before the
+ * readiness worker has reported; once it has, the exact missing step wins, and a
+ * ready engine says so instead of repeating a stale "Needs ..." roadmap label.
+ */
+object DesktopEngineLabels {
+    fun status(engine: BrowserEngine.DesktopBrowser, ready: Boolean, missing: String?): String = when {
+        ready -> "Ready"
+        missing != null -> missing
+        else -> "Needs ${engine.requirement}"
+    }
+
+    fun badge(ready: Boolean): String = if (ready) "Ready" else "Not ready"
 }
 
 /**

@@ -43,7 +43,9 @@ import dev.win11we.shell.settings.SettingsStore
 import dev.win11we.shell.settings.TaskbarAlignment
 import dev.win11we.shell.settings.ThemeMode
 import dev.win11we.shell.ui.browser.Browsers
+import dev.win11we.shell.runtime.DesktopEngineReadiness
 import dev.win11we.shell.ui.browser.DesktopBrowserCatalogue
+import dev.win11we.shell.ui.browser.DesktopEngineLabels
 import dev.win11we.shell.ui.theme.AccentBlue
 import dev.win11we.shell.ui.theme.CardSurface
 import dev.win11we.shell.ui.theme.HoverLight
@@ -197,10 +199,12 @@ private fun PersonalisationPage(store: SettingsStore) {
 private fun AppsPage(store: SettingsStore) {
     val context = LocalContext.current
     val installed = remember { Browsers.installed(context) }
+    // Readiness is evaluated on a guarded worker (no disk I/O in composition).
+    androidx.compose.runtime.LaunchedEffect(Unit) { DesktopEngineReadiness.refreshAsync(context) }
     PageTitle("Apps")
     Hint(
         "Default browser engine. Android browsers launch now; desktop engines run inside the " +
-            "container on the shell's X server and unlock with R1/R3/D1.",
+            "container on the shell's X server. Each one shows the exact step it is still waiting on.",
     )
     SettingsCard {
         installed.forEach { browser ->
@@ -232,7 +236,11 @@ private fun AppsPage(store: SettingsStore) {
         DesktopBrowserCatalogue.ALL.forEach { engine ->
             RadioRow(
                 title = engine.label,
-                subtitle = "Needs ${engine.requirement}  ·  ${engine.license}",
+                subtitle = DesktopEngineLabels.status(
+                    engine,
+                    DesktopEngineReadiness.ready(engine.id),
+                    DesktopEngineReadiness.missing(engine.id),
+                ) + "  ·  ${engine.license}",
                 options = emptyList(),
                 selectedIndex = 0,
                 onSelect = {},

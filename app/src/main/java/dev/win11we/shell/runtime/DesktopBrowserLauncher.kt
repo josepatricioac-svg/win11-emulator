@@ -75,9 +75,9 @@ object DesktopEngineReadiness {
         // The other catalogue engines keep their documented gates until their steps land.
         return mapOf(
             FirefoxSession.ENGINE_ID to firefox,
-            "desktop:edge-arm64" to EngineReadiness(false, "R1 proot + R3 rootfs + D2 per-window surfaces"),
-            "desktop:firefox-wine" to EngineReadiness(false, "R1 box64 + R2 Wine + D1 X server"),
-            "desktop:chromium-arm64" to EngineReadiness(false, "R3 rootfs + D1 X server (no pinned Chromium artifact yet)"),
+            "desktop:edge-arm64" to EngineReadiness(false, "Not built yet: needs the Edge arm64 payload (licence accept) and D2 per-window surfaces"),
+            "desktop:firefox-wine" to EngineReadiness(false, "Needs libbox64.so (run build-native, then vendor + pin it) and a Wine payload/prefix (R4/P2)"),
+            "desktop:chromium-arm64" to EngineReadiness(false, "Not built yet: no pinned Chromium arm64 artifact in the R3 manifest"),
         )
     }
 }

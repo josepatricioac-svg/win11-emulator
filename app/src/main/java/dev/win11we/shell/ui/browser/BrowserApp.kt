@@ -224,8 +224,7 @@ fun BrowserApp(
                 trailing = when {
                     chosen && ready -> "Selected - ready"
                     chosen -> "Selected"
-                    ready -> "Ready"
-                    else -> "Needs " + desktop.requirement.substringBefore(' ')
+                    else -> DesktopEngineLabels.badge(ready)
                 },
                 accent = chosen,
                 badge = desktop.license,
