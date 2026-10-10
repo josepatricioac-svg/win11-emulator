@@ -2,6 +2,7 @@ package dev.win11we.shell.ui.taskbar
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.longClick
@@ -29,7 +30,9 @@ import org.robolectric.annotation.Config
  * regressions are caught here instead of on a device.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+// Robolectric's default screen is 320dp wide, which clips the 8th pin and shifts hit targets;
+// size the display like the desktop the test pretends to be.
+@Config(sdk = [34], qualifiers = "w900dp-h500dp")
 class TaskbarComposeTest {
 
     @get:Rule
@@ -73,8 +76,10 @@ class TaskbarComposeTest {
         // Regression guard: an ungated Popup used to draw every pin's menu at once.
         compose.onNodeWithText("New window").assertDoesNotExist()
         compose.onNodeWithText("Restore").assertDoesNotExist()
-        // "Task Manager" exists only as the pin label, never as a menu entry.
-        compose.onAllNodes(hasText("Task Manager")).assertCountEquals(1)
+        // Pins expose their label as a content description (icon-only buttons), so the
+        // Task Manager pin is one description node and no text node until a menu opens.
+        compose.onAllNodes(hasContentDescription("Task Manager")).assertCountEquals(1)
+        compose.onAllNodes(hasText("Task Manager")).assertCountEquals(0)
     }
 
     @Test
