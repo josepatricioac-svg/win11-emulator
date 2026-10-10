@@ -1,15 +1,14 @@
 package dev.win11we.shell.ui.taskbar
 
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import dev.win11we.shell.settings.FakePreferences
@@ -44,6 +43,19 @@ class TaskbarComposeTest {
 
     private var startClicks = 0
     private var openedViaMenu = 0
+
+    // Semantic actions run the exact onClick / onLongClick handlers the taskbar registers,
+    // without depending on simulated finger events (which do not register under this
+    // Robolectric setup).
+    private fun click(label: String) {
+        compose.onNodeWithContentDescription(label).performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitForIdle()
+    }
+
+    private fun longPress(label: String) {
+        compose.onNodeWithContentDescription(label).performSemanticsAction(SemanticsActions.OnLongClick)
+        compose.waitForIdle()
+    }
 
     private fun setTaskbar() {
         compose.setContent {
@@ -85,21 +97,18 @@ class TaskbarComposeTest {
     @Test
     fun `clicking a pin opens its window and the start pin reports clicks`() {
         setTaskbar()
-        compose.onNodeWithContentDescription("Notepad").performClick()
-        compose.waitForIdle()
+        click("Notepad")
         assertEquals(1, manager.windows.size)
         assertEquals("notepad", manager.windows.first().app.id)
 
-        compose.onNodeWithContentDescription("Start").performClick()
-        compose.waitForIdle()
+        click("Start")
         assertEquals(1, startClicks)
     }
 
     @Test
     fun `long press opens exactly one jump list for that pin`() {
         setTaskbar()
-        compose.onNodeWithContentDescription("Notepad").performTouchInput { longClick() }
-        compose.waitForIdle()
+        longPress("Notepad")
         compose.onAllNodes(hasText("New window")).assertCountEquals(1)
         // The menu header names the pin it belongs to, and only that pin.
         compose.onAllNodes(hasText("Notepad")).assertCountEquals(1)
@@ -109,9 +118,8 @@ class TaskbarComposeTest {
     @Test
     fun `a jump list entry opens the app and dismisses the menu`() {
         setTaskbar()
-        compose.onNodeWithContentDescription("Notepad").performTouchInput { longClick() }
-        compose.waitForIdle()
-        compose.onNodeWithText("Task Manager").performClick()
+        longPress("Notepad")
+        compose.onNodeWithText("Task Manager").performSemanticsAction(SemanticsActions.OnClick)
         compose.waitForIdle()
         assertEquals(1, openedViaMenu)
         compose.onNodeWithText("New window").assertDoesNotExist()
