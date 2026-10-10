@@ -20,7 +20,7 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | R3 | Rootfs/Wine download: pinned SHA-256 (fail closed), resumable via `Range`, free-space check, progress UI, SAF import | done (extraction needs R1's proot) |
 | R4 | Diagnostics self-test: `box64 --version`, `wine64 --version`, `wine64 cmd /c echo hello`, green/red/skipped with the failing command + log excerpt | done |
 | D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a+D1b+D1c done: spec-accurate protocol core, socket, renderer, input, soft-keyboard text injection, focus/grabs/cursors/fonts/colours, XTest, SubstructureRedirect WM — 98 x11 wire tests green, verified by running them on a JVM; guest launch waits on the R1 binaries; see `docs/X_SERVER.md`) |
-| P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | — |
+| P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | **partial** (P1 clipboard: the X selections ↔ Android text bridge is done and wire-tested — guest copies push out, Android-side changes reclaim PRIMARY/CLIPBOARD; rich targets and the remaining P1/P2 items are not started) |
 
 ## Animation
 
@@ -283,7 +283,7 @@ open decisions.
 
 ## UI tests
 
-`./gradlew testDebugUnitTest` runs the 380 pure-JVM tests (window geometry, snap zones,
+`./gradlew testDebugUnitTest` runs the 390 pure-JVM tests (window geometry, snap zones,
 Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing, argv
 splitting, the log buffer, the built-in commands, the terminal transcript/history, the
 container codec/store, guest<->host path mapping, the Wine environment builder, the
@@ -301,7 +301,10 @@ pure-Kotlin rasteriser, XTest FakeInput, soft-keyboard text injection and the IM
 extractor; and the Firefox ESR session: native (never box64) proot command shape, profile
 and X11 binds, the explicit sandbox-off environment, install/GTK checks, the R3 state
 machine's READY marker, the pinned Mozilla artifact, and the desktop-engine launch seam
-with its gating contract).
+with its gating contract; and the P1 clipboard bridge: server-wide selection ownership,
+cross-client SelectionRequest routing, the ICCCM mask-0 SendEvent idiom, inline shell
+conversions with TARGETS, ownership lifecycle, and the end-to-end guest-copy push
+through a fake bridge).
 
 Compose tests that actually **compose** the taskbar (Robolectric) are opt-in because they
 need a couple of GB of RAM:
@@ -386,17 +389,19 @@ app/src/main/java/dev/win11we/shell/
   x11/XConnection.kt         handshake, request dispatch, replies/errors/events, XTest, XSink
   x11/XDisplayList.kt        per-drawable DrawOp store + pure-Kotlin rasteriser for GetImage (D1b/D1c)
   x11/XColors.kt             rgb.txt named-colour table + rgb:/#hex parsing (D1c)
+  x11/XSelections.kt         selection ownership model, clipboard-bridge seam, target codec (P1)
   x11/XIme.kt                IME commit extraction for the soft-keyboard path (D1c)
   x11/ShellWindowManager.kt  SubstructureRedirect WM: cascaded placement of guest windows
   x11/XKeyboard.kt           true evdev+8 keycode map, US ASCII table, Latin-1 range (D1c)
   x11/XInput.kt              device input -> X events, modifier masks, injectText/injectKeysym (D1c)
   x11/XServer.kt             LocalServerSocket on /tmp/.X11-unix/X100, accept + serve, warp sync
   ui/xdesktop/XDesktop.kt    Bitmap/Canvas renderer + input surface + software cursor + hidden IME field (D1b/D1c)
+  ui/xdesktop/XDesktopClipboard.kt  Android clipboard bridge + the DesktopScreen wiring effect (P1)
   ui/settings/RootfsPage.kt    Settings ▸ Storage ▸ Runtime download (progress, actions)
   runtime/SelfTestRunner.kt    the R4 self-test: 3 steps, verdicts, reasons, report/log excerpt
 ```
 
-Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 380 tests; during D1c the
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 390 tests; during D1c the
 whole suite was additionally compiled and executed off-device against android.jar 35 and
 the pinned Compose artifacts, so the counts are measured, not estimated): snap zones,
 maximize/restore, halves snapping, edge/corner resize with minimums, on-screen clamping,

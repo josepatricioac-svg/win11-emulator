@@ -120,10 +120,41 @@ characters fall through to the field (and arrive as commits), everything else
 (P1+). The extractor and the whole injection path are unit-tested; the Compose
 wiring follows the existing input-surface patterns.
 
+### Selections and the Android clipboard (P1 bridge, landed with D1c)
+
+Selections are server-wide now (ownership lives in `XDocument`, not per
+connection), and the full ICCCM dance works at wire level:
+
+- `SetSelectionOwner`/`GetSelectionOwner` across clients; ownership dies with
+  the window/connection, with the shell reclaiming text selections while the
+  bridge is attached.
+- `ConvertSelection` routes a real `SelectionRequest` to the owning client,
+  which answers with `ChangeProperty` + `SendEvent(SelectionNotify)` - and
+  `SendEvent` now honours the ICCCM idiom: an **empty event-mask delivers to
+  the destination unconditionally** (SelectionNotify/ClientMessage have no
+  selectable mask; libX11 sends them with mask 0 everywhere).
+- **Guest → Android**: when a client claims PRIMARY/CLIPBOARD, the server's
+  internal shell connection asks that client for UTF8_STRING *over the real
+  wire protocol*; the answered text is decoded (`SelectionCodec`) and pushed to
+  the system clipboard (deduped against the last push).
+- **Android → guest**: `DesktopScreen`'s `ClipboardBridgeEffect` listens for
+  system-clipboard changes (Notepad copies, other apps), the shell reclaims
+  both selections, and guest conversions are answered inline from
+  `XClipboardBridge.readText()`. TARGETS answers `[TARGETS, STRING,
+  UTF8_STRING, TEXT]`; rich targets (text/html, images, COMPOUND_TEXT) convert
+  to an honest None instead of being guessed at.
+
+Limits: Android has ONE clipboard - PRIMARY and CLIPBOARD both map onto it;
+clipboard reads happen while the app is foregrounded (Android's own rule, and
+Android 12+ shows its "pasted from" toast); the guest→Android push is eager
+(on claim), so a guest that changes selection *contents* without re-claiming
+does not re-push (X clients re-claim on every copy).
+
 ### Verification
 
-The x11 suites (98 tests: `XProtocolTest`, `XDisplayListTest`, `XRedirectTest`,
-`ExplorerSmokeTest`, `XCompatTest`, `XTextInjectionTest`, `XSnapshotTest`) were
+The x11 suites (108 tests: `XProtocolTest`, `XDisplayListTest`, `XRedirectTest`,
+`ExplorerSmokeTest`, `XCompatTest`, `XTextInjectionTest`, `XSnapshotTest`,
+`XSelectionsTest`) were
 **compiled and executed** with Kotlin 2.1.10/JDK 17 against minimal Android stubs
 (only `LocalServerSocket`/`LocalSocket`/`Log`, which the wire tests never touch) -
 the first time this project's protocol code was actually run rather than written
