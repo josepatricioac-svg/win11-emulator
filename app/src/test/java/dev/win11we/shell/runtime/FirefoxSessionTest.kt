@@ -57,13 +57,13 @@ class FirefoxSessionTest {
         launcher = ContainerLauncher(binaries, LogBuffer(), launcher = UnusedLauncher(), streamThreads = false)
     }
 
-    private fun request(url: String? = null, profile: File, xDir: File) = RuntimeRequest(
+    private fun request(url: String? = null, profile: File, xDir: File, resolv: File = File(tmp.root, "resolv.conf")) = RuntimeRequest(
         container = Container.defaults(FirefoxSession.SESSION_ID, FirefoxSession.SESSION_NAME, profile.absolutePath),
         rootfsDir = File(tmp.root, "rootfs"),
         xDisplay = RuntimePaths.X_DISPLAY,
         guestCommand = FirefoxSession.guestCommand(url),
         guestPrefix = FirefoxSession.GUEST_PROFILE_DIR,
-        binds = FirefoxSession.binds(profile, xDir),
+        binds = FirefoxSession.binds(profile, xDir, resolv),
         environment = FirefoxEnvironment.build(RuntimePaths.X_DISPLAY),
     )
 
@@ -82,6 +82,12 @@ class FirefoxSessionTest {
         val profile = File(tmp.root, "profile")
         val xDir = File(tmp.root, "x11")
         val command = launcher.buildCommand(request("https://example.org", profile, xDir))
+        // Bare --rootfs binds nothing else; the kernel interfaces must be explicit.
+        assertTrue(command.containsAll(listOf("--bind", "/dev")))
+        assertTrue(command.contains("/proc"))
+        assertTrue(command.contains("/sys"))
+        // Guest DNS: Android has no /etc/resolv.conf for the jail.
+        assertTrue(command.contains("${File(tmp.root, "resolv.conf").absolutePath}:/etc/resolv.conf"))
         assertEquals(binaries.nativeLibraryDir.absolutePath + "/libproot.so", command.first())
         assertTrue(command.containsAll(listOf("--rootfs", "--link2symlink", "--kill-on-exit")))
         // The session's state dir replaces the Wine prefix bind...
@@ -215,6 +221,7 @@ class FirefoxSessionTest {
         assertEquals("X100", RuntimePaths.xSocket(files).name)
         assertEquals(File(files, "tmp/.X11-unix"), RuntimePaths.xSocket(files).parentFile)
         assertEquals(File(files, "browser/firefox-profile"), RuntimePaths.browserProfileDir(files))
+        assertEquals(File(files, "tmp/resolv.conf"), RuntimePaths.resolvConf(files))
         // The socket path must stay under the unix-socket length limit (~108 bytes);
         // app data dirs are deep, so this is a real constraint worth pinning.
         assertTrue(RuntimePaths.xSocket(files).absolutePath.length < 100)

@@ -65,17 +65,27 @@ sed -i 's/^(\s*)#define HAS_LOADER_32BIT true/\1\/\/ disabled/' src/arch.h   # b
 # 2b. point the makefile at the staged talloc (lib/ + include/):
 sed -i 's|^LDFLAGS  += -ltalloc .*|LDFLAGS  += -L$TALLOC_OUT/lib -l:libtalloc.so -Wl,-z,noexecstack|' src/GNUmakefile
 sed -i 's|^CPPFLAGS += \(.*\)$|CPPFLAGS += -DARG_MAX=131072 -I$TALLOC_OUT/include \1|' src/GNUmakefile
-# 2c. build (needs gawk on PATH for loader-info.awk's strtonum):
+# 2c. add the RUNPATH so libtalloc.so resolves NEXT TO the binary (no env needed):
+sed -i "s|^LDFLAGS  += -ltalloc .*|LDFLAGS  += -L$TALLOC_OUT/lib -l:libtalloc.so -Wl,-z,noexecstack '-Wl,-rpath,\$\$ORIGIN'|" src/GNUmakefile
+#    (the -l:libtalloc.so form records DT_NEEDED=libtalloc.so, the vendored filename)
+# 2d. put the warning suppressions + the UNBUNDLE define INTO the makefile's CFLAGS
+#     line (command-line CFLAGS overrides makefile `+=` and loses the define):
+#     CFLAGS += -Wall -Wextra -O2 -Wno-error -Wno-implicit-function-declaration \
+#       -Wno-int-conversion -Wno-incompatible-pointer-types \
+#       "-DPROOT_UNBUNDLE_LOADER=\"libproot-loader.so\""
+# 2e. build (needs gawk on PATH for loader-info.awk's strtonum):
 make -C src -j2 CC=aarch64-linux-android28-clang LD=aarch64-linux-android28-clang \
   STRIP=llvm-strip OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump \
-  CFLAGS="-Wall -Wextra -O2 -Wno-error" \
   PROOT_UNBUNDLE_LOADER=libproot-loader.so
 # 2d. results: src/proot -> libproot.so, src/loader/loader -> libproot-loader.so
 ```
 
 `PROOT_UNBUNDLE_LOADER` means the loader is not embedded in the binary; proot finds it
 through the `PROOT_LOADER` environment variable, which `NativeBinaries.loaderPaths()`
-always supplies. `VERSION` reports `v5.1.107.96-dirty` (the two patches above) — honest.
+always supplies. `RUNPATH=$ORIGIN` (verified with `llvm-readelf -d`: RUNPATH `$ORIGIN`,
+NEEDED `libtalloc.so`, `libdl.so`, `libc.so`) makes the libtalloc lookup work even if
+`LD_LIBRARY_PATH` is stripped - the launch/probe environments set it anyway (belt and
+braces). Current pins: libproot.so `43e98a71e9c10501b7984f1c6a30637fd57eac6b08627bee7b22420f0a36d957`. `VERSION` reports `v5.1.107.96-dirty` (the two patches above) — honest.
 `-DARG_MAX=131072` is the bionic fix from Termux's recipe; clang-18 needed
 `-Wno-error` for two implicit-declaration warnings in the fork's ashmem extension.
 

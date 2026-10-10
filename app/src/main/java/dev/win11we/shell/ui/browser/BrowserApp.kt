@@ -104,13 +104,19 @@ fun BrowserApp(
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             val launchable = state.desktopLaunchable()
+            val fallback = state.fallbackNote { DesktopEngineReadiness.missing(it) }
             Text(
                 text = when {
                     launchable -> "${engine.label} - opens on the X Desktop"
                     state.engineBlocked() -> "${engine.label} - runtime not installed"
+                    fallback != null -> "Desktop engine not ready ($fallback) - opens in ${engine.label} instead"
                     else -> "Opens in ${engine.label}"
                 },
-                color = if (state.engineBlocked()) Color(0xFFFFB4A6) else TextSecondary,
+                color = when {
+                    state.engineBlocked() -> Color(0xFFFFB4A6)
+                    fallback != null -> Color(0xFFFFC44D) // amber: opening in the fallback engine
+                    else -> TextSecondary
+                },
                 fontSize = 12.5.sp,
                 modifier = Modifier.weight(1f),
             )

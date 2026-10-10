@@ -7,7 +7,9 @@
 # Provenance (built/vendored 2026-10-10, full details in docs/THIRD_PARTY.md):
 #   libproot.so        termux/proot tag v5.1.107.96 (commit a179d3e), NDK r27c
 #                      aarch64-linux-android28, patched: 32-bit loader disabled
-#                      (arm64-only rootfs), talloc linked from the Termux build.
+#                      (arm64-only rootfs), talloc linked from the Termux build,
+#                      RUNPATH=$ORIGIN baked in so libtalloc.so resolves next to
+#                      the binary with no env dependency.
 #   libproot-loader.so same build (src/loader/loader).
 #   libtalloc.so       Termux libtalloc 2.5.0 aarch64 package (LGPL-3.0+),
 #                      SONAME respelled libtalloc.so.2 -> libtalloc.so so AGP
@@ -15,7 +17,7 @@
 #   libbox64.so        not vendored yet: built by .github/workflows/build-native.yml
 #                      (the D1c sandbox lacked the RAM to compile the dynarec);
 #                      only x86/x64 Wine payloads need it - Firefox ESR does not.
-libproot.so=0566cc8a1d50b1284814e543f58750520e14bb7aac8929a00cc50eb4e3ab2df3
+libproot.so=43e98a71e9c10501b7984f1c6a30637fd57eac6b08627bee7b22420f0a36d957
 libproot-loader.so=0738d73bc8e3c0b22f9b59a019a29087195453dcb0b73ced979b00fafe1caefe
 libtalloc.so=160d39bc0d7ed946f22310d1d6f20addda21b02b0972dffe929fe49951543941
 # libbox64.so=

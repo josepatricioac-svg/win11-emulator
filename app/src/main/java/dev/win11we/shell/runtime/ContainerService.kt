@@ -43,6 +43,12 @@ object RuntimePaths {
     fun xSocket(filesDir: File) = File(xSocketUnixDir(filesDir), "X100")
     fun pulseSocket(filesDir: File) = File(xSocketDir(filesDir), "pulse-native")
 
+    /** The generated guest DNS file, bound over the guest's /etc/resolv.conf. */
+    fun resolvConf(filesDir: File) = File(xSocketDir(filesDir), "resolv.conf")
+
+    /** Writes (or refreshes) [resolvConf] with the public-resolver lines. */
+    fun ensureResolvConf(filesDir: File): File = RootfsProvisioner.ensureResolvConf(resolvConf(filesDir))
+
     /** Where R3 downloads and unpacks the Ubuntu rootfs. */
     fun defaultRootfs(filesDir: File) = File(filesDir, "rootfs")
 
@@ -85,12 +91,14 @@ object RuntimeHolder {
     ): RuntimeRequest {
         val appContext = context.applicationContext
         val filesDir = appContext.filesDir
+        val resolvConf = runCatching { RuntimePaths.ensureResolvConf(filesDir) }.getOrNull()
         return RuntimeRequest(
             container = container,
             rootfsDir = rootfsDir ?: RuntimePaths.defaultRootfs(filesDir),
             xDisplay = RuntimePaths.X_DISPLAY,
             audioSocket = RuntimePaths.pulseSocket(filesDir).absolutePath,
             guestCommand = guestCommand,
+            binds = listOfNotNull(resolvConf?.let { Bind(it.absolutePath, "/etc/resolv.conf") }),
         )
     }
 
@@ -105,13 +113,14 @@ object RuntimeHolder {
         val filesDir = appContext.filesDir
         val profile = RuntimePaths.browserProfileDir(filesDir)
         RuntimePaths.ensurePrefix(profile.absolutePath)
+        val resolvConf = RuntimePaths.ensureResolvConf(filesDir)
         return RuntimeRequest(
             container = Container.defaults(FirefoxSession.SESSION_ID, FirefoxSession.SESSION_NAME, profile.absolutePath),
             rootfsDir = rootfsOverride?.let { File(it) } ?: rootfsDir ?: RuntimePaths.defaultRootfs(filesDir),
             xDisplay = RuntimePaths.X_DISPLAY,
             guestCommand = FirefoxSession.guestCommand(url),
             guestPrefix = FirefoxSession.GUEST_PROFILE_DIR,
-            binds = FirefoxSession.binds(profile, RuntimePaths.xSocketUnixDir(filesDir)),
+            binds = FirefoxSession.binds(profile, RuntimePaths.xSocketUnixDir(filesDir), resolvConf),
             environment = FirefoxEnvironment.build(RuntimePaths.X_DISPLAY),
         )
     }

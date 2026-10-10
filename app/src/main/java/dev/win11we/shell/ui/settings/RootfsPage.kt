@@ -35,7 +35,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.win11we.shell.runtime.DesktopEngineReadiness
+import dev.win11we.shell.runtime.FirefoxSession
 import dev.win11we.shell.runtime.NativeBinaries
+import dev.win11we.shell.runtime.PrepareStatus
 import dev.win11we.shell.runtime.RootfsProvisioner
 import dev.win11we.shell.runtime.download.Artifact
 import dev.win11we.shell.runtime.download.ArtifactState
@@ -118,19 +120,105 @@ fun RootfsPage(modifier: Modifier = Modifier) {
 }
 
 /**
- * The apt-inside-proot step that turns the bare Ubuntu rootfs into one Firefox
- * can run on (GTK3, X11, D-Bus, ALSA, fonts, CA certs). Runs on the page's
- * guarded worker; every line lands in the shared log (Terminal ▸ log).
+ * The one-tap Firefox ESR setup: rootfs download+extract -> Firefox download+
+ * install -> apt provisioning inside proot -> readiness re-evaluated. Every step
+ * logs to the shared log (Terminal ▸ `log`) and the card shows the outcome;
+ * a failure names the step. Runs on the page's guarded worker (rules 1+2).
+ */
+private fun runFirefoxSetup(context: android.content.Context, rootfs: RootfsManager): String {
+    val appContext = context.applicationContext
+    val binaries = NativeBinaries.from(
+        nativeLibraryDirPath = appContext.applicationInfo.nativeLibraryDir,
+        pins = NativeBinaries.loadPinsFromAssets(appContext.assets),
+    )
+    val prepare = binaries.prepare(NativeBinaries.REQUIRED_PROOT_ONLY)
+    if (prepare.status != PrepareStatus.READY) return "Cannot continue: ${prepare.message}"
+    val log = dev.win11we.shell.ui.terminal.SharedLog.buffer
+    fun step(line: String) =
+        log.add(dev.win11we.shell.ui.terminal.TerminalLine(dev.win11we.shell.ui.terminal.LineKind.SYSTEM, "firefox setup: $line"))
+
+    val rootfsArtifact = dev.win11we.shell.runtime.download.RuntimeManifest.ROOTFS
+    if (!rootfs.rootfsReady) {
+        if (rootfs.stateOf(rootfsArtifact.id) != ArtifactState.VERIFIED) {
+            step("downloading the Ubuntu rootfs (27 MB)")
+            val download = rootfs.download(rootfsArtifact)
+            if (!download.success) return "Rootfs download failed: ${download.message}"
+        }
+        step("extracting the rootfs")
+        if (!rootfs.extract(rootfsArtifact)) {
+            return "Rootfs extraction failed: ${rootfs.messages[rootfsArtifact.id] ?: "see Terminal ▸ log"}"
+        }
+    }
+    val firefox = dev.win11we.shell.runtime.download.RuntimeManifest.FIREFOX_ESR
+    if (!FirefoxSession.isInstalled(rootfs.rootfsDir)) {
+        if (rootfs.stateOf(firefox.id) != ArtifactState.VERIFIED) {
+            step("downloading Firefox ESR (64 MB)")
+            val download = rootfs.download(firefox)
+            if (!download.success) return "Firefox download failed: ${download.message}"
+        }
+        step("installing Firefox into the rootfs")
+        if (!rootfs.extract(firefox)) {
+            return "Firefox install failed: ${rootfs.messages[firefox.id] ?: "see Terminal ▸ log"}"
+        }
+    }
+    step("provisioning GTK3/fonts/CA certs with apt inside proot (several minutes)")
+    val provision = RootfsProvisioner.provision(binaries, rootfs.rootfsDir, appContext.filesDir, log)
+    if (!provision.success) return "Provisioning failed: ${provision.message}"
+    return "Firefox ESR is ready - open the Browser window, pick Firefox ESR and press Open."
+}
+
+/**
+ * The Firefox ESR card: one-tap full setup, plus "Provision only" for rerunning
+ * the apt-inside-proot step that installs GTK3, X11, D-Bus, ALSA, fonts and CA
+ * certs. Everything runs on the page's guarded worker; every line lands in the
+ * shared log.
  */
 @Composable
 private fun ProvisionCard(rootfs: RootfsManager, context: android.content.Context) {
-    var provisioning by remember { mutableStateOf(false) }
+    var working by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
-    val canProvision = rootfs.rootfsReady && !provisioning
+    val canSetup = !working && !rootfs.busy
+    val canProvision = canSetup && rootfs.rootfsReady
+
+    fun runSetup(fullChain: Boolean) {
+        startWorker(rootfs, if (fullChain) "firefox-setup" else "provision") {
+            androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+                working = true
+                message = if (fullChain) {
+                    "Setting up Firefox ESR - downloads, extraction and apt can take several minutes; progress in Terminal ▸ log."
+                } else {
+                    "Provisioning browser libraries with apt inside proot…"
+                }
+            }
+            val outcome = runCatching {
+                if (fullChain) {
+                    runFirefoxSetup(context, rootfs)
+                } else {
+                    val binaries = NativeBinaries.from(
+                        nativeLibraryDirPath = context.applicationInfo.nativeLibraryDir,
+                        pins = NativeBinaries.loadPinsFromAssets(context.assets),
+                    )
+                    RootfsProvisioner.provision(
+                        binaries = binaries,
+                        rootfsDir = rootfs.rootfsDir,
+                        filesDir = context.filesDir,
+                        log = dev.win11we.shell.ui.terminal.SharedLog.buffer,
+                    ).message
+                }
+            }.getOrElse { "Failed: ${it.javaClass.simpleName}: ${it.message}" }
+            androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+                working = false
+                message = outcome
+            }
+            DesktopEngineReadiness.refreshAsync(context)
+            rootfs.invalidateScan()
+            rootfs.refreshAsync()
+        }
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            
             .clip(CardShape)
             .background(CardSurface)
             .border(1.dp, Color(0x22FFFFFF), CardShape)
@@ -139,16 +227,15 @@ private fun ProvisionCard(rootfs: RootfsManager, context: android.content.Contex
     ) {
         Column(Modifier.weight(1f)) {
             Text(
-                "Browser runtime libraries",
+                "Firefox ESR setup",
                 color = TextPrimary,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
             )
             Text(
-                text = "apt-get inside proot installs GTK3, X11, D-Bus, ALSA, fonts and CA " +
-                    "certificates into the rootfs (" + RootfsProvisioner.BROWSER_PACKAGES.size +
-                    " pinned package names, dependencies resolved by apt). Needs the extracted " +
-                    "rootfs and the R1 binaries.",
+                text = "One tap does everything the desktop browser needs: rootfs + Firefox " +
+                    "download/extract, then apt inside proot installs the GTK3/X11/font/CA stack (" +
+                    RootfsProvisioner.BROWSER_PACKAGES.size + " pinned packages).",
                 color = TextTertiary,
                 fontSize = 11.sp,
             )
@@ -158,42 +245,29 @@ private fun ProvisionCard(rootfs: RootfsManager, context: android.content.Contex
             }
         }
         Spacer(Modifier.width(10.dp))
-        Text(
-            text = if (provisioning) "Working…" else "Provision",
-            color = if (canProvision) Color(0xFF0B1220) else TextTertiary,
-            fontSize = 12.5.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier
-                .clip(ChipShape)
-                .background(if (canProvision) AccentBlue else Color(0x22FFFFFF))
-                .then(
-                    if (canProvision) {
-                        Modifier.clickable {
-                            startWorker(rootfs, "provision") {
-                                androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot { provisioning = true }
-                                val binaries = NativeBinaries.from(
-                                    nativeLibraryDirPath = context.applicationInfo.nativeLibraryDir,
-                                    pins = NativeBinaries.loadPinsFromAssets(context.assets),
-                                )
-                                val result = RootfsProvisioner.provision(
-                                    binaries = binaries,
-                                    rootfsDir = rootfs.rootfsDir,
-                                    filesDir = context.filesDir,
-                                    log = dev.win11we.shell.ui.terminal.SharedLog.buffer,
-                                )
-                                androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
-                                    provisioning = false
-                                    message = result.message
-                                }
-                                DesktopEngineReadiness.refreshAsync(context)
-                            }
-                        }
-                    } else {
-                        Modifier
-                    },
-                )
-                .padding(horizontal = 14.dp, vertical = 7.dp),
-        )
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                text = if (working) "Working…" else "Set up everything",
+                color = if (canSetup) Color(0xFF0B1220) else TextTertiary,
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clip(ChipShape)
+                    .background(if (canSetup) AccentBlue else Color(0x22FFFFFF))
+                    .then(if (canSetup) Modifier.clickable { runSetup(fullChain = true) } else Modifier)
+                    .padding(horizontal = 14.dp, vertical = 7.dp),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "Provision only",
+                color = if (canProvision) TextSecondary else TextTertiary,
+                fontSize = 11.5.sp,
+                modifier = Modifier
+                    .clip(ChipShape)
+                    .then(if (canProvision) Modifier.clickable { runSetup(fullChain = false) } else Modifier)
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+            )
+        }
     }
 }
 

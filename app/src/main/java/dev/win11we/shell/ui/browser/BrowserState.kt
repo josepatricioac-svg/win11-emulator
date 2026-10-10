@@ -47,6 +47,23 @@ class BrowserState(
 
     /** True when the chosen engine needs the container runtime and cannot launch yet. */
     fun engineBlocked(): Boolean = engine() is BrowserEngine.DesktopBrowser && !desktopLaunchable()
+
+    /**
+     * When the user chose a desktop engine that is not ready, [EngineResolver]
+     * falls back to an Android browser - silently, by design of the resolver.
+     * This names what is missing so the UI never pretends the fallback is what
+     * the user asked for. [missingStep] is typically `DesktopEngineReadiness.missing`.
+     */
+    fun fallbackNote(missingStep: (String) -> String?): String? {
+        val chosen = chosenEngineId ?: return null
+        if (!chosen.startsWith("desktop:")) return null
+        val engine = engine()
+        if (engine is BrowserEngine.DesktopBrowser && engine.id == chosen) return null
+        return missingStep(chosen)
+            ?: DesktopBrowserCatalogue.byId(chosen)?.requirement?.let { "needs $it" }
+            ?: "not ready"
+    }
+
     var query by mutableStateOf(initialQuery)
     var lastUrl by mutableStateOf<String?>(null)
         private set

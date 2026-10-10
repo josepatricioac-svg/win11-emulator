@@ -87,6 +87,25 @@ class DesktopBrowserStateTest {
     }
 
     @Test
+    fun `the fallback note names the missing step when a desktop engine falls back`() {
+        val browser = BrowserState(
+            initialQuery = "example.org",
+            installed = listOf(BrowserApp("org.mozilla.firefox", "Firefox", null, false)),
+            chosenEngineId = firefoxId,
+            desktopEngineReady = { false },
+        )
+        assertEquals("Firefox ESR not installed", browser.fallbackNote { "Firefox ESR not installed" })
+        // With no readiness info yet, the catalogue requirement names the step.
+        assertTrue(browser.fallbackNote { null }!!.contains("R3"))
+        // A ready desktop engine has no fallback note.
+        val ready = state(ready = true, launcher = { _, _ -> DesktopLaunchOutcome(true, "ok") })
+        assertNull(ready.fallbackNote { "unused" })
+        // Android choices never produce a note.
+        val android = BrowserState(installed = listOf(BrowserApp("org.mozilla.firefox", "Firefox", null, true)))
+        assertNull(android.fallbackNote { "unused" })
+    }
+
+    @Test
     fun `android engines are untouched by the desktop seam`() {
         val browser = BrowserState(
             initialQuery = "https://example.org",

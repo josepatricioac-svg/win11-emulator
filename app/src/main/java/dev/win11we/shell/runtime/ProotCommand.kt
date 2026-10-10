@@ -20,6 +20,14 @@ object ProotCommand {
     const val GUEST_PREFIX = "/root/.wine"
     const val GUEST_HOME = "/root"
 
+    /**
+     * Bare `--rootfs` binds NOTHING else (verified against termux/proot's
+     * cli/proot.c: only -R adds the recommended set), and the extracted
+     * ubuntu-base has an empty /dev and no /proc - guests die instantly without
+     * these. proot-distro binds exactly the same three.
+     */
+    val SYSTEM_BINDS = listOf("/dev", "/proc", "/sys")
+
     fun build(
         prootBinary: File,
         rootfsDir: File,
@@ -31,6 +39,8 @@ object ProotCommand {
         extraArgs: List<String> = emptyList(),
         /** Bind target of [prefixDir]; Wine's fixed `/root/.wine`, or a session's own state dir. */
         guestPrefix: String = GUEST_PREFIX,
+        /** Host paths bound onto themselves inside the guest (kernel interfaces). */
+        systemBinds: List<String> = SYSTEM_BINDS,
     ): List<String> {
         require(guestCommand.isNotEmpty()) { "a guest command is required" }
         val command = mutableListOf(prootBinary.absolutePath)
@@ -40,6 +50,10 @@ object ProotCommand {
         if (killOnExit) command += "--kill-on-exit"
         command += "--bind"
         command += "${prefixDir.absolutePath}:$guestPrefix"
+        systemBinds.forEach { path ->
+            command += "--bind"
+            command += path
+        }
         binds.forEach { bind ->
             command += "--bind"
             command += bind.argument

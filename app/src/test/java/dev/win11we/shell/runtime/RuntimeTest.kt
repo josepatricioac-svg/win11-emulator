@@ -318,11 +318,27 @@ class ProotCommandTest {
                 "--link2symlink",
                 "--kill-on-exit",
                 "--bind", prefix.absolutePath + ":/root/.wine",
+                // Bare --rootfs binds nothing else (termux/proot cli/proot.c): the
+                // kernel interfaces the guest needs are bound explicitly.
+                "--bind", "/dev",
+                "--bind", "/proc",
+                "--bind", "/sys",
                 "--cwd", "/root",
                 "wine64", "cmd", "/c", "echo", "hello",
             ),
             command,
         )
+    }
+
+    @Test
+    fun `the system binds can be overridden`() {
+        val command = ProotCommand.build(
+            proot, rootfs, prefix,
+            guestCommand = listOf("true"),
+            systemBinds = emptyList(),
+        )
+        assertFalse(command.contains("/dev"))
+        assertFalse(command.contains("/proc"))
     }
 
     @Test

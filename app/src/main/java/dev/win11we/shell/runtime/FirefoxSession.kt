@@ -48,10 +48,13 @@ object FirefoxSession {
         listOf("$GUEST_INSTALL_DIR/firefox", "-P", PROFILE_NAME) +
             listOfNotNull(url?.takeIf { it.isNotBlank() })
 
-    /** Bind mounts for one session: persistent profile + the X socket directory. */
-    fun binds(profileDir: File, xSocketUnixDir: File): List<Bind> = listOf(
+    /** Bind mounts for one session: persistent profile, X socket dir and guest DNS. */
+    fun binds(profileDir: File, xSocketUnixDir: File, resolvConf: File): List<Bind> = listOf(
         Bind(profileDir.absolutePath, GUEST_PROFILE_DIR),
         Bind(xSocketUnixDir.absolutePath, GUEST_X11_DIR),
+        // Android has no /etc/resolv.conf for the jail: the shell writes one
+        // (public resolvers, see RootfsProvisioner) and binds it over the guest's.
+        Bind(resolvConf.absolutePath, "/etc/resolv.conf"),
     )
 
     /** True when the verified tarball has been unpacked into place. */
