@@ -464,5 +464,53 @@ class RootfsProvisionerTest {
         assertFalse(result.success)
         assertTrue(result.message.contains("exit 100"))
         assertTrue(result.message.contains("Unable to locate package"))
+        assertEquals(listOf("E: Unable to locate package libgtk-3-0"), result.tailLines)
+    }
+
+    @Test
+    fun `a failure reports the last 30 output lines in the card and the shared log`() {
+        val noisy = (1..45).joinToString("\n") { "apt line $it" }
+        val runner = FakeRunner(RunOutcome(100, noisy, "E: Sub-process returned an error code"))
+        val log = dev.win11we.shell.ui.terminal.LogBuffer()
+        val result = dev.win11we.shell.runtime.RootfsProvisioner.provision(
+            binaries = shippedBinaries(),
+            rootfsDir = extractedRootfs(),
+            filesDir = tmp.root,
+            log = log,
+            runner = runner,
+        )
+        assertFalse(result.success)
+        // The card payload: exit code in the message, exactly the last 30 lines.
+        assertTrue(result.message.contains("exit 100"))
+        assertEquals(30, result.tailLines.size)
+        assertEquals("apt line 17", result.tailLines.first()) // 46 lines total - 30 + 1
+        assertEquals("E: Sub-process returned an error code", result.tailLines.last())
+        assertTrue(result.message.contains("E: Sub-process returned an error code"))
+        // The shared log (Terminal ▸ log) carries the same tail as ERROR lines,
+        // followed by a SYSTEM summary naming the exit code.
+        val errorLines = log.filter(dev.win11we.shell.ui.terminal.LineKind.ERROR).map { it.text }
+        assertEquals(30, errorLines.size)
+        assertEquals(result.tailLines, errorLines)
+        assertTrue(
+            log.filter(dev.win11we.shell.ui.terminal.LineKind.SYSTEM)
+                .any { it.text.contains("exit 100") },
+        )
+    }
+
+    @Test
+    fun `a timeout is reported as 'did not finish' with no fake exit code`() {
+        val runner = FakeRunner(RunOutcome(null, "Get:1 http://ports.ubuntu.com jammy InRelease", "", "Timed out after 2700000ms"))
+        val result = dev.win11we.shell.runtime.RootfsProvisioner.provision(
+            binaries = shippedBinaries(),
+            rootfsDir = extractedRootfs(),
+            filesDir = tmp.root,
+            log = dev.win11we.shell.ui.terminal.LogBuffer(),
+            runner = runner,
+        )
+        assertFalse(result.success)
+        assertTrue(result.message, result.message.contains("did not finish"))
+        assertTrue(result.message.contains("Timed out after 2700000ms"))
+        assertFalse("a timeout must not invent an exit code", result.message.contains("exit "))
+        assertEquals(listOf("Get:1 http://ports.ubuntu.com jammy InRelease"), result.tailLines)
     }
 }

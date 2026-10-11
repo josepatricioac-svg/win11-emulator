@@ -6,7 +6,12 @@ import dev.win11we.shell.ui.terminal.TerminalLine
 import java.io.File
 import java.nio.file.Files
 
-data class ProvisionResult(val success: Boolean, val message: String)
+data class ProvisionResult(
+    val success: Boolean,
+    val message: String,
+    /** Last [RootfsProvisioner.TAIL_LINES] non-blank apt/proot lines, for the failure card. */
+    val tailLines: List<String> = emptyList(),
+)
 
 /**
  * Provisions the rootfs's GUI/network stack with `apt-get` INSIDE proot - the
@@ -25,6 +30,9 @@ data class ProvisionResult(val success: Boolean, val message: String)
  * unit-tested without spawning anything.
  */
 object RootfsProvisioner {
+
+    /** How many trailing apt lines a failure reports in the card and the shared log. */
+    const val TAIL_LINES = 30
 
     /** The Firefox ESR runtime set; apt resolves the transitive closure. */
     val BROWSER_PACKAGES = listOf(
@@ -177,20 +185,26 @@ object RootfsProvisioner {
             workingDir = null,
             timeoutMillis = timeoutMillis,
         )
-        val tail = (outcome.stdout + outcome.stderr).trim().lineSequence()
+        val tail = (outcome.stdout + "\n" + outcome.stderr).trim().lineSequence()
             .filter { it.isNotBlank() }
             .toList()
-            .takeLast(12)
+            .takeLast(TAIL_LINES)
         tail.forEach { line ->
             log.add(TerminalLine(if (outcome.succeeded) LineKind.OUTPUT else LineKind.ERROR, line))
         }
         return if (outcome.succeeded) {
-            ProvisionResult(true, "Rootfs provisioned (${packages.size} packages installed).")
+            ProvisionResult(true, "Rootfs provisioned (${packages.size} packages installed).", tail)
         } else {
+            val verdict = when {
+                outcome.exitCode == null -> "apt-get did not finish (${outcome.error ?: "no exit code"})"
+                else -> "apt-get failed (exit ${outcome.exitCode}${outcome.error?.let { ", $it" } ?: ""})"
+            }
+            log.add(TerminalLine(LineKind.SYSTEM, "$verdict - its last ${tail.size} output line(s) are above"))
             ProvisionResult(
                 false,
-                "apt-get failed (exit ${outcome.exitCode ?: "?"}${outcome.error?.let { ", $it" } ?: ""}): " +
-                    (tail.lastOrNull() ?: "no output"),
+                "$verdict: ${tail.lastOrNull() ?: "no output"} - " +
+                    "last ${tail.size} apt line(s) below and in Terminal ▸ log.",
+                tail,
             )
         }
     }

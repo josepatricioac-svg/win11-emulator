@@ -123,16 +123,18 @@ fun RootfsPage(modifier: Modifier = Modifier) {
  * The one-tap Firefox ESR setup: rootfs download+extract -> Firefox download+
  * install -> apt provisioning inside proot -> readiness re-evaluated. Every step
  * logs to the shared log (Terminal ▸ `log`) and the card shows the outcome;
- * a failure names the step. Runs on the page's guarded worker (rules 1+2).
+ * a failure names the step, and an apt failure carries its exit code plus the
+ * last [RootfsProvisioner.TAIL_LINES] output lines for the card. Runs on the
+ * page's guarded worker (rules 1+2).
  */
-private fun runFirefoxSetup(context: android.content.Context, rootfs: RootfsManager): String {
+private fun runFirefoxSetup(context: android.content.Context, rootfs: RootfsManager): Pair<String, List<String>> {
     val appContext = context.applicationContext
     val binaries = NativeBinaries.from(
         nativeLibraryDirPath = appContext.applicationInfo.nativeLibraryDir,
         pins = NativeBinaries.loadPinsFromAssets(appContext.assets),
     )
     val prepare = binaries.prepare(NativeBinaries.REQUIRED_PROOT_ONLY)
-    if (prepare.status != PrepareStatus.READY) return "Cannot continue: ${prepare.message}"
+    if (prepare.status != PrepareStatus.READY) return "Cannot continue: ${prepare.message}" to emptyList()
     val log = dev.win11we.shell.ui.terminal.SharedLog.buffer
     fun step(line: String) =
         log.add(dev.win11we.shell.ui.terminal.TerminalLine(dev.win11we.shell.ui.terminal.LineKind.SYSTEM, "firefox setup: $line"))
@@ -142,11 +144,11 @@ private fun runFirefoxSetup(context: android.content.Context, rootfs: RootfsMana
         if (rootfs.stateOf(rootfsArtifact.id) != ArtifactState.VERIFIED) {
             step("downloading the Ubuntu rootfs (27 MB)")
             val download = rootfs.download(rootfsArtifact)
-            if (!download.success) return "Rootfs download failed: ${download.message}"
+            if (!download.success) return "Rootfs download failed: ${download.message}" to emptyList()
         }
         step("extracting the rootfs")
         if (!rootfs.extract(rootfsArtifact)) {
-            return "Rootfs extraction failed: ${rootfs.messages[rootfsArtifact.id] ?: "see Terminal ▸ log"}"
+            return "Rootfs extraction failed: ${rootfs.messages[rootfsArtifact.id] ?: "see Terminal ▸ log"}" to emptyList()
         }
     }
     val firefox = dev.win11we.shell.runtime.download.RuntimeManifest.FIREFOX_ESR
@@ -154,17 +156,17 @@ private fun runFirefoxSetup(context: android.content.Context, rootfs: RootfsMana
         if (rootfs.stateOf(firefox.id) != ArtifactState.VERIFIED) {
             step("downloading Firefox ESR (64 MB)")
             val download = rootfs.download(firefox)
-            if (!download.success) return "Firefox download failed: ${download.message}"
+            if (!download.success) return "Firefox download failed: ${download.message}" to emptyList()
         }
         step("installing Firefox into the rootfs")
         if (!rootfs.extract(firefox)) {
-            return "Firefox install failed: ${rootfs.messages[firefox.id] ?: "see Terminal ▸ log"}"
+            return "Firefox install failed: ${rootfs.messages[firefox.id] ?: "see Terminal ▸ log"}" to emptyList()
         }
     }
     step("provisioning GTK3/fonts/CA certs with apt inside proot (several minutes)")
     val provision = RootfsProvisioner.provision(binaries, rootfs.rootfsDir, appContext.filesDir, log)
-    if (!provision.success) return "Provisioning failed: ${provision.message}"
-    return "Firefox ESR is ready - open the Browser window, pick Firefox ESR and press Open."
+    if (!provision.success) return "Provisioning failed: ${provision.message}" to provision.tailLines
+    return "Firefox ESR is ready - open the Browser window, pick Firefox ESR and press Open." to emptyList()
 }
 
 /**
@@ -177,6 +179,9 @@ private fun runFirefoxSetup(context: android.content.Context, rootfs: RootfsMana
 private fun ProvisionCard(rootfs: RootfsManager, context: android.content.Context) {
     var working by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
+    // Last lines of apt output after a failure, so the card itself shows the
+    // exit code context and not just a one-line summary (shared log has them too).
+    var failureTail by remember { mutableStateOf<List<String>>(emptyList()) }
     val canSetup = !working && !rootfs.busy
     val canProvision = canSetup && rootfs.rootfsReady
 
@@ -184,13 +189,14 @@ private fun ProvisionCard(rootfs: RootfsManager, context: android.content.Contex
         startWorker(rootfs, if (fullChain) "firefox-setup" else "provision") {
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                 working = true
+                failureTail = emptyList()
                 message = if (fullChain) {
                     "Setting up Firefox ESR - downloads, extraction and apt can take several minutes; progress in Terminal ▸ log."
                 } else {
                     "Provisioning browser libraries with apt inside proot…"
                 }
             }
-            val outcome = runCatching {
+            val outcome: Pair<String, List<String>> = runCatching {
                 if (fullChain) {
                     runFirefoxSetup(context, rootfs)
                 } else {
@@ -198,17 +204,19 @@ private fun ProvisionCard(rootfs: RootfsManager, context: android.content.Contex
                         nativeLibraryDirPath = context.applicationInfo.nativeLibraryDir,
                         pins = NativeBinaries.loadPinsFromAssets(context.assets),
                     )
-                    RootfsProvisioner.provision(
+                    val result = RootfsProvisioner.provision(
                         binaries = binaries,
                         rootfsDir = rootfs.rootfsDir,
                         filesDir = context.filesDir,
                         log = dev.win11we.shell.ui.terminal.SharedLog.buffer,
-                    ).message
+                    )
+                    result.message to result.tailLines
                 }
-            }.getOrElse { "Failed: ${it.javaClass.simpleName}: ${it.message}" }
+            }.getOrElse { ("Failed: ${it.javaClass.simpleName}: ${it.message}") to emptyList() }
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                 working = false
-                message = outcome
+                message = outcome.first
+                failureTail = outcome.second
             }
             DesktopEngineReadiness.refreshAsync(context)
             rootfs.invalidateScan()
@@ -242,6 +250,15 @@ private fun ProvisionCard(rootfs: RootfsManager, context: android.content.Contex
             message?.let {
                 Spacer(Modifier.height(4.dp))
                 Text(it, color = TextSecondary, fontSize = 11.sp)
+            }
+            if (failureTail.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = failureTail.joinToString("\n"),
+                    color = ErrorRed,
+                    fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
             }
         }
         Spacer(Modifier.width(10.dp))
