@@ -101,6 +101,13 @@ Honest limits while gated (each named by the readiness message, nothing silent):
   arm64, and plain http, so it works before `ca-certificates` exists), and
   `apt-get update` runs first. A failure reports the exit code and the last 30 apt
   output lines in the Provision card and the shared log — no more bare "apt-get failed".
+  Before any of that runs, the **Provision doctor** ("Run doctor" chip on the card, and
+  the automatic pre-flight inside Provision) checks every host-side prerequisite and
+  names the first blocking failure in plain language: proot set pinned+executable,
+  rootfs extracted, rootfs is really arm64 (ELF `e_machine`, catches amd64 SAF imports),
+  sources.list serves `ports.ubuntu.com`, guest resolv.conf state, ≥400 MB free, writable
+  host TMPDIR — plus a non-blocking https probe of ports.ubuntu.com (host TLS and the
+  guest's http path can disagree, so only apt's own output decides the in-jail route).
 - One session at a time (`ALREADY_RUNNING` while alive); handing a second URL to the
   *running* instance needs a guest D-Bus session bus (P1).
 - Audio waits on P1's PulseAudio socket; the env already accepts it.

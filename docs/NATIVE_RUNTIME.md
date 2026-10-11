@@ -175,6 +175,6 @@ R2 then reuses `ProotCommand.build()` and `WineEnvironment.build()` (with
 | R2 launch path (validate -> command -> env -> stream -> status) | done; validates the per-guest binary set |
 | R2 `ContainerService` (foreground, Stop all, kills children on destroy) | done; the Firefox session also runs through it |
 | R3 download (pinned SHA-256, resume, space check, SAF import) | done; **extraction no longer needs proot** - the in-app `TarExtractor` (gzip + xz via org.tukaani) was verified against the real pinned ubuntu-base and Firefox archives (2615 files / 207 symlinks / 0 skipped; launcher + libxul intact) |
-| Rootfs provisioning (GTK3/X11/fonts/CA-certs via apt inside proot) | `RootfsProvisioner` + Settings ▸ Runtime download action; needs a device to run |
+| Rootfs provisioning (GTK3/X11/fonts/CA-certs via apt inside proot) | `RootfsProvisioner` (proot `-0`, `APT::Sandbox::User=root`, dpkg `--force-unsafe-io`/`--force-confold`) + **Provision doctor** that names the first blocking prerequisite; needs a device to run |
 | R4 self-test (3 steps, verdicts, failing command + excerpt) | done, execution needs box64 + wine provisioning for the wine rows |
 | The binaries themselves | **proot + loader + talloc vendored & pinned** (recipe above); **box64 pending one dispatch run** of `build-native.yml`, which commits the binary + pin automatically; loader32 deliberately not built |

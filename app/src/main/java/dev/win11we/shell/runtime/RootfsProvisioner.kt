@@ -143,6 +143,10 @@ object RootfsProvisioner {
     /**
      * Runs one provisioning pass. Called from a guarded worker thread (the
      * Settings page's worker helper); blocks until apt finishes or [timeoutMillis].
+     *
+     * The [ProvisionDoctor]'s blocking host-side checks run first: when one
+     * fails, the result names THAT prerequisite instead of wasting minutes
+     * inside proot to produce a bare "apt-get failed".
      */
     fun provision(
         binaries: NativeBinaries,
@@ -153,16 +157,17 @@ object RootfsProvisioner {
         timeoutMillis: Long = 45 * 60 * 1000L,
         packages: List<String> = BROWSER_PACKAGES,
     ): ProvisionResult {
-        val prepare = binaries.prepare(NativeBinaries.REQUIRED_PROOT_ONLY)
-        if (prepare.status != PrepareStatus.READY) {
-            return ProvisionResult(false, "Runtime binaries not ready: ${prepare.message}")
-        }
-        if (!File(rootfsDir, "usr/bin/apt-get").isFile) {
-            return ProvisionResult(
-                false,
-                "The rootfs is not extracted yet (no apt-get in ${rootfsDir.absolutePath}) - " +
-                    "download and extract it in Runtime download first.",
-            )
+        val preflight = ProvisionDoctor.run(binaries, rootfsDir, filesDir, includeNetwork = false)
+        if (!preflight.ok) {
+            preflight.checks.forEach { check ->
+                log.add(
+                    TerminalLine(
+                        if (check.state == CheckState.FAIL) LineKind.ERROR else LineKind.SYSTEM,
+                        "doctor: ${check.line()}",
+                    ),
+                )
+            }
+            return ProvisionResult(false, preflight.headline(), preflight.checks.map { it.line() })
         }
         val tmpDir = File(filesDir, "tmp")
         val resolvConf = runCatching { ensureResolvConf(File(tmpDir, "resolv.conf")) }

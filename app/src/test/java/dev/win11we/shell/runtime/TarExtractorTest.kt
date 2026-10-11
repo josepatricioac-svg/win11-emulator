@@ -331,6 +331,14 @@ class RootfsProvisionerTest {
         val rootfs = tmp.newFolder("rootfs")
         File(rootfs, "usr/bin").mkdirs()
         File(rootfs, "usr/bin/apt-get").writeText("#!/bin/sh\n")
+        // An arm64 ELF header prefix (e_machine=183 LE at offset 18) so the
+        // Provision doctor's architecture check passes.
+        val elf = ByteArray(20)
+        elf[0] = 0x7F; elf[1] = 'E'.code.toByte(); elf[2] = 'L'.code.toByte(); elf[3] = 'F'.code.toByte()
+        elf[4] = 2; elf[5] = 1; elf[18] = 183.toByte()
+        File(rootfs, "usr/bin/bash").writeBytes(elf)
+        File(rootfs, "etc/apt").mkdirs()
+        File(rootfs, "etc/apt/sources.list").writeText("deb http://ports.ubuntu.com/ubuntu-ports/ jammy main\n")
         File(rootfs, "bin").mkdirs()
         return rootfs
     }

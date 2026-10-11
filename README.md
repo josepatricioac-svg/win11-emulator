@@ -176,7 +176,11 @@ were run against the real pinned archives during development. Hashes come from t
 publishers (Ubuntu `SHA256SUMS`, the Ubuntu archive `Packages` index, Mozilla
 `SHA512SUMS`) and are recorded in `docs/THIRD_PARTY.md`. After extraction, the
 **Provision** card installs the browser's GTK3/X11/font/CA-cert stack with `apt-get`
-inside proot (`RootfsProvisioner`, package list pinned in code, every line logged).
+inside proot (`RootfsProvisioner`, package list pinned in code, every line logged). Its
+**Run doctor** chip first checks the host-side prerequisites — pinned proot set,
+extracted rootfs, rootfs really is arm64, `ports.ubuntu.com` sources, resolv.conf, free
+space, writable TMPDIR, archive reachability — and names the first blocking failure in
+plain language instead of letting apt die with a bare "apt-get failed".
 
 ## Container runtime (R2)
 

@@ -179,17 +179,61 @@ private fun runFirefoxSetup(context: android.content.Context, rootfs: RootfsMana
 private fun ProvisionCard(rootfs: RootfsManager, context: android.content.Context) {
     var working by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
-    // Last lines of apt output after a failure, so the card itself shows the
-    // exit code context and not just a one-line summary (shared log has them too).
-    var failureTail by remember { mutableStateOf<List<String>>(emptyList()) }
+    // Detail rows under the message: the last 30 apt lines after a provision
+    // failure, or the Provision doctor's per-prerequisite rows. The shared log
+    // (Terminal ▸ log) always gets the same lines.
+    var detailLines by remember { mutableStateOf<List<String>>(emptyList()) }
     val canSetup = !working && !rootfs.busy
     val canProvision = canSetup && rootfs.rootfsReady
+
+    /** The Provision doctor: every host-side prerequisite, first failure named in plain language. */
+    fun runDoctor() {
+        startWorker(rootfs, "provision-doctor") {
+            androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+                working = true
+                detailLines = emptyList()
+                message = "Checking provisioning prerequisites…"
+            }
+            val outcome: Pair<String, List<String>> = runCatching {
+                val binaries = NativeBinaries.from(
+                    nativeLibraryDirPath = context.applicationInfo.nativeLibraryDir,
+                    pins = NativeBinaries.loadPinsFromAssets(context.assets),
+                )
+                val report = dev.win11we.shell.runtime.ProvisionDoctor.run(binaries, rootfs.rootfsDir, context.filesDir)
+                val log = dev.win11we.shell.ui.terminal.SharedLog.buffer
+                report.checks.forEach { check ->
+                    log.add(
+                        dev.win11we.shell.ui.terminal.TerminalLine(
+                            when (check.state) {
+                                dev.win11we.shell.runtime.CheckState.PASS -> dev.win11we.shell.ui.terminal.LineKind.INFO
+                                dev.win11we.shell.runtime.CheckState.WARN -> dev.win11we.shell.ui.terminal.LineKind.SYSTEM
+                                dev.win11we.shell.runtime.CheckState.FAIL -> dev.win11we.shell.ui.terminal.LineKind.ERROR
+                            },
+                            "doctor: ${check.line()}",
+                        ),
+                    )
+                }
+                log.add(
+                    dev.win11we.shell.ui.terminal.TerminalLine(
+                        dev.win11we.shell.ui.terminal.LineKind.SYSTEM,
+                        "doctor: ${report.summary()}",
+                    ),
+                )
+                report.headline() to report.checks.map { it.line() }
+            }.getOrElse { ("Failed: ${it.javaClass.simpleName}: ${it.message}") to emptyList() }
+            androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+                working = false
+                message = outcome.first
+                detailLines = outcome.second
+            }
+        }
+    }
 
     fun runSetup(fullChain: Boolean) {
         startWorker(rootfs, if (fullChain) "firefox-setup" else "provision") {
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                 working = true
-                failureTail = emptyList()
+                detailLines = emptyList()
                 message = if (fullChain) {
                     "Setting up Firefox ESR - downloads, extraction and apt can take several minutes; progress in Terminal ▸ log."
                 } else {
@@ -216,7 +260,7 @@ private fun ProvisionCard(rootfs: RootfsManager, context: android.content.Contex
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                 working = false
                 message = outcome.first
-                failureTail = outcome.second
+                detailLines = outcome.second
             }
             DesktopEngineReadiness.refreshAsync(context)
             rootfs.invalidateScan()
@@ -251,10 +295,10 @@ private fun ProvisionCard(rootfs: RootfsManager, context: android.content.Contex
                 Spacer(Modifier.height(4.dp))
                 Text(it, color = TextSecondary, fontSize = 11.sp)
             }
-            if (failureTail.isNotEmpty()) {
+            if (detailLines.isNotEmpty()) {
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = failureTail.joinToString("\n"),
+                    text = detailLines.joinToString("\n"),
                     color = ErrorRed,
                     fontSize = 9.sp,
                     fontFamily = FontFamily.Monospace,
@@ -282,6 +326,16 @@ private fun ProvisionCard(rootfs: RootfsManager, context: android.content.Contex
                 modifier = Modifier
                     .clip(ChipShape)
                     .then(if (canProvision) Modifier.clickable { runSetup(fullChain = false) } else Modifier)
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "Run doctor",
+                color = if (canSetup) TextSecondary else TextTertiary,
+                fontSize = 11.5.sp,
+                modifier = Modifier
+                    .clip(ChipShape)
+                    .then(if (canSetup) Modifier.clickable { runDoctor() } else Modifier)
                     .padding(horizontal = 10.dp, vertical = 5.dp),
             )
         }
