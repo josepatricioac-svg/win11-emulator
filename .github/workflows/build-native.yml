@@ -31,6 +31,8 @@ jobs:
     name: box64 (arm64 Android)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      BOX64_REF: ${{ inputs.box64_ref }}
     steps:
       - uses: actions/checkout@v4
 
@@ -38,21 +40,37 @@ jobs:
         run: |
           set -euo pipefail
           NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_HOME/ndk/$(ls "$ANDROID_HOME/ndk" | sort -V | tail -1)}"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
           echo "Using NDK: $NDK"
-          git clone --depth 1 --branch "${{ inputs.box64_ref }}" https://github.com/ptitSeb/box64.git box64 || \
+          git clone --depth 1 --branch "$BOX64_REF" https://github.com/ptitSeb/box64.git box64 || \
             git clone --depth 1 https://github.com/ptitSeb/box64.git box64
-          cd box64
-          mkdir build && cd build
+          BUILT_REF="$(git -C box64 describe --tags --always)"
+          echo "BUILT_REF=$BUILT_REF" >> "$GITHUB_ENV"
+          mkdir box64/build && cd box64/build
+          # -DANDROID=ON is REQUIRED and easy to miss: NDK r27's toolchain file
+          # does not set the plain ANDROID variable box64's option() reads.
+          # Without it box64 configures as generic Linux: RelWithDebInfo keeps
+          # -O2 (its gtkclass.c tables then need several GB of RAM), BAD_SIGNAL
+          # and the -DANDROID code paths stay off, and the link line asks for
+          # -lrt/-lpthread/-lresolv/-lutil - bionic merged those into libc and
+          # the NDK sysroot does not ship them, so the link always fails.
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-28 \
+            -DANDROID=ON \
             -DARM_DYNAREC=ON \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          make -j"$(nproc)"
-          # The APK ships it as libbox64.so (AGP only packages lib*.so);
-          # rename here so the artifact is drop-in for jniLibs/arm64-v8a.
-          cp box64 libbox64.so
+          # -j2 on purpose (not $(nproc)): even at -O1 (box64's ANDROID memory
+          # hack), src/tools/gtkclass.c needs ~1-2 GB per clang process - the
+          # README documents exactly this file OOM-killing a small sandbox.
+          # Two parallel jobs peak well inside the runner's 16 GB.
+          make -j2
+          # The APK ships it as libbox64.so (AGP only packages lib*.so): rename
+          # and strip so the artifact is drop-in for jniLibs/arm64-v8a and small
+          # enough to commit (like every other vendored binary here).
+          "$TC/bin/llvm-strip" --strip-all -o libbox64.so box64
+          "$TC/bin/llvm-readelf" -h libbox64.so | grep -q AArch64 # architecture guard
           sha256sum libbox64.so | tee SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
