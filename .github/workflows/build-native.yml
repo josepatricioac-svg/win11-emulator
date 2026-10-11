@@ -168,6 +168,8 @@ jobs:
     name: proot (arm64 Android)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read # inspection artifacts only; never pushes
     env:
       PROOT_REPO: ${{ inputs.proot_repo }}
       PROOT_REF: ${{ inputs.proot_ref }}
