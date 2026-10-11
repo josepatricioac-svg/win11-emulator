@@ -4,6 +4,7 @@ import dev.win11we.shell.ui.terminal.LineKind
 import dev.win11we.shell.ui.terminal.LogBuffer
 import dev.win11we.shell.ui.terminal.TerminalLine
 import java.io.File
+import java.nio.file.Files
 
 data class ProvisionResult(val success: Boolean, val message: String)
 
@@ -54,6 +55,38 @@ object RootfsProvisioner {
         return file
     }
 
+    /**
+     * Writes the guest DNS file INTO the rootfs as a real regular file. The
+     * pinned ubuntu-base ships an empty regular /etc/resolv.conf (the proot bind
+     * over it works), but SAF-imported rootfs images may carry systemd-resolved's
+     * (dangling) symlink instead, and a bind cannot fix a dangling target:
+     * replace any symlink with a real file so guest DNS never depends on bind
+     * semantics. The bind in [command] stays as the refresh path.
+     */
+    fun installResolvConf(rootfsDir: File): File {
+        val target = File(rootfsDir, "etc/resolv.conf")
+        target.parentFile?.mkdirs()
+        if (Files.isSymbolicLink(target.toPath())) target.delete()
+        target.writeText(resolvConfLines().joinToString("\n") + "\n")
+        return target
+    }
+
+    /**
+     * apt/dpkg options every in-proot apt run needs:
+     * - `APT::Sandbox::User=root`: apt drops to its `_apt` user for fetching;
+     *   under proot's fake root every jail file appears root-owned, so `_apt`
+     *   (uid 100) can write nowhere and fetches fail. There is no real privilege
+     *   boundary to protect - the whole jail runs as the app uid - so disabling
+     *   the drop is the standard proot-distro practice.
+     * - `--force-unsafe-io`: skips dpkg's defensive syncs (crippling on flash +
+     *   ptrace) - what every container tool sets.
+     * - `--force-confold`: never prompt about config files; noninteractive cannot
+     *   catch every debconf path.
+     */
+    private const val APT_OPTIONS = "-o APT::Sandbox::User=root " +
+        "-o Dpkg::Options::=--force-unsafe-io " +
+        "-o Dpkg::Options::=--force-confold"
+
     /** The exact proot command line: apt-get update && install && clean, as fake root. */
     fun command(
         prootBinary: File,
@@ -63,6 +96,12 @@ object RootfsProvisioner {
     ): List<String> = listOf(
         prootBinary.absolutePath,
         "--rootfs", rootfsDir.absolutePath,
+        // Fake root (-0 == -i 0:0). Without it dpkg refuses outright ("requested
+        // operation requires superuser privilege") and apt cannot take its locks:
+        // proot's own help text names package managers as -0's use case. It fakes
+        // credentials and ownership only - everything still really runs as the
+        // app uid.
+        "-0",
         "--link2symlink",
         "--kill-on-exit",
         "--bind", "/proc:/proc",
@@ -72,21 +111,25 @@ object RootfsProvisioner {
         "--cwd", "/root",
         "--",
         "/bin/bash", "-c",
-        "apt-get update && " +
-            "apt-get install -y --no-install-recommends ${packages.joinToString(" ")} && " +
-            "apt-get clean && rm -rf /var/lib/apt/lists/*",
+        "apt-get $APT_OPTIONS update && " +
+            "apt-get $APT_OPTIONS install -y --no-install-recommends ${packages.joinToString(" ")} && " +
+            "apt-get $APT_OPTIONS clean && rm -rf /var/lib/apt/lists/*",
     )
 
     /** Host-side environment; LD_LIBRARY_PATH carries the vendored libtalloc. */
-    fun environment(nativeLibraryDir: File, loaderPaths: Map<String, String>): Map<String, String> =
+    fun environment(nativeLibraryDir: File, loaderPaths: Map<String, String>, tmpDir: File? = null): Map<String, String> =
         (
             mapOf(
                 "PATH" to "/system/bin:/vendor/bin:/usr/bin:/bin",
                 "HOME" to "/root",
                 "LANG" to "C.UTF-8",
                 "DEBIAN_FRONTEND" to "noninteractive",
+                // proot's seccomp-based syscall filtering misbehaves on several
+                // Android kernels; PROOT_NO_SECCOMP is its documented kill switch
+                // (plain ptrace: a bit slower, always correct).
+                "PROOT_NO_SECCOMP" to "1",
                 "LD_LIBRARY_PATH" to nativeLibraryDir.absolutePath,
-            ) + loaderPaths
+            ) + (tmpDir?.let { mapOf("TMPDIR" to it.absolutePath) } ?: emptyMap()) + loaderPaths
             ).toSortedMap()
 
     /**
@@ -113,13 +156,24 @@ object RootfsProvisioner {
                     "download and extract it in Runtime download first.",
             )
         }
-        val resolvConf = runCatching { ensureResolvConf(File(filesDir, "tmp/resolv.conf")) }
+        val tmpDir = File(filesDir, "tmp")
+        val resolvConf = runCatching { ensureResolvConf(File(tmpDir, "resolv.conf")) }
             .getOrElse { return ProvisionResult(false, "Could not write resolv.conf: ${it.message}") }
+        // A real /etc/resolv.conf inside the rootfs too: imported images may carry
+        // systemd-resolved's dangling symlink there, which no bind can fix.
+        runCatching { installResolvConf(rootfsDir) }.onFailure {
+            return ProvisionResult(false, "Could not write /etc/resolv.conf into the rootfs: ${it.message}")
+        }
         val command = command(File(binaries.nativeLibraryDir, BinaryRole.PROOT.fileName), rootfsDir, resolvConf, packages)
-        log.add(TerminalLine(LineKind.SYSTEM, "provisioning rootfs: apt-get install ${packages.size} packages"))
+        log.add(
+            TerminalLine(
+                LineKind.SYSTEM,
+                "provisioning rootfs: apt-get install ${packages.size} packages (proot fake root -0, APT sandbox user root)",
+            ),
+        )
         val outcome = runner.run(
             command,
-            environment(binaries.nativeLibraryDir, binaries.loaderPaths()),
+            environment(binaries.nativeLibraryDir, binaries.loaderPaths(), tmpDir),
             workingDir = null,
             timeoutMillis = timeoutMillis,
         )

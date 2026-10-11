@@ -344,12 +344,23 @@ class RootfsProvisionerTest {
         )
         assertEquals("/lib/arm64/libproot.so", command.first())
         assertTrue(command.containsAll(listOf("--rootfs", "/data/rootfs", "--link2symlink", "--kill-on-exit")))
+        // Without -0 dpkg refuses ("requires superuser privilege") and apt cannot
+        // take its locks; it must come before the `--` separator.
+        assertTrue("-0 (fake root) is missing", command.contains("-0"))
+        assertTrue(command.indexOf("-0") < command.indexOf("--"))
         assertTrue(command.contains("/proc:/proc"))
         assertTrue(command.contains("/sys:/sys"))
         assertTrue(command.contains("/dev:/dev"))
         assertTrue(command.contains("/data/tmp/resolv.conf:/etc/resolv.conf"))
         val script = command.last()
-        assertTrue(script.startsWith("apt-get update"))
+        assertTrue(script.startsWith("apt-get -o APT::Sandbox::User=root"))
+        assertTrue(script.contains("-o Dpkg::Options::=--force-unsafe-io"))
+        assertTrue(script.contains("-o Dpkg::Options::=--force-confold"))
+        // update must run first, and all three apt calls carry the same options
+        val updateAt = script.indexOf(" update && ")
+        val installAt = script.indexOf(" install -y ")
+        assertTrue("apt-get update must run before install", updateAt in 0 until installAt)
+        assertEquals("every apt-get call needs the sandbox/dpkg options", 3, Regex("APT::Sandbox::User=root").findAll(script).count())
         assertTrue(script.contains("--no-install-recommends libgtk-3-0"))
         assertTrue(script.contains("ca-certificates"))
         assertTrue(script.contains("fonts-dejavu-core"))
@@ -362,11 +373,33 @@ class RootfsProvisionerTest {
         val env = dev.win11we.shell.runtime.RootfsProvisioner.environment(
             nativeLibraryDir = File("/native"),
             loaderPaths = mapOf("PROOT_LOADER" to "/native/libproot-loader.so"),
+            tmpDir = File("/data/tmp"),
         )
         assertEquals("/native", env["LD_LIBRARY_PATH"])
         assertEquals("/native/libproot-loader.so", env["PROOT_LOADER"])
         assertEquals("noninteractive", env["DEBIAN_FRONTEND"])
+        assertEquals("1", env["PROOT_NO_SECCOMP"])
+        assertEquals("/data/tmp", env["TMPDIR"])
         assertEquals(env.keys.toList(), env.keys.sorted())
+    }
+
+    @Test
+    fun `installResolvConf replaces a dangling systemd-resolved symlink with a real file`() {
+        val rootfs = tmp.newFolder("resolv-rootfs")
+        File(rootfs, "etc").mkdirs()
+        val target = File(rootfs, "etc/resolv.conf")
+        java.nio.file.Files.createSymbolicLink(
+            target.toPath(),
+            File("../run/systemd/resolve/stub-resolv.conf").toPath(),
+        )
+        assertTrue(java.nio.file.Files.isSymbolicLink(target.toPath()))
+        assertFalse("dangling symlink reads as absent", target.isFile)
+
+        dev.win11we.shell.runtime.RootfsProvisioner.installResolvConf(rootfs)
+
+        assertFalse(java.nio.file.Files.isSymbolicLink(target.toPath()))
+        assertTrue(target.isFile)
+        assertTrue(target.readText().contains("nameserver 1.1.1.1"))
     }
 
     @Test
@@ -384,12 +417,21 @@ class RootfsProvisionerTest {
         )
         assertTrue(result.message, result.success)
         assertEquals(1, runner.commands.size)
-        assertTrue(runner.environments.single().containsKey("PROOT_LOADER"))
+        val env = runner.environments.single()
+        assertTrue(env.containsKey("PROOT_LOADER"))
+        assertEquals("1", env["PROOT_NO_SECCOMP"])
+        assertEquals(File(tmp.root, "tmp").absolutePath, env["TMPDIR"])
         assertTrue(log.snapshot().any { it.text.contains("Setting up libgtk-3-0") })
-        // The guest DNS file was written for the bind.
+        // The guest DNS file was written for the bind...
         val resolv = File(tmp.root, "tmp/resolv.conf")
         assertTrue(resolv.isFile)
         assertTrue(resolv.readText().contains("nameserver"))
+        // ...and as a real file inside the rootfs (imported images may ship a
+        // dangling symlink there, which no bind can fix).
+        val guestResolv = File(rootfs, "etc/resolv.conf")
+        assertTrue(guestResolv.isFile)
+        assertFalse(Files.isSymbolicLink(guestResolv.toPath()))
+        assertTrue(guestResolv.readText().contains("nameserver"))
     }
 
     @Test
