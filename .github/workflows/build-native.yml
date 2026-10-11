@@ -1,10 +1,18 @@
 name: build-native
 
-# Manual only: builds the native payload (box64 + proot) for arm64-v8a so a
-# human can inspect the binaries and vendor them into
-# app/src/main/jniLibs/arm64-v8a/ (see docs/NATIVE_RUNTIME.md). Vendoring
-# proot is an owner decision: it is GPL-2.0 and needs an Android-patched fork.
-# This workflow never blocks the APK build.
+# Manual only (workflow_dispatch), so it can never affect build-apk.
+#
+# box64 job: builds box64 (MIT) for arm64-v8a with the NDK, strips it, and
+# AUTO-COMMITS it as app/src/main/jniLibs/arm64-v8a/libbox64.so together with
+# its SHA-256 pin in app/src/main/assets/native/checksums.txt on the target
+# branch. The fail-closed contract is untouched: the app still refuses any
+# unpinned/mismatched binary (docs/NATIVE_RUNTIME.md). The push re-triggers
+# build-apk, which validates unit tests + assembleDebug with the new binary.
+#
+# proot job: reproduces the build of the ALREADY-vendored proot (termux/proot
+# v5.1.107.96 + Termux libtalloc; recipe in docs/NATIVE_RUNTIME.md) so the
+# GPL-2.0 corresponding-source offer stays runnable on demand. It only uploads
+# artifacts - re-vendoring proot is an owner decision, never automated.
 
 on:
   workflow_dispatch:
@@ -13,6 +21,15 @@ on:
         description: 'box64 git ref (tag/branch/commit)'
         required: false
         default: 'v0.4.4'
+      commit_box64:
+        description: 'Commit libbox64.so + its SHA-256 pin to the target branch'
+        type: boolean
+        required: false
+        default: true
+      target_branch:
+        description: 'Branch the vendored libbox64.so is committed to'
+        required: false
+        default: 'main'
       proot_repo:
         description: 'proot fork (must carry the Android patches)'
         required: false
@@ -28,13 +45,19 @@ concurrency:
 
 jobs:
   box64:
-    name: box64 (arm64 Android)
+    name: box64 (arm64 Android) + auto-vendor
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: write # pushes the vendored libbox64.so + its checksums.txt pin
     env:
       BOX64_REF: ${{ inputs.box64_ref }}
+      TARGET_BRANCH: ${{ inputs.target_branch }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout the branch that will receive the binary
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch }}
 
       - name: Build box64 with the NDK
         run: |
@@ -81,6 +104,60 @@ jobs:
             box64/build/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
+
+      - name: Commit libbox64.so + its SHA-256 pin
+        if: ${{ inputs.commit_box64 }}
+        run: |
+          set -euo pipefail
+          LIB=app/src/main/jniLibs/arm64-v8a/libbox64.so
+          PINS=app/src/main/assets/native/checksums.txt
+          cp box64/build/libbox64.so "$LIB"
+          # Update the pin file in place: replace the existing libbox64.so pin or
+          # its commented-out placeholder, and refresh the provenance comment.
+          BOX64_BUILT_REF="$BUILT_REF" python3 - "$LIB" "$PINS" <<'PY'
+          import hashlib, os, pathlib, sys
+          lib, pins = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+          digest = hashlib.sha256(lib.read_bytes()).hexdigest()
+          ref = os.environ.get("BOX64_BUILT_REF") or "unknown ref"
+          out, skip_block, pinned = [], False, False
+          for line in pins.read_text().splitlines():
+              if skip_block:
+                  # continuation lines of the libbox64 provenance comment block
+                  if line.startswith("#                      "):
+                      continue
+                  skip_block = False
+              if line.startswith("#   libbox64.so"):
+                  out.append(f"#   libbox64.so        ptitSeb/box64 {ref} (MIT), built and committed")
+                  out.append("#                      by .github/workflows/build-native.yml (NDK, android-28,")
+                  out.append("#                      ARM_DYNAREC=ON, llvm-strip'd).")
+                  skip_block = True
+                  continue
+              if line.startswith("libbox64.so=") or line.startswith("# libbox64.so="):
+                  out.append(f"libbox64.so={digest}")
+                  pinned = True
+                  continue
+              out.append(line)
+          if not pinned:
+              out.append(f"libbox64.so={digest}")
+          pins.write_text("\n".join(out) + "\n")
+          print(f"pinned libbox64.so={digest}")
+          PY
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$LIB" "$PINS"
+          if git diff --cached --quiet; then
+            echo "libbox64.so and its pin are unchanged - nothing to commit."
+            exit 0
+          fi
+          HASH="$(sha256sum "$LIB" | cut -d' ' -f1)"
+          git commit -m "Vendor libbox64.so ($BUILT_REF, sha256 $HASH)" \
+            -m "Built by .github/workflows/build-native.yml (box64 ref: ${BOX64_REF:-default}, NDK android-28, ARM_DYNAREC=ON, stripped). Pinned in app/src/main/assets/native/checksums.txt (fail closed). Licence: MIT - see docs/THIRD_PARTY.md."
+          # Retry once through a rebase if the branch moved while we built.
+          git push origin "HEAD:$TARGET_BRANCH" || {
+            git pull --rebase origin "$TARGET_BRANCH"
+            git push origin "HEAD:$TARGET_BRANCH"
+          }
+          echo "Pushed to $TARGET_BRANCH - build-apk will validate the APK with the new binary."
 
   proot:
     name: proot (arm64 Android)
