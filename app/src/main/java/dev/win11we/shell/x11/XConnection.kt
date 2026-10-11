@@ -44,6 +44,13 @@ class XConnection(
     private val pending = mutableListOf<ByteArray>()
     private var carry = ByteArray(0)
 
+    /**
+     * What this client asked for and what we could not answer. Read by [XServer]
+     * when the connection ends (it forwards the summary to the shell log) and by
+     * the Diagnostics screen; see [XProtocolTrace].
+     */
+    val trace = XProtocolTrace()
+
     private val gcs = HashMap<Int, GcState>()
     private val pixmaps = HashMap<Int, Int>()
     private val fonts = HashMap<Int, String>()
@@ -143,6 +150,23 @@ class XConnection(
     fun outboxBytes(): Int = synchronized(outbox) { outbox.sumOf { it.size } }
 
     /**
+     * Frees every resource this connection allocated, mirroring what a real X server
+     * does on disconnect: per-connection GCs/pixmaps/fonts/colormaps are dropped and
+     * the connection's windows are destroyed in the shared [XDocument].
+     *
+     * @return drawable ids (pixmaps + destroyed windows) the caller should purge from
+     *   the display list so their rasterised ops do not leak across connections.
+     */
+    fun releaseResources(): List<Int> {
+        val purged = pixmaps.keys.toList()
+        gcs.clear()
+        pixmaps.clear()
+        fonts.clear()
+        colormaps.clear()
+        return purged + document.destroyWindowsOwnedBy(this)
+    }
+
+    /**
      * Set by XServer on its internal shell connection: inspects every event
      * delivered from another connection (the clipboard bridge waits for the
      * SelectionNotify answering its own ConvertSelection). Runs guarded - an
@@ -182,9 +206,11 @@ class XConnection(
 
     fun parseSetup(bytes: ByteArray): SetupRequest? {
         if (bytes.size < 12) return null
+        // X11 setup byte 0 selects byte order: 0x42 'B' = MSBFirst (big-endian),
+        // 0x6c 'l' = LSBFirst (little-endian). Every real ARM/x86 client sends 'l'.
         val little = when (bytes[0].toInt().toChar()) {
-            'B' -> true
-            'l' -> false
+            'B' -> false
+            'l' -> true
             else -> return null
         }
         littleEndian = little
@@ -220,7 +246,10 @@ class XConnection(
         writer.int(X11.RESOURCE_ID_MASK)
         writer.int(0) // motionBufferSize
         writer.short(vendor.size)
-        writer.short(0) // maximumRequestSize: 0 means 64 KiB units
+        // Maximum request length in 4-byte units. libX11 stores this verbatim and
+        // uses it to size its buffers, so 0 would break every client; 65535 (256 KiB)
+        // is the protocol maximum and what a real server advertises.
+        writer.short(65535)
         writer.byte(1) // numberOfScreens
         writer.byte(screen.pixmapFormats.size)
         writer.byte(0) // imageByteOrder LSBFirst
@@ -316,9 +345,11 @@ class XConnection(
         val data = request[1].toInt() and 0xFF
         try {
             lastFailure = null
+            trace.recordRequest()
             dispatch(opcode, data, XReader(request, littleEndian, 4), request)
         } catch (error: Exception) {
             lastFailure = "opcode $opcode: ${error.javaClass.simpleName}: ${error.message}"
+            trace.recordFailure(opcode, "${error.javaClass.simpleName}: ${error.message}")
             error(
                 if (error is IndexOutOfBoundsException) X11.ERR_BAD_LENGTH else X11.ERR_BAD_REQUEST,
                 opcode,
@@ -646,8 +677,14 @@ class XConnection(
                     writer.short(names.size)
                     writer.pad(22)
                     names.forEach { name ->
-                        writer.byte(name.length)
-                        writer.paddedString(name)
+                        // Same rule as ListExtensions: the length byte and the name
+                        // are padded as ONE entry (Xorg: buffer += pad_to_int32(len+1)
+                        // - 1). Padding the name alone makes "fixed" 9 bytes instead
+                        // of 8, so the reply outruns its length field by one byte.
+                        val raw = name.toByteArray(Charsets.US_ASCII)
+                        writer.byte(raw.size)
+                        writer.bytes(raw)
+                        writer.pad(X11.padded(raw.size + 1))
                     }
                 }
             }
@@ -694,12 +731,15 @@ class XConnection(
             }
             X11.REQ_FREE_GC -> gcs.remove(reader.int())
             X11.REQ_CREATE_PIXMAP -> {
+                // Wire layout: depth is byte 1 (the `data` field), then pid(4)
+                // drawable(4) width(2) height(2) = 16 bytes total. Reading depth
+                // from the stream instead would run one short past the request.
+                val depth = data
                 val id = reader.int()
                 reader.int() // drawable
-                val depth = reader.short()
                 val width = reader.short()
                 val height = reader.short()
-                pixmaps[id] = depth.toInt()
+                pixmaps[id] = depth
                 sink.setSize(id, width, height)
             }
             X11.REQ_FREE_PIXMAP -> {
@@ -993,12 +1033,17 @@ class XConnection(
                 reader.skip(2)
                 val name = if (nameLength in 0..512) reader.paddedString(nameLength) else ""
                 val ext = EXTENSIONS[name.uppercase()]
-                reply(opcode) { writer ->
-                    writer.byte(if (ext != null) 1 else 0) // present
+                trace.recordExtension(name.uppercase(), ext != null)
+                // xQueryExtensionReply: `present` is the reply's data byte (byte 1);
+                // major-opcode, first-event and first-error are the first three bytes
+                // of the 24-byte payload. Writing `present` into the payload instead
+                // tells the client the extension is absent even though
+                // ListExtensions advertises it, so XTest was never reachable.
+                reply(opcode, dataByte = if (ext != null) 1 else 0) { writer ->
                     writer.byte(ext?.get(0) ?: 0) // major opcode
                     writer.byte(ext?.get(1) ?: 0) // first event
                     writer.byte(ext?.get(2) ?: 0) // first error
-                    writer.pad(20)
+                    writer.pad(21)
                 }
             }
             X11.REQ_LIST_EXTENSIONS -> {
@@ -1007,8 +1052,19 @@ class XConnection(
                 reply(opcode, dataByte = names.size, extraLength = bytes) { writer ->
                     writer.pad(24)
                     names.forEach { name ->
-                        writer.byte(name.length)
-                        writer.paddedString(name)
+                        // Each entry is a length byte plus the name, and the WHOLE
+                        // entry is padded to a 4-byte boundary (Xorg:
+                        // pad_to_int32(nameLen + 1)). XWriter.paddedString pads the
+                        // name alone, which writes one byte more than `bytes`
+                        // declares for a 5-character name like "XTEST". The reply is
+                        // then a byte longer than its length field says, so every
+                        // later message is parsed one byte off: the client sees the
+                        // tail of one reply as the head of the next and GTK treats
+                        // the resulting nonsense as a fatal X error (_exit(1)).
+                        val raw = name.toByteArray(Charsets.US_ASCII)
+                        writer.byte(raw.size)
+                        writer.bytes(raw)
+                        writer.pad(X11.padded(raw.size + 1))
                     }
                 }
             }
@@ -1083,9 +1139,13 @@ class XConnection(
                 if (n < 0) return error(X11.ERR_BAD_VALUE, opcode, n)
                 reply(opcode, dataByte = 0 /* Success */) { it.pad(24) }
             }
-            X11.REQ_GET_POINTER_MAPPING -> reply(opcode, dataByte = 3) { writer ->
+            X11.REQ_GET_POINTER_MAPPING -> reply(opcode, dataByte = 3, extraLength = 4) { writer ->
                 writer.pad(24)
-                writer.byte(1); writer.byte(2); writer.byte(3)
+                // The 3-button map is the reply's extra data; like every STRING8-ish
+                // tail it is padded to a 4-byte boundary, so it occupies 4 bytes and
+                // the length field must say so. Declaring 0 here made the reply 4
+                // bytes longer than advertised and desynchronised the connection.
+                writer.byte(1); writer.byte(2); writer.byte(3); writer.pad(1)
             }
             X11.REQ_SET_MODIFIER_MAPPING -> reply(opcode, dataByte = 0 /* Success */) { it.pad(24) }
             X11.REQ_GET_MODIFIER_MAPPING -> reply(opcode, dataByte = 1, extraLength = 8) { writer ->
@@ -1103,7 +1163,14 @@ class XConnection(
             }
             X11.REQ_NO_OPERATION -> Unit
             X11.EXT_XTEST_OPCODE -> xtestRequest(opcode, data, reader, request)
-            else -> error(X11.ERR_BAD_REQUEST, opcode, 0)
+            else -> {
+                // BadRequest is the correct protocol answer, and it is also what
+                // kills a GTK client (its error handler calls _exit(1)), so the
+                // opcode has to end up in the shell log: this is the list of
+                // requests to implement next.
+                trace.recordUnimplemented(opcode)
+                error(X11.ERR_BAD_REQUEST, opcode, 0)
+            }
         }
     }
 
@@ -1663,7 +1730,10 @@ class XConnection(
                 }
             }
             3 -> Unit // GrabControl: we never freeze the client
-            else -> error(X11.ERR_BAD_REQUEST, major, minor)
+            else -> {
+                trace.recordUnimplemented(major, minor)
+                error(X11.ERR_BAD_REQUEST, major, minor)
+            }
         }
     }
 
@@ -1677,22 +1747,41 @@ class XConnection(
     private fun reply(opcode: Int, dataByte: Int = 0, extraLength: Int = 0, body: (XWriter) -> Unit) {
         val bodyWriter = XWriter(littleEndian)
         body(bodyWriter)
+        val payload = bodyWriter.toByteArray()
+        val units = X11.pad4(extraLength) / 4
+        // The client reads exactly 32 + units*4 bytes for this reply, so the body
+        // must be exactly 24 + units*4 bytes. One byte either way desynchronises
+        // the connection: every later message is parsed at the wrong offset and
+        // the client reads the tail of one reply as the head of the next. GTK
+        // treats that as a fatal X error and _exit(1)s, with nothing on stderr -
+        // which is how a wrong ListExtensions padding killed Firefox. Force the
+        // wire size to the declared one and report the mismatch instead.
+        val declared = 24 + units * 4
         val writer = XWriter(littleEndian)
         writer.byte(1)
         writer.byte(dataByte)
         writer.short(sequence)
-        writer.int(extraLength / 4)
-        writer.bytes(bodyWriter.toByteArray())
+        writer.int(units)
+        when {
+            payload.size == declared -> writer.bytes(payload)
+            payload.size < declared -> {
+                trace.recordReplyLengthMismatch(opcode, payload.size, declared)
+                writer.bytes(payload)
+                writer.pad(declared - payload.size)
+            }
+            else -> {
+                trace.recordReplyLengthMismatch(opcode, payload.size, declared)
+                writer.bytes(payload.copyOf(declared))
+            }
+        }
         val out = writer.toByteArray()
-        val aligned = if (out.size % 4 != 0) out.copyOf(X11.pad4(out.size)) else out
-        pending.add(if (aligned.size >= 32) aligned else aligned.copyOf(32))
+        pending.add(if (out.size >= 32) out else out.copyOf(32))
         lastError = X11.ERR_SUCCESS
-        @Suppress("UNUSED_EXPRESSION")
-        opcode
     }
 
     fun error(code: Int, opcode: Int, badValue: Int) {
         lastError = code
+        trace.recordErrorSent()
         val writer = XWriter(littleEndian)
         writer.byte(0)
         writer.byte(code)

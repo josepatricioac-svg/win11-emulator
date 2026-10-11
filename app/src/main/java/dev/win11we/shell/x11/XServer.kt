@@ -53,6 +53,44 @@ object XServer {
     var lastError: String? = null
         private set
 
+    // --- protocol observability -------------------------------------------
+
+    /**
+     * Where per-connection protocol reports go. The x11 package must stay free of
+     * Android and UI types (it is the one part of the shell that can be unit
+     * tested and run off-device), so the shell installs this hook: XDesktop wires
+     * it to `SharedLog`, which is what Terminal and Diagnostics display.
+     *
+     * Called on the client thread when a connection ends. A report names every
+     * extension the client queried, every opcode we could not implement and every
+     * dispatch that threw - i.e. exactly the information a silent `_exit(1)` from
+     * GTK otherwise destroys.
+     */
+    @Volatile
+    var protocolReporter: ((String) -> Unit)? = null
+
+    /** The most recent report, for the Diagnostics screen. */
+    @Volatile
+    var lastProtocolReport: String? = null
+        private set
+
+    private val connectionCounter = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** Reports of the connections that are alive right now (Diagnostics). */
+    fun liveProtocolReports(): List<String> = connections().map { it.trace.summary() }
+
+    /**
+     * Feeds one connection's report to [protocolReporter] and caches it.
+     * `internal` so the wiring is unit-testable: [serve] itself needs Android
+     * sockets, this part does not.
+     */
+    internal fun report(connection: XConnection) {
+        val text = connection.trace.summary()
+        lastProtocolReport = text
+        val reporter = protocolReporter ?: return
+        runCatching { reporter(text) }
+    }
+
     private val connections = mutableListOf<XConnection>()
     private val outputs = HashMap<XConnection, java.io.OutputStream>()
     private val shutdown = AtomicBoolean(false)
@@ -314,6 +352,7 @@ object XServer {
 
     private fun serve(client: LocalSocket) {
         val connection = XConnection(document, displayList)
+        connection.trace.label = "client#${connectionCounter.incrementAndGet()}"
         synchronized(connections) { connections.add(connection) }
         clientCount = synchronized(connections) { connections.size }
         try {
@@ -353,9 +392,16 @@ object XServer {
         } catch (error: IOException) {
             Log.d(TAG, "client ended: ${error.message}")
         } finally {
+            // Log what this client asked for before its state is thrown away: when
+            // a GTK client dies on an X error this summary is the only evidence.
+            report(connection)
             synchronized(connections) { connections.remove(connection) }
             synchronized(outputs) { outputs.remove(connection) }
             document.releaseRedirect(connection)
+            // Free the client's windows/pixmaps/GCs so a reconnecting client never
+            // collides with its own stale resource ids (real X does this on disconnect).
+            val purged = connection.releaseResources()
+            (connection.sink as? XDisplayList)?.let { dl -> purged.forEach { dl.remove(it) } }
             document.releaseOwners(connection)
             document.releaseGrabs(connection)
             document.releaseSelections(connection)
@@ -395,11 +441,22 @@ object XServer {
      * (MapNotify to root listeners, Expose to the window) and redraws.
      */
     fun wmMapWindow(id: Int, x: Int?, y: Int?, width: Int?, height: Int?) {
+        // The WM - not the client - picks this geometry, so the client has to be
+        // told. GTK sizes its backing surface from ConfigureNotify and does not
+        // draw until one arrives that matches the mapped window; MapNotify alone
+        // leaves it rendering at the position and size it asked for, which after a
+        // WM placement is simply wrong (for Firefox: a black or clipped window).
+        val before = document.window(id)?.let { intArrayOf(it.x, it.y, it.width, it.height) }
         document.configure(id, x, y, width, height, null)
         if (!document.mapWindow(id)) return
         contentRevision++
         val rootId = document.rootId
-        broadcast { connection ->
+        val after = document.window(id)
+        val placed = before != null && after != null &&
+            (before[0] != after.x || before[1] != after.y ||
+                before[2] != after.width || before[3] != after.height)
+        broadcaster { connection ->
+            if (placed) connection.sendEvent(id, X11.EV_CONFIGURE_NOTIFY)
             connection.sendEvent(rootId, X11.EV_MAP_NOTIFY, id)
             connection.sendEvent(id, X11.EV_EXPOSE)
         }
@@ -409,7 +466,19 @@ object XServer {
     fun wmConfigureWindow(id: Int, x: Int?, y: Int?, width: Int?, height: Int?) {
         if (!document.configure(id, x, y, width, height, null)) return
         contentRevision++
-        broadcast { it.sendEvent(id, X11.EV_CONFIGURE_NOTIFY) }
+        broadcaster { it.sendEvent(id, X11.EV_CONFIGURE_NOTIFY) }
+    }
+
+    /**
+     * How WM-driven changes reach clients. A seam rather than a direct call so the
+     * event sequence above can be unit-tested: [serve] is the only part of this
+     * object that needs Android sockets.
+     */
+    internal var broadcaster: ((XConnection) -> Unit) -> Unit = { action -> broadcast(action) }
+
+    /** Test seam: point the singleton at a fresh document (production uses [start]). */
+    internal fun setDocumentForTest(value: XDocument) {
+        document = value
     }
 
     private fun readFully(input: java.io.InputStream, buffer: ByteArray, count: Int): ByteArray? {

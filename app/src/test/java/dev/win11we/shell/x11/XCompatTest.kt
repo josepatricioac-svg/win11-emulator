@@ -484,6 +484,11 @@ class XCompatTest {
         assertEquals(5, reply[32].toInt()) // name length
         assertEquals("fixed", String(reply.copyOfRange(33, 38), Charsets.US_ASCII))
         assertEquals(0, reply.size % 4)
+        // The length byte and the 5-character name are ONE 4-byte-aligned entry, so
+        // the reply is 32 + 8 bytes and no more: a 41-byte reply (name padded on its
+        // own) is one byte longer than the length field advertises, which puts every
+        // later message out of step.
+        assertEquals(32 + reply.intLE(4) * 4, reply.size)
     }
 
     @Test
@@ -663,13 +668,18 @@ class XCompatTest {
     fun `QueryExtension reports XTEST with its major opcode`() {
         val client = connection()
         val xtest = send(client, c.queryExtension("XTEST")).reply()
-        assertEquals(1, xtest[8].toInt()) // present
-        assertEquals(X11.EXT_XTEST_OPCODE, xtest[9].toInt() and 0xFF)
-        assertEquals(0, xtest[10].toInt()) // first event
+        // xQueryExtensionReply: present is the data byte (1), then major opcode,
+        // first event and first error are payload bytes 8..10.
+        assertEquals(1, xtest[1].toInt()) // present
+        assertEquals(X11.EXT_XTEST_OPCODE, xtest[8].toInt() and 0xFF)
+        assertEquals(0, xtest[9].toInt()) // first event
+        assertEquals(0, xtest[10].toInt()) // first error
         val render = send(client, c.queryExtension("RENDER")).reply()
-        assertEquals(0, render[8].toInt()) // not present
+        assertEquals(0, render[1].toInt()) // not present
+        assertEquals(0, render[8].toInt()) // and therefore no major opcode
         val names = send(client, c.listExtensions()).reply()
         assertEquals(1, names[1].toInt()) // one extension
+        assertEquals(32 + names.intLE(4) * 4, names.size) // ... and no stray byte
         assertEquals("XTEST", String(names.copyOfRange(33, 38), Charsets.US_ASCII))
     }
 
@@ -759,6 +769,9 @@ class XCompatTest {
         assertEquals(2, map[33].toInt())
         assertEquals(3, map[34].toInt())
         assertEquals(36, map.size)
+        // ... and the length field must agree, or the client reads 32 bytes and the
+        // next four are parsed as a message header of their own.
+        assertEquals(32 + map.intLE(4) * 4, map.size)
 
         val mods = send(client, c.getModifierMapping()).reply()
         assertEquals(1, mods[1].toInt()) // one keycode per modifier

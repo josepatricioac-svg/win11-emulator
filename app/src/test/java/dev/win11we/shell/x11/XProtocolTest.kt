@@ -102,6 +102,8 @@ private class ClientRequestBuilder(private val littleEndian: Boolean = true) {
         writer.short(name.length); writer.pad(2); writer.paddedString(name)
     }
 
+    fun listExtensions() = build(X11.REQ_LIST_EXTENSIONS) { }
+
     fun getKeyboardMapping(first: Int, count: Int) = build(X11.REQ_GET_KEYBOARD_MAPPING) { writer ->
         writer.byte(first); writer.byte(count); writer.pad(2)
     }
@@ -249,7 +251,8 @@ class XProtocolTest {
 
     @Test
     fun `the setup reply has the layout a client parses`() {
-        val setup = byteArrayOf('B'.code.toByte(), 0) + XWriter(true).apply {
+        // 'l' (0x6c) = LSBFirst: a little-endian client writes its version little-endian.
+        val setup = byteArrayOf('l'.code.toByte(), 0) + XWriter(true).apply {
             short(11); short(0); short(0); short(0); pad(2)
         }.toByteArray()
         val parsed = connection.parseSetup(setup)
@@ -285,7 +288,8 @@ class XProtocolTest {
 
     @Test
     fun `a big-endian client is answered big-endian`() {
-        val setup = byteArrayOf('l'.code.toByte(), 0) + XWriter(false).apply {
+        // 'B' (0x42) = MSBFirst: a big-endian client writes its version big-endian.
+        val setup = byteArrayOf('B'.code.toByte(), 0) + XWriter(false).apply {
             short(11); short(0); short(0); short(0); pad(2)
         }.toByteArray()
         assertNotNull(connection.parseSetup(setup))
@@ -481,10 +485,10 @@ class XProtocolTest {
             assertEquals(0, message.size % 4) // every X message is 4-byte aligned
             if (message[0].toInt() == 0) assertEquals(32, message.size) // errors are fixed size
         }
-        // QueryExtension (request #5): present=0 at byte 8, no extension data
+        // QueryExtension (request #5): RENDER is absent, so present=0 in the data byte
         val extension = out.replies().first { it.shortLE(2) == 5 }
         assertEquals(32, extension.size)
-        assertEquals(0, extension[8].toInt())
+        assertEquals(0, extension[1].toInt())
         // GetKeyboardMapping (request #6): keysyms-per-keycode in the data byte,
         // the two keysyms for keycode 38 ('a') start at offset 32
         val mapping = out.replies().first { it.shortLE(2) == 6 }
@@ -492,6 +496,92 @@ class XProtocolTest {
         assertEquals(2, mapping[1].toInt())
         assertEquals('a'.code, mapping.intLE(32))
         assertEquals('A'.code, mapping.intLE(36)) // the shifted slot
+    }
+
+    @Test
+    fun `QueryExtension reports a present extension the way xQueryExtensionReply says`() {
+        val reply = send(client.queryExtension("XTEST")).reply()
+        assertEquals(32, reply.size)
+        // `present` is the reply's data byte (byte 1), not the first payload byte
+        assertEquals(1, reply[1].toInt())
+        // major opcode / first event / first error are payload bytes 8..10
+        assertEquals(X11.EXT_XTEST_OPCODE, reply[8].toInt() and 0xFF)
+        assertEquals(0, reply[9].toInt())
+        assertEquals(0, reply[10].toInt())
+        assertEquals(0, reply.intLE(4)) // no extension data follows
+    }
+
+    @Test
+    fun `extension lookup is case-insensitive and unknown extensions are absent`() {
+        assertEquals(1, send(client.queryExtension("xtest")).reply()[1].toInt())
+        assertEquals(0, send(client.queryExtension("RENDER")).reply()[1].toInt())
+        assertEquals(0, send(client.queryExtension("BIG-REQUESTS")).reply()[1].toInt())
+    }
+
+    @Test
+    fun `ListExtensions writes exactly the bytes its length field declares`() {
+        // A reply even one byte longer than its length field says desynchronises
+        // the connection: the client parses every later message one byte off and
+        // sees garbage. GTK treats that as a fatal X error and _exit(1)s, which is
+        // exactly how Firefox died right after asking for XTEST.
+        val out = send(
+            client.listExtensions(),
+            client.internAtom("_NET_WM_NAME"),
+            client.queryExtension("XTEST"),
+        )
+        val listed = out.replies().first { it.shortLE(2) == 1 }
+        val declared = 32 + listed.intLE(4) * 4
+        assertEquals("reply size must equal 32 + length*4", declared, listed.size)
+        val count = listed[1].toInt()
+        assertTrue("at least XTEST must be listed", count >= 1)
+        var offset = 32
+        repeat(count) {
+            val length = listed[offset].toInt() and 0xFF
+            assertTrue(length > 0)
+            offset += X11.pad4(length + 1) // the whole entry is 4-byte aligned
+        }
+        assertEquals("entries must consume exactly the declared extra length", declared, offset)
+        // ... and the stream is still in sync afterwards, so the later replies are
+        // intact rather than shifted by a byte.
+        val atom = out.replies().first { it.shortLE(2) == 2 }
+        assertEquals(32 + atom.intLE(4) * 4, atom.size)
+        val ext = out.replies().first { it.shortLE(2) == 3 }
+        assertEquals(1, ext[1].toInt())
+        assertEquals(X11.EXT_XTEST_OPCODE, ext[8].toInt() and 0xFF)
+    }
+
+    @Test
+    fun `the whole outbound stream is walkable from its own length fields`() {
+        // The invariant a real client relies on: concatenating everything the
+        // server sent and walking it by (type, length) lands exactly on the end.
+        // Any reply whose payload disagrees with its length field fails here.
+        val out = send(
+            client.listExtensions(),
+            client.createWindow(rootId + 71, rootId, 0, 0, 10, 10),
+            client.internAtom("_NET_WM_NAME"),
+            client.queryExtension("XTEST"),
+            client.getKeyboardMapping(38, 2),
+            client.getWindowAttributes(rootId),
+            client.destroyWindow(0x99), // -> BadRequest error
+        )
+        val stream = out.fold(ByteArray(0)) { acc, message -> acc + message }
+        var offset = 0
+        var messages = 0
+        while (offset < stream.size) {
+            val type = stream[offset].toInt()
+            val size = when (type) {
+                1 -> 32 + stream.intLE(offset + 4) * 4 // reply: length is in 4-byte units
+                else -> 32 // errors and core events are fixed size
+            }
+            assertTrue(
+                "message #$messages (type $type) at $offset claims $size bytes, only ${stream.size - offset} left",
+                offset + size <= stream.size,
+            )
+            offset += size
+            messages++
+        }
+        assertEquals(stream.size, offset)
+        assertEquals(out.size, messages)
     }
 
     @Test

@@ -217,6 +217,33 @@ class XDocument(
         windowOwners.entries.removeAll { it.value === connection }
     }
 
+    /**
+     * Destroys every window this connection created (and their subtrees), as a real X
+     * server does when a client disconnects. Without this, a reconnecting client that
+     * reuses its deterministic resource ids collides with its own stale windows and
+     * gets BadWindow from CreateWindow (GTK treats that as fatal).
+     *
+     * @return the ids of all destroyed windows, so the caller can purge them from the
+     *   display list / raster cache.
+     */
+    fun destroyWindowsOwnedBy(connection: XConnection): List<Int> {
+        val owned = synchronized(windowOwners) {
+            windowOwners.entries.filter { it.value === connection }.map { it.key }.toList()
+        }
+        val destroyed = mutableListOf<Int>()
+        owned.forEach { top ->
+            collectSubtree(top, destroyed)
+            destroyWindow(top)
+        }
+        return destroyed
+    }
+
+    private fun collectSubtree(id: Int, out: MutableList<Int>) {
+        val window = windows[id] ?: return
+        out.add(id)
+        window.children.toList().forEach { collectSubtree(it, out) }
+    }
+
     // --- input focus (server-wide, like X) ---------------------------------
 
     companion object FocusDefaults {

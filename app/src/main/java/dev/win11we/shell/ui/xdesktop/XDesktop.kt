@@ -49,6 +49,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import dev.win11we.shell.ui.terminal.SharedLog
 import dev.win11we.shell.x11.CursorGlyph
 import dev.win11we.shell.x11.DrawOp
 import dev.win11we.shell.x11.ImeCommitExtractor
@@ -378,6 +379,11 @@ class XDesktopState {
     fun onSurfaceSize(widthPx: Int, heightPx: Int) {
         if (started || startError != null || widthPx <= 0 || heightPx <= 0) return
         XServer.attachWindowManager(ShellWindowManager.forServer())
+        // Per-client protocol reports land in the shell log, which the Terminal and
+        // Diagnostics screens both read. This is what makes a silent guest crash
+        // diagnosable: the report names every extension the client queried and
+        // every request we could not implement.
+        XServer.protocolReporter = { line -> SharedLog.info(line) }
         if (XServer.start(widthPx, heightPx)) {
             started = true
         } else {
