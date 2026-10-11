@@ -8,8 +8,9 @@ executed in place (jniLibs.useLegacyPackaging = true keeps them extracted):
   libproot-loader.so     proot loader (GPL-2.0)  VENDORED
   libtalloc.so           talloc       (LGPL-3.0+) VENDORED - proot's dynamic dependency
   libbox64.so            box64        (MIT)      NOT VENDORED YET - only x86/x64 Wine
-                                                payloads need it; build it with
+                                                payloads need it; one dispatch run of
                                                 .github/workflows/build-native.yml
+                                                commits it here with its pin
   libproot-loader32.so   proot loader (GPL-2.0)  optional (32-bit guests; not built -
                                                 the rootfs is arm64-only)
 

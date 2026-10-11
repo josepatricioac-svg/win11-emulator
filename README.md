@@ -109,9 +109,10 @@ The native payload is **partially vendored**: `libproot.so` + `libproot-loader.s
 (termux/proot `v5.1.107.96`, GPL-2.0, owner-approved for the browser milestone, exec'd
 only as a separate process) and `libtalloc.so` (LGPL-3.0+, SONAME-respelled) are committed
 and SHA-256-pinned; **`libbox64.so` is the remaining piece** and only x86/x64 Wine guests
-need it — one `build-native` (`workflow_dispatch`) CI run produces it (the dev sandbox
-OOMs on box64's `gtkclass.c`). Provenance and the exact build recipe:
-`docs/NATIVE_RUNTIME.md`.
+need it — one `build-native` (`workflow_dispatch`) run produces it **and commits the
+binary + its SHA-256 pin to `main` automatically** (the dev sandbox OOMs on box64's
+`gtkclass.c`; CI builds it with `-DANDROID=ON` and `-j2`). Provenance and the exact build
+recipe: `docs/NATIVE_RUNTIME.md`.
 
 ## Performance
 
@@ -217,10 +218,14 @@ a required binary that is unpinned or mismatched is **refused** (`CHECKSUM_NOT_P
 libtalloc) are pinned. `prepare()` is per-launch now: `ContainerLauncher.requiredFor()`
 demands box64 only for x86/x64 guests, so the native-arm64 Firefox session is not held
 hostage by it. `.github/workflows/build-native.yml` (`workflow_dispatch` only, so it can
-never affect `build-apk`) builds box64 from a pinned ref and uploads `libbox64.so` +
-`SHA256SUMS.txt`. `docs/NATIVE_RUNTIME.md` has the full build recipe (reproduced once in a
-1 GB sandbox with NDK r27c) and the licence rules (proot is GPL-2.0 and is only ever
-exec'd, never linked; talloc is LGPL-3.0+ and dynamically linked by proot, not by the app).
+never affect `build-apk`) builds box64 from a pinned ref and **commits `libbox64.so` plus
+its `checksums.txt` pin straight to the target branch** — fail-closed pinning stays
+intact, and the push re-triggers `build-apk` to validate the APK with the new binary.
+Its proot job re-runs the vendored termux/proot recipe on demand (upload-only; GPL-2.0
+re-vendoring is an owner decision). `docs/NATIVE_RUNTIME.md` has the full build recipe
+(reproduced once in a 1 GB sandbox with NDK r27c) and the licence rules (proot is GPL-2.0
+and is only ever exec'd, never linked; talloc is LGPL-3.0+ and dynamically linked by
+proot, not by the app).
 
 ## Container Manager
 
