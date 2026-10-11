@@ -91,7 +91,16 @@ Honest limits while gated (each named by the readiness message, nothing silent):
   Ubuntu base does not. The **Provision** action installs it with apt inside proot
   (pinned package list, `--no-install-recommends`, full log in Terminal ▸ log); this
   step is unpinned-by-hash by design (distro-side dependency resolution, like every
-  proot-distro tool) and needs network on the device.
+  proot-distro tool) and needs network on the device. The command runs apt as proot's
+  fake root (`-0` — without it dpkg refuses outright) with `APT::Sandbox::User=root`
+  (apt's `_apt` fetch user can write nowhere under fake-root ownership) and dpkg's
+  `--force-unsafe-io`/`--force-confold`, under `PROOT_NO_SECCOMP=1`; `/etc/resolv.conf`
+  is written into the rootfs as a real file **and** bind-mounted over (imported images
+  may ship systemd-resolved's dangling symlink, which no bind can fix). The pinned
+  ubuntu-base already points apt at `http://ports.ubuntu.com/ubuntu-ports` (correct for
+  arm64, and plain http, so it works before `ca-certificates` exists), and
+  `apt-get update` runs first. A failure reports the exit code and the last 30 apt
+  output lines in the Provision card and the shared log — no more bare "apt-get failed".
 - One session at a time (`ALREADY_RUNNING` while alive); handing a second URL to the
   *running* instance needs a guest D-Bus session bus (P1).
 - Audio waits on P1's PulseAudio socket; the env already accepts it.
