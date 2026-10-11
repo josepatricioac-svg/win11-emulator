@@ -31,13 +31,13 @@ on:
         required: false
         default: 'main'
       proot_repo:
-        description: 'proot fork (must carry the Android patches)'
+        description: 'proot repo (default reproduces the vendored termux/proot build)'
         required: false
-        default: 'https://github.com/twaik/proot.git'
+        default: 'https://github.com/termux/proot.git'
       proot_ref:
         description: 'proot git ref'
         required: false
-        default: 'master'
+        default: 'v5.1.107.96'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -160,32 +160,106 @@ jobs:
           echo "Pushed to $TARGET_BRANCH - build-apk will validate the APK with the new binary."
 
   proot:
+    # Inspection only. proot is GPL-2.0: whether to (re)vendor it stays an owner
+    # decision, so this job uploads artifacts and never commits. What it builds is
+    # the recipe in docs/NATIVE_RUNTIME.md - the same termux/proot tag, the same
+    # Termux libtalloc with a respelled SONAME, the same two source patches - which
+    # keeps the GPL-2.0 corresponding-source offer runnable on demand.
     name: proot (arm64 Android)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      PROOT_REPO: ${{ inputs.proot_repo }}
+      PROOT_REF: ${{ inputs.proot_ref }}
+      # Termux's prebuilt aarch64 libtalloc; proot's only dynamic dependency.
+      TALLOC_DEB_URL: https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.5.0_aarch64.deb
+      TALLOC_DEB_SHA256: 556591f43bb773ad8777e1a29522640866a55f95dab71914418b94a8c58ad5a7
     steps:
       - uses: actions/checkout@v4
+
+      - name: Stage libtalloc (sha256-pinned, SONAME respelled)
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o /tmp/libtalloc.deb "$TALLOC_DEB_URL"
+          echo "$TALLOC_DEB_SHA256  /tmp/libtalloc.deb" | sha256sum -c - # fail closed
+          mkdir -p "$RUNNER_TEMP/talloc-out/lib" "$RUNNER_TEMP/talloc-out/include"
+          dpkg-deb -x /tmp/libtalloc.deb /tmp/talloc-x
+          # Respell the SONAME in .dynstr: "libtalloc.so.2\0" -> "libtalloc.so\0\0\0"
+          # (exactly one occurrence, same byte length). That is what makes
+          # -l:libtalloc.so record DT_NEEDED=libtalloc.so, the vendored file name,
+          # and what lets AGP package the file from jniLibs.
+          TALLOC_OUT="$RUNNER_TEMP/talloc-out" python3 - /tmp/talloc-x <<'PY'
+          import os, pathlib, sys
+          root = pathlib.Path(sys.argv[1]) / "data/data/com.termux/files/usr"
+          out = pathlib.Path(os.environ["TALLOC_OUT"])
+          blob = (root / "lib/libtalloc.so.2.5.0").read_bytes()
+          old, new = b"libtalloc.so.2\x00", b"libtalloc.so\x00\x00\x00"
+          found = blob.count(old)
+          if found != 1:
+              sys.exit(f"expected exactly one SONAME occurrence, found {found} - refusing to guess")
+          out_blob = blob.replace(old, new, 1)
+          assert len(out_blob) == len(blob), "respelling must not change the byte length"
+          (out / "lib/libtalloc.so").write_bytes(out_blob)
+          (out / "include/talloc.h").write_bytes((root / "include/talloc.h").read_bytes())
+          print(f"staged {out/'lib/libtalloc.so'} ({len(out_blob)} bytes) + talloc.h")
+          PY
 
       - name: Build proot with the NDK
         run: |
           set -euo pipefail
           NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_HOME/ndk/$(ls "$ANDROID_HOME/ndk" | sort -V | tail -1)}"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-          git clone --depth 1 --branch "${{ inputs.proot_ref }}" "${{ inputs.proot_repo }}" proot || \
-            git clone --depth 1 "${{ inputs.proot_repo }}" proot
-          cd proot/src
-          make \
+          TALLOC_OUT="$RUNNER_TEMP/talloc-out"
+          # gawk (not mawk) provides the strtonum() that loader-info.awk needs;
+          # the makefile calls plain `awk`, so point the PATH lookup at gawk.
+          sudo apt-get update -qq && sudo apt-get install -y -qq gawk
+          sudo ln -sf "$(command -v gawk)" /usr/local/bin/awk
+          git clone --depth 1 --branch "$PROOT_REF" "$PROOT_REPO" proot || \
+            git clone --depth 1 "$PROOT_REPO" proot
+          cd proot
+          # Patch 1: disable the 32-bit loader. It needs an arm32 compile target
+          # this workflow does not ship and the rootfs is arm64-only (both
+          # occurrences in src/arch.h).
+          sed -i 's|#define HAS_LOADER_32BIT true|/* HAS_LOADER_32BIT disabled: arm64-only rootfs */|' src/arch.h
+          # Patch 2: link the staged talloc by exact file name, with RUNPATH=$ORIGIN
+          # so libtalloc.so resolves next to the binary even if LD_LIBRARY_PATH is
+          # stripped, plus the bionic ARG_MAX fix and talloc's headers.
+          sed -i "s|^LDFLAGS  += -ltalloc .*|LDFLAGS  += -L$TALLOC_OUT/lib -l:libtalloc.so -Wl,-z,noexecstack '-Wl,-rpath,\$\$ORIGIN'|" src/GNUmakefile
+          sed -i "s|^CPPFLAGS += \(.*\)$|CPPFLAGS += -DARG_MAX=131072 -I$TALLOC_OUT/include \1|" src/GNUmakefile
+          # The warning suppressions and the unbundled-loader define go INTO the
+          # makefile's own CFLAGS line: a command-line CFLAGS= would override the
+          # makefile's `+=` and silently lose -DPROOT_UNBUNDLE_LOADER.
+          sed -i 's|^CFLAGS\( *\) += -Wall -Wextra -O2.*$|CFLAGS\1 += -Wall -Wextra -O2 -Wno-error -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types|' src/GNUmakefile
+          grep -q 'l:libtalloc.so' src/GNUmakefile || { echo "talloc LDFLAGS patch did not apply"; exit 1; }
+          grep -q 'HAS_LOADER_32BIT true' src/arch.h && { echo "loader32 patch did not apply"; exit 1; }
+          make -C src \
             CC="$TOOLCHAIN/bin/aarch64-linux-android28-clang" \
             LD="$TOOLCHAIN/bin/aarch64-linux-android28-clang" \
-            ARCH=arm64 \
-            -j"$(nproc)" || make CC="$TOOLCHAIN/bin/aarch64-linux-android28-clang" ARCH=arm64
-          ls -la
+            STRIP="$TOOLCHAIN/bin/llvm-strip" \
+            OBJCOPY="$TOOLCHAIN/bin/llvm-objcopy" \
+            OBJDUMP="$TOOLCHAIN/bin/llvm-objdump" \
+            PROOT_UNBUNDLE_LOADER=libproot-loader.so \
+            -j"$(nproc)"
+          # Verify the ELF shape the runtime depends on before calling this a build.
+          "$TOOLCHAIN/bin/llvm-readelf" -d src/proot | tee /tmp/proot-dynamic.txt
+          grep -q 'Library runpath: \[\$ORIGIN\]' /tmp/proot-dynamic.txt
+          grep -q 'Shared library: \[libtalloc.so\]' /tmp/proot-dynamic.txt
+          if grep -q 'libtalloc.so\.2' /tmp/proot-dynamic.txt; then
+            echo "DT_NEEDED still references libtalloc.so.2 - the SONAME respell is wrong"; exit 1
+          fi
+          "$TOOLCHAIN/bin/llvm-readelf" -h src/proot | grep -q AArch64
+          # Name the outputs the way jniLibs expects them, for inspection only.
+          mkdir -p "$GITHUB_WORKSPACE/proot-out"
+          cp src/proot "$GITHUB_WORKSPACE/proot-out/libproot.so"
+          cp src/loader/loader "$GITHUB_WORKSPACE/proot-out/libproot-loader.so"
+          (cd "$GITHUB_WORKSPACE/proot-out" && sha256sum libproot.so libproot-loader.so | tee SHA256SUMS.txt)
 
       - uses: actions/upload-artifact@v4
         with:
           name: proot-arm64
           path: |
-            proot/src/proot
-            proot/src/loader/loader
-          if-no-files-found: warn
+            proot-out/libproot.so
+            proot-out/libproot-loader.so
+            proot-out/SHA256SUMS.txt
+          if-no-files-found: error
           retention-days: 30
