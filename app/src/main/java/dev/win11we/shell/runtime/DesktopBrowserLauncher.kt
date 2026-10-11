@@ -68,7 +68,7 @@ object DesktopEngineReadiness {
             !FirefoxSession.guiLibrariesPresent(rootfsDir) ->
                 EngineReadiness(
                     false,
-                    "Rootfs GUI libraries (libgtk-3) not provisioned - the Wine dependency-tree step (R4/P2)",
+                    "Rootfs GUI libraries (libgtk-3) not provisioned - run Provision (Settings \u25B8 Storage \u25B8 Runtime download)",
                 )
             else -> EngineReadiness(true, null)
         }
@@ -76,7 +76,7 @@ object DesktopEngineReadiness {
         return mapOf(
             FirefoxSession.ENGINE_ID to firefox,
             "desktop:edge-arm64" to EngineReadiness(false, "Not built yet: needs the Edge arm64 payload (licence accept) and D2 per-window surfaces"),
-            "desktop:firefox-wine" to EngineReadiness(false, "Needs libbox64.so (run build-native, then vendor + pin it) and a Wine payload/prefix (R4/P2)"),
+            "desktop:firefox-wine" to EngineReadiness(false, "Needs libbox64.so (one build-native dispatch run commits + pins it automatically) and a Wine payload/prefix (R4/P2)"),
             "desktop:chromium-arm64" to EngineReadiness(false, "Not built yet: no pinned Chromium arm64 artifact in the R3 manifest"),
         )
     }
