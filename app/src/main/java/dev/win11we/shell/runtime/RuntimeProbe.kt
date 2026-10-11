@@ -1,6 +1,7 @@
 package dev.win11we.shell.runtime
 
 import java.io.File
+import java.io.InputStream
 import java.util.concurrent.TimeUnit
 
 /**
@@ -32,16 +33,49 @@ class JvmProcessRunner : ProcessRunner {
             if (workingDir != null) builder.directory(workingDir)
             builder.redirectErrorStream(false)
             val process = builder.start()
-            val stdout = process.inputStream.bufferedReader().use { it.readText() }
-            val stderr = process.errorStream.bufferedReader().use { it.readText() }
-            if (!process.waitFor(timeoutMillis, TimeUnit.MILLISECONDS)) {
+            // Both pipes drain concurrently on daemon threads. Sequential reads
+            // deadlock as soon as the child fills the 64 KiB stderr buffer while
+            // we block on stdout - exactly what apt-get does mid-provision - and
+            // even a killed child only EOFs its pipes when EVERY holder of the
+            // write end exits, so orphaned grandchildren must never block the
+            // caller: the joins below are bounded and partial output is honest.
+            val stdout = StreamDrain(process.inputStream)
+            val stderr = StreamDrain(process.errorStream)
+            val finished =
+                if (timeoutMillis > 0) process.waitFor(timeoutMillis, TimeUnit.MILLISECONDS) else process.waitFor().let { true }
+            if (!finished) {
                 process.destroyForcibly()
-                return RunOutcome(null, stdout, stderr, "Timed out after ${timeoutMillis}ms")
+                stdout.joinFor(DRAIN_GRACE_MILLIS)
+                stderr.joinFor(DRAIN_GRACE_MILLIS)
+                return RunOutcome(null, stdout.text(), stderr.text(), "Timed out after ${timeoutMillis}ms")
             }
-            RunOutcome(process.exitValue(), stdout, stderr)
+            stdout.joinFor(DRAIN_GRACE_MILLIS)
+            stderr.joinFor(DRAIN_GRACE_MILLIS)
+            RunOutcome(process.exitValue(), stdout.text(), stderr.text())
         } catch (error: Exception) {
             RunOutcome(null, "", "", "${error.javaClass.simpleName}: ${error.message}")
         }
+    }
+
+    /** Reads one stream to EOF on a daemon thread; [text] stays available (partial) if the reader is still blocked. */
+    private class StreamDrain(stream: InputStream) {
+        private val buffer = StringBuffer()
+        private val thread = Thread {
+            runCatching { stream.bufferedReader().forEachLine { buffer.append(it).append('\n') } }
+        }.apply {
+            isDaemon = true
+            name = "process-drain"
+            start()
+        }
+
+        fun joinFor(millis: Long) = runCatching { thread.join(millis) }
+
+        fun text(): String = buffer.toString()
+    }
+
+    private companion object {
+        /** How long pipe EOFs may lag the child's exit before we report partial output. */
+        const val DRAIN_GRACE_MILLIS = 2_000L
     }
 }
 
