@@ -45,6 +45,56 @@ All three vendored files are pinned in `app/src/main/assets/native/checksums.txt
 (fail closed: unpinned/mismatched required binaries are refused, never exec'd), and the
 APK build does not depend on them otherwise — CI stays green either way.
 
+### The vendored proot's argument rules (verified from its own sources)
+
+Both rules below were first seen as device failures and then confirmed by reading
+termux/proot `v5.1.107.96`'s own `src/cli/cli.c` (`parse_config()`) and the
+generated `src/cli/proot.h` option table. `RuntimeTest` pins them, so a command
+line that violates either cannot be committed by accident.
+
+**1. Long options need `=`, short options take the value as the next argument.**
+The parser matches each argument against the table by prefix, then:
+
+- no-value option -> handled immediately;
+- `separator == arg[length]` -> the value is coalesced (`--rootfs=/path`);
+- otherwise, if the option's declared separator is not `' '` -> it prints
+  *"option '--rootfs' and its value must be separated by '='"* and aborts;
+- otherwise (`separator == ' '`) -> the **next** argument becomes the value.
+
+| separator `' '` (detached value OK) | separator `'='` (detached value is fatal) | no value |
+| --- | --- | --- |
+| `-r` `-b` `-m` `-q` `-w` `-v` `-k` `-i` `-R` `-S` | `--rootfs` `--bind` `--mount` `--qemu` `--pwd` `--cwd` `--verbose` `--kernel-release` `--change-id` | `-0` `--kill-on-exit` `--link2symlink` `--sysvipc` `--version` `-V` `-h` `--help` `-H` `-p` `-L` |
+
+So every command line this app builds uses `-r <rootfs>`, `-b <host:guest>`,
+`-w <dir>` and never a detached long option.
+
+**2. There is no `--` end-of-options marker.** The table has no `--` entry, so a
+bare `--` falls through to `note(tracee, ERROR, USER, "unknown option '%s'.")`
+and proot aborts - which is exactly what "Firefox setup" died on:
+
+```
+proot error: unknown option "--"
+```
+
+(The "fatal error in libproot.so" that follows is just this fork's error path for
+a usage failure.) Instead of a marker, `parse_config()` **stops at the first
+argument that does not begin with `-`**:
+
+```c
+        if (arg[0] != '-')
+            break; /* End of PRoot options. */
+```
+
+Consequences, both enforced in code:
+
+- the guest command follows the last option directly - no separator;
+- the guest command must therefore never begin with `-`. `ProotCommand.build()`
+  refuses such a command with a named reason rather than emitting a line proot
+  would misparse (e.g. a guest `-v 1` would be read as proot's own verbose
+  option and silently change what runs). Every caller passes an absolute path
+  (`/bin/bash`, `/usr/bin/apt-get`, `/opt/firefox-esr/firefox`) or a bare program
+  name (`box64`, `wine64`), which proot resolves through the guest `PATH`.
+
 ### How the vendored proot was built (exact recipe, reproduced once in a 1 GB sandbox)
 
 Toolchain: **Android NDK r27c**, `aarch64-linux-android28-clang` (minSdk 28), binaries

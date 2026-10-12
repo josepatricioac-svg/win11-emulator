@@ -2,6 +2,7 @@ package dev.win11we.shell.runtime
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.fail
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -338,12 +339,47 @@ class ProotCommandTest {
         val command = ProotCommand.build(proot, rootfs, prefix, guestCommand = listOf("true"))
         val guestStart = command.indexOf("true")
         val prootArgs = command.subList(1, guestStart)
-        listOf("--rootfs", "--bind", "--cwd").forEach { long ->
+        listOf("--rootfs", "--bind", "--cwd", "--pwd", "--mount", "--qemu").forEach { long ->
             assertFalse("$long must not be emitted as a detached pair", prootArgs.contains(long))
         }
         assertEquals(rootfs.absolutePath, prootArgs[prootArgs.indexOf("-r") + 1])
         assertEquals("/root", prootArgs[prootArgs.indexOf("-w") + 1])
         assertTrue(prootArgs.contains("-b"))
+    }
+
+    @Test
+    fun `no bare double-dash separator anywhere - this proot has no end-of-options marker`() {
+        // termux/proot v5.1.107.96's generated option table has no "--" entry, so it
+        // reaches note(ERROR, USER, "unknown option '%s'.") and proot aborts. Seen on a
+        // real device during Firefox setup as: proot error: unknown option "--".
+        // Its parse_config() simply stops at the first argument not starting with '-'.
+        val launch = ProotCommand.build(proot, rootfs, prefix, guestCommand = listOf("wine64", "cmd"))
+        val provision = RootfsProvisioner.command(proot, rootfs, File(tmp.root, "resolv.conf"))
+        RootfsProvisioner.SMOKE_STEPS.forEach { step ->
+            val smoke = RootfsProvisioner.smokeCommand(
+                proot, rootfs, File(tmp.root, "resolv.conf"), step.guestCommand,
+            )
+            assertFalse("smoke (${step.id}) must not carry '--': $smoke", smoke.contains("--"))
+            assertEquals(step.guestCommand, smoke.takeLast(step.guestCommand.size))
+        }
+        listOf(launch, provision).forEach { command ->
+            assertFalse("no '--' in $command", command.contains("--"))
+        }
+        // The guest command follows the last option directly.
+        assertEquals("/bin/bash", provision[provision.indexOf("-w") + 2])
+        assertEquals("-c", provision[provision.indexOf("-w") + 3])
+    }
+
+    @Test
+    fun `a guest command starting with a dash is refused, not sent to proot`() {
+        // With no '--' to stop option parsing, "-v" would be read as proot's own
+        // verbose option - silently changing what runs. Refuse loudly instead.
+        try {
+            ProotCommand.build(proot, rootfs, prefix, guestCommand = listOf("-v", "1"))
+            fail("a guest command beginning with '-' cannot be expressed")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message!!.contains("no '--' separator"))
+        }
     }
 
     @Test

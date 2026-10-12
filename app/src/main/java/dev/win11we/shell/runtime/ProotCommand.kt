@@ -29,12 +29,25 @@ object ProotCommand {
     val SYSTEM_BINDS = listOf("/dev", "/proc", "/sys")
 
     /*
-     * ARGUMENT FORM MATTERS. The vendored termux/proot fork refuses a long option whose
-     * value is a separate argument: `--rootfs /path` dies with "option '--rootfs' and its
-     * value must be separated by '='" (seen on a real device; it broke Provision and every
-     * launch). Short options take the value as the next argument, so this builder and
-     * RootfsProvisioner use -r / -b / -w. Never emit "--rootfs", "--bind" or "--cwd" as
-     * detached pairs; RuntimeTest pins this.
+     * ARGUMENT FORM MATTERS - two rules, both read out of the vendored fork's own
+     * sources (termux/proot v5.1.107.96: src/cli/cli.c parse_config() and the
+     * generated src/cli/proot.h option table) and both confirmed by a real device
+     * failure:
+     *
+     * 1. A long option whose value is a separate argument is refused: `--rootfs /path`
+     *    dies with "option '--rootfs' and its value must be separated by '='". In the
+     *    option table, `-r`/`-b`/`-m`/`-w`/`-q`/`-v`/`-k`/`-i`/`-R`/`-S` are declared
+     *    with `separator = ' '` (detached value OK) while `--rootfs`/`--bind`/`--mount`
+     *    /`--cwd`/`--pwd`/`--qemu`/`--verbose` are `separator = '='`. So this builder
+     *    and RootfsProvisioner use -r / -b / -w. Never emit a long option as a detached
+     *    pair; RuntimeTest pins it.
+     *
+     * 2. There is NO `--` end-of-options marker: the table has no such entry, so `--`
+     *    reaches `note(ERROR, USER, "unknown option '%s'.")` and proot aborts (this is
+     *    what "Firefox setup" died on: `proot error: unknown option "--"`). Parsing
+     *    stops at the first argument that does not begin with '-', so the guest command
+     *    simply follows the last option - and must therefore never begin with '-'.
+     *    [build] refuses such a command instead of producing a line proot cannot parse.
      */
     fun build(
         prootBinary: File,
@@ -51,6 +64,13 @@ object ProotCommand {
         systemBinds: List<String> = SYSTEM_BINDS,
     ): List<String> {
         require(guestCommand.isNotEmpty()) { "a guest command is required" }
+        // No `--` exists to terminate proot's option list, so a guest command that
+        // begins with '-' would be parsed as an (unknown) option. Callers must pass
+        // an absolute path or a bare program name; wrap anything else in a shell.
+        require(!guestCommand.first().startsWith("-")) {
+            "the guest command must not begin with '-' (this proot has no '--' separator): " +
+                guestCommand.first()
+        }
         val command = mutableListOf(prootBinary.absolutePath)
         command += "-r"
         command += rootfsDir.absolutePath

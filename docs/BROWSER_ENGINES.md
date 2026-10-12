@@ -92,7 +92,9 @@ Honest limits while gated (each named by the readiness message, nothing silent):
   (pinned package list, `--no-install-recommends`, full log in Terminal ▸ log); this
   step is unpinned-by-hash by design (distro-side dependency resolution, like every
   proot-distro tool) and needs network on the device. The command runs apt as proot's
-  fake root (`-0` — without it dpkg refuses outright) with `APT::Sandbox::User=root`
+  fake root (`-0` — without it dpkg refuses outright; and note this proot fork has
+  **no `--` end-of-options marker** — the guest command follows the last option
+  directly, see `docs/NATIVE_RUNTIME.md`) with `APT::Sandbox::User=root`
   (apt's `_apt` fetch user can write nowhere under fake-root ownership) and dpkg's
   `--force-unsafe-io`/`--force-confold`, under `PROOT_NO_SECCOMP=1`; `/etc/resolv.conf`
   is written into the rootfs as a real file **and** bind-mounted over (imported images

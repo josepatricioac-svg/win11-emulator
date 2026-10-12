@@ -368,9 +368,14 @@ class RootfsProvisionerTest {
         assertEquals("/lib/arm64/libproot.so", command.first())
         assertTrue(command.containsAll(listOf("-r", "/data/rootfs", "--link2symlink", "--kill-on-exit")))
         // Without -0 dpkg refuses ("requires superuser privilege") and apt cannot
-        // take its locks; it must come before the `--` separator.
+        // take its locks; it must come before the guest command. There is no `--`
+        // separator any more: termux/proot's option table has no such entry and it
+        // aborts with `unknown option "--"`, so the guest command follows the last
+        // option directly (its parser stops at the first non-'-' argument).
         assertTrue("-0 (fake root) is missing", command.contains("-0"))
-        assertTrue(command.indexOf("-0") < command.indexOf("--"))
+        assertFalse("this proot has no end-of-options marker", command.contains("--"))
+        assertTrue(command.indexOf("-0") < command.indexOf("/bin/bash"))
+        assertEquals("/bin/bash", command[command.indexOf("-w") + 2])
         assertTrue(command.contains("/proc:/proc"))
         assertTrue(command.contains("/sys:/sys"))
         assertTrue(command.contains("/dev:/dev"))

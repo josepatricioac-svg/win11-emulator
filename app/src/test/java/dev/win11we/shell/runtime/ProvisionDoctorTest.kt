@@ -232,12 +232,16 @@ class ProvisionDoctorTest {
         listOf("--rootfs", "--bind", "--cwd", "--rootfs=").forEach { long ->
             assertFalse("never emit '$long' - termux/proot refuses detached long option values", exec.contains(long))
         }
-        assertTrue(exec.containsAll(listOf("-r", "-0", "--link2symlink", "--kill-on-exit", "-b", "-w", "--")))
+        // And no end-of-options marker: this fork's option table has no "--" entry,
+        // so it aborts with `proot error: unknown option "--"` (seen on a device).
+        assertFalse("termux/proot has no '--' separator: $exec", exec.contains("--"))
+        assertTrue(exec.containsAll(listOf("-r", "-0", "--link2symlink", "--kill-on-exit", "-b", "-w")))
         assertEquals(rootfs.absolutePath, exec[exec.indexOf("-r") + 1])
         assertEquals("/root", exec[exec.indexOf("-w") + 1])
         assertTrue("the jail must see /proc, /sys and /dev", exec.containsAll(listOf("/proc:/proc", "/sys:/sys", "/dev:/dev")))
         assertTrue(exec.any { it.endsWith(":/etc/resolv.conf") })
-        assertEquals(listOf("/bin/true"), exec.subList(exec.indexOf("--") + 1, exec.size))
+        // The guest command follows the last option directly.
+        assertEquals(listOf("/bin/true"), exec.subList(exec.indexOf("-w") + 2, exec.size))
 
         val smoke = report.checks.first { it.id == "proot-smoke" }
         assertEquals(report.checks.joinToString { it.line() }, CheckState.PASS, smoke.state)
@@ -386,10 +390,12 @@ class ProvisionDoctorTest {
         RootfsProvisioner.ensureResolvConf(resolv)
         val proot = File(binaries.nativeLibraryDir, BinaryRole.PROOT.fileName)
         val apt = RootfsProvisioner.command(proot, rootfs, resolv)
+        val prefixEnd = apt.indexOf("-w") + 2 // everything up to and including "-w /root"
         RootfsProvisioner.SMOKE_STEPS.forEach { step ->
             val smoke = RootfsProvisioner.smokeCommand(proot, rootfs, resolv, step.guestCommand)
-            assertEquals("the smoke test must exercise the same jail", apt.subList(0, apt.indexOf("--")), smoke.subList(0, smoke.indexOf("--")))
-            assertEquals(step.guestCommand, smoke.subList(smoke.indexOf("--") + 1, smoke.size))
+            assertEquals("the smoke test must exercise the same jail",
+                apt.subList(0, prefixEnd), smoke.subList(0, prefixEnd))
+            assertEquals(step.guestCommand, smoke.subList(prefixEnd, smoke.size))
         }
     }
 

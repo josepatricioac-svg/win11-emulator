@@ -108,8 +108,21 @@ object RootfsProvisioner {
     /**
      * The proot prefix every in-jail command shares - provision AND the doctor's
      * smoke test - so the smoke really exercises the same argument form, binds
-     * and fake root that apt will. Short options only: the vendored termux/proot
-     * rejects a detached `--rootfs <path>` (RuntimeTest pins this).
+     * and fake root that apt will.
+     *
+     * TWO argument-form rules the vendored termux/proot imposes (both read out of
+     * its own `src/cli/cli.c` + generated `src/cli/proot.h` at tag v5.1.107.96,
+     * and both confirmed by a device failure):
+     *
+     * 1. Short options only for detached values. `-r`/`-b`/`-w` are declared with
+     *    `separator = ' '`, so the value may be the next argument; `--rootfs`,
+     *    `--bind`, `--cwd`, `--pwd` are declared with `separator = '='` and die
+     *    with "option '--rootfs' and its value must be separated by '='".
+     * 2. **There is no `--` end-of-options marker.** The parser's option table has
+     *    no such entry, so `--` falls through to `unknown option '--'` and proot
+     *    aborts. Parsing simply *stops* at the first argument that does not begin
+     *    with '-', which is why the guest command follows the last option directly
+     *    (and why it must never begin with '-'; [ProotCommand.build] guards that).
      *
      * Fake root (`-0` == `-i 0:0`). Without it dpkg refuses outright ("requested
      * operation requires superuser privilege") and apt cannot take its locks:
@@ -128,6 +141,7 @@ object RootfsProvisioner {
         "-b", "/dev:/dev",
         "-b", "${resolvConf.absolutePath}:/etc/resolv.conf",
         "-w", "/root",
+        // NO "--" here: termux/proot has no end-of-options marker (see above).
     )
 
     /** The exact proot command line: apt-get update && install && clean, as fake root. */
@@ -137,7 +151,9 @@ object RootfsProvisioner {
         resolvConf: File,
         packages: List<String> = BROWSER_PACKAGES,
     ): List<String> = prootPrefix(prootBinary, rootfsDir, resolvConf) + listOf(
-        "--",
+        // No "--": see prootPrefix's rule 2 - the guest command follows the last
+        // option directly, and "/bin/bash" does not start with '-' so the parser
+        // stops there.
         "/bin/bash", "-c",
         // dpkg --configure -a first: a provisioning run that was killed (Stop all,
         // process death, timeout) leaves /var/lib/dpkg/updates behind, and every
@@ -155,7 +171,7 @@ object RootfsProvisioner {
         rootfsDir: File,
         resolvConf: File,
         guestCommand: List<String>,
-    ): List<String> = prootPrefix(prootBinary, rootfsDir, resolvConf) + listOf("--") + guestCommand
+    ): List<String> = prootPrefix(prootBinary, rootfsDir, resolvConf) + guestCommand
 
     /**
      * The doctor's smoke steps: three commands that each prove one thing apt
