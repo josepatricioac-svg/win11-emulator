@@ -4,6 +4,7 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.Snapshot
 import dev.win11we.shell.ui.terminal.LineKind
 import dev.win11we.shell.runtime.PrepareStatus
 import dev.win11we.shell.ui.terminal.LogBuffer
@@ -56,6 +57,42 @@ class DiagnosticsState(
         check()
     }
 
+    /**
+     * Runs [work] on a guarded daemon worker. Every Diagnostics action execs
+     * something (proot, box64, wine64, a GTK first run that builds the font
+     * cache), and the chips call these from a click handler - i.e. the UI thread.
+     * Blocking there for the tens of seconds a self-test takes is an ANR, so the
+     * work moves off it: state writes go through `Snapshot.withMutableSnapshot`
+     * so Compose sees them from the worker (crash-safety rules 1 and 2), any
+     * Throwable becomes a log line instead of taking the process down, and the
+     * busy flag is set on the calling thread so the chip flips to "Testing..."
+     * immediately. [busy] is also what stops a second click starting a second run.
+     */
+    private fun startWorker(name: String, busy: (Boolean) -> Unit, work: () -> Unit) {
+        Snapshot.withMutableSnapshot { busy(true) }
+        Thread {
+            try {
+                Snapshot.withMutableSnapshot { work() }
+            } catch (error: Throwable) {
+                Snapshot.withMutableSnapshot {
+                    log.add(
+                        TerminalLine(
+                            LineKind.ERROR,
+                            "$name failed: ${error.javaClass.simpleName}: ${error.message}",
+                        ),
+                    )
+                }
+            } finally {
+                Snapshot.withMutableSnapshot { busy(false) }
+            }
+        }.apply {
+            this.name = "diagnostics-$name"
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+            start()
+        }
+    }
+
     /** Inventory + permission fix, without spawning a process. */
     fun check(): PrepareResult {
         val result = binaries.prepare()
@@ -64,8 +101,14 @@ class DiagnosticsState(
         return result
     }
 
-    /** Runs `box64 --version` and `proot --version`; green/red per row. */
-    fun runProbes(): List<ProbeResult> {
+    /** UI entry point: the probes run on a worker, so the chip never blocks. */
+    fun runProbes() {
+        if (running) return
+        startWorker("--version probes", { running = it }) { runProbesSync() }
+    }
+
+    /** Runs `box64 --version` and `proot --version`; green/red per row. Blocking. */
+    fun runProbesSync(): List<ProbeResult> {
         running = true
         val results = try {
             probe.runAll()
@@ -97,12 +140,21 @@ class DiagnosticsState(
         private set
 
     /**
-     * D1d: launches xeyes (core X11) and xclock (Xaw+Xft = the RENDER path)
-     * inside proot against the shell's own X server. PASS = the client stayed
-     * connected; failures carry the exit code plus the connection's protocol
-     * trace, so the missing request is named.
+     * D1d/D1e: probes the handshake (xdpyinfo/xwininfo), asks GTK3 to open the
+     * display (gtk-query-settings - the toolkit Firefox is built on), then
+     * launches xeyes (core X11) and xclock (Xaw+Xft = the RENDER path) inside
+     * proot against the shell's own X server. PASS for a survivor = it stayed
+     * connected; failures carry the exit code, the client's own output and the
+     * connection's protocol trace, so the missing request is named.
      */
-    fun runXSelfTest(): SelfTestReport {
+    /** UI entry point: the X self-test runs on a worker (it can take a minute). */
+    fun runXSelfTest() {
+        if (xSelfTestRunning) return
+        startWorker("x-self-test", { xSelfTestRunning = it }) { runXSelfTestSync() }
+    }
+
+    /** Blocking form; [runXSelfTest] is what the UI calls. */
+    fun runXSelfTestSync(): SelfTestReport {
         xSelfTestRunning = true
         val test = XSelfTest(
             binaries = binaries,
@@ -142,7 +194,14 @@ class DiagnosticsState(
      * real proot command line. Steps whose prerequisites are missing are skipped with
      * the reason named, so the screen never claims a green it did not earn.
      */
-    fun runSelfTest(): SelfTestReport {
+    /** UI entry point: the R4 self-test runs on a worker (wine64 can take minutes). */
+    fun runSelfTest() {
+        if (selfTestRunning) return
+        startWorker("self-test", { selfTestRunning = it }) { runSelfTestSync() }
+    }
+
+    /** Blocking form; [runSelfTest] is what the UI calls. */
+    fun runSelfTestSync(): SelfTestReport {
         selfTestRunning = true
         val selfTestRunner = SelfTestRunner(
             binaries = binaries,

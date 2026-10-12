@@ -389,25 +389,46 @@ CI `assembleDebug` + device check.
 
 ## How to look at it on a device
 
-**One-tap proof of contact: Diagnostics ▸ *Run X self-test*.** Four steps, all
-inside proot against the running server (clients come from `x11-utils`/`x11-apps`,
-which the Provision step installs):
+**One-tap proof of contact: Diagnostics ▸ *Run X self-test*.** Five steps, all
+inside proot against the running server (clients come from `x11-utils`,
+`x11-apps` and `libgtk-3-bin`, which the Provision step installs):
 
 1. `xdpyinfo -ext RENDER` - exits immediately; PASS requires a successful
    handshake **and** RENDER in the extension list.
 2. `xwininfo -root` - the root-window query a WM-shaped client makes first.
-3. `xeyes` - survives 6 s on core X11 only (window, expose, pointer).
-4. `xclock` - survives 6 s on Xaw+Xft, i.e. the RENDER glyph path.
+3. `gtk-query-settings` - **the step that decides whether Firefox can start.**
+   xeyes and xclock are core X11 and Xaw, so both can pass while GTK3 - the
+   toolkit Firefox is built on - still dies opening the display. This calls
+   `gtk_init()`, which opens a GDK display (XI2, the keymap, XSETTINGS, the font
+   stack) and aborts with GTK's own message when it cannot. PASS is exit 0. On
+   failure the row quotes GTK's `(Details: serial … error_code … request_code …
+   minor_code …)` line - the request code names exactly what to implement next -
+   and the connection's protocol trace rides along. It takes Xlib's `-display`
+   flag away (GTK parses `--display=`, and reads `DISPLAY` from the environment)
+   and gets its own 90 s timeout, because a first run builds the fontconfig
+   cache inside the rootfs.
+4. `xeyes` - survives 6 s on core X11 only (window, expose, pointer).
+5. `xclock` - survives 6 s on Xaw+Xft, i.e. the RENDER glyph path.
 
 For the survivors PASS means *stayed connected* (a healthy X client never exits
 by itself); any exit code is FAIL. Every failure carries the exit code, the
 client's last output lines and the server's `XProtocolTrace` summary for that
 connection, which names the exact extension/request the client died on. Read
-the pattern: probes red = socket/proot path broken; probes green + xeyes red =
-core protocol gap; xeyes green + xclock red = RENDER gap; all green = the
-handshake Firefox needs is there.
+the pattern: handshake probes red = socket/proot path broken; probes green +
+xeyes red = core protocol gap; xeyes green + xclock red = RENDER gap; all of
+those green + `gtk3-display` red = a GTK3/XI2/XKB gap, and GTK's own
+`request_code` in the row says which; **all five green = the handshake Firefox
+needs is there.**
 Prerequisites that are missing (server not bound - open Start ▸ X Desktop once;
-rootfs not extracted; `x11-apps` not installed) SKIP with the reason named.
+rootfs not extracted; `x11-apps`/`libgtk-3-bin` not installed) SKIP with the
+reason named, so a missing diagnostic never reads as a red run.
+
+The whole self-test runs on a guarded worker thread, not on the UI thread: the
+chips are click handlers, and five proot launches (one of which may spend a
+minute building a font cache) on the main thread is an ANR - the chip could not
+even repaint to "Testing..." while it blocked. The same is true of the
+`--version` probes and the R4 self-test. Any throwable becomes a shared-log line
+instead of taking the process down (crash-safety rules 1 and 2).
 
 Open **Start → X Desktop** (not pinned to the taskbar). The window starts the server on
 `:100` at its own pixel size and shows "Waiting for clients" until a guest connects.

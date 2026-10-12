@@ -219,7 +219,8 @@ class DiagnosticsSelfTestTest {
         )
 
         assertFalse(state.selfTestRunning)
-        val report = state.runSelfTest()
+        // The blocking form: the UI calls runSelfTest(), which hands this to a worker.
+        val report = state.runSelfTestSync()
         assertEquals(report, state.selfTest)
         assertEquals(3, state.selfTestSteps().size)
         val text = log.tail(20)
@@ -227,5 +228,55 @@ class DiagnosticsSelfTestTest {
         assertTrue("the failing command must be in the log", text.contains("failing command:"))
         assertTrue(text.contains("log excerpt:"))
         assertTrue(log.filter(LineKind.ERROR).isNotEmpty())
+    }
+
+    @Test
+    fun `the UI entry point hands the work to a worker instead of blocking the caller`() {
+        // Every Diagnostics action execs something and the chips call them from a
+        // click handler, i.e. the UI thread: blocking there for the tens of seconds
+        // a self-test takes is an ANR, so the work must move off it.
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val nativeDir = tmp.newFolder("async-lib")
+        val rootfs = tmp.newFolder("async-rootfs")
+        File(rootfs, "bin").mkdirs()
+        File(rootfs, "usr").mkdirs()
+        listOf(BinaryRole.PROOT, BinaryRole.PROOT_LOADER, BinaryRole.TALLOC).forEach { role ->
+            File(nativeDir, role.fileName).writeBytes(ByteArray(512) { 7 })
+        }
+        val pins = BinaryRole.entries
+            .filter { File(nativeDir, it.fileName).isFile }
+            .associate { it.fileName to NativeBinaries.sha256(File(nativeDir, it.fileName))!! }
+        val state = DiagnosticsState(
+            binaries = NativeBinaries(nativeDir, pins),
+            log = LogBuffer(),
+            rootfsDir = rootfs,
+            filesDir = tmp.root,
+            runner = object : ProcessRunner {
+                override fun run(
+                    command: List<String>,
+                    environment: Map<String, String>,
+                    workingDir: File?,
+                    timeoutMillis: Long,
+                ): RunOutcome {
+                    gate.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                    return RunOutcome(0, "name of display: :100\nRENDER\n", "")
+                }
+            },
+            xServerRunning = { true },
+        )
+
+        val startedAt = System.nanoTime()
+        state.runXSelfTest()
+        val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000L
+        assertTrue("the caller must not wait for proot (blocked ${elapsedMillis}ms)", elapsedMillis < 1_000L)
+        assertTrue("the busy flag flips on the calling thread, so the chip says Testing...", state.xSelfTestRunning)
+        // A second click must not start a second run.
+        state.runXSelfTest()
+
+        gate.countDown()
+        val deadline = System.currentTimeMillis() + 10_000L
+        while (state.xSelfTest == null && System.currentTimeMillis() < deadline) Thread.sleep(10L)
+        assertNotNull("the worker publishes the report", state.xSelfTest)
+        assertFalse(state.xSelfTestRunning)
     }
 }

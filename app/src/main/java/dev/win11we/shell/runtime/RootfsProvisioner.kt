@@ -46,6 +46,12 @@ object RootfsProvisioner {
         "libgl1",
         "x11-apps", // xeyes/xclock: the X self-test's proof-of-contact clients
         "x11-utils", // xdpyinfo: the self-test's fast handshake + extension probe
+        // gtk-query-settings: the self-test's GTK3 probe. xeyes/xclock are core X11
+        // and Xaw, so they can pass while GTK3 - the toolkit Firefox is built on -
+        // still dies opening the display. This one binary (a few hundred KB, and its
+        // only dependency is the libgtk-3-0 already listed) calls gtk_init() and
+        // prints GTK's own diagnosis when the server answers something it cannot use.
+        "libgtk-3-bin",
         "fontconfig",
         "fonts-dejavu-core",
         "fonts-liberation", // metric-compatible Arial/Times stand-ins

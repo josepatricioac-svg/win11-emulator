@@ -25,11 +25,17 @@ class XSelfTestTest {
     private class FakeRunner(private val responder: (List<String>) -> RunOutcome) : ProcessRunner {
         val commands = mutableListOf<List<String>>()
         val environments = mutableListOf<Map<String, String>>()
+        val timeouts = mutableListOf<Long>()
         override fun run(command: List<String>, environment: Map<String, String>, workingDir: File?, timeoutMillis: Long): RunOutcome {
             commands.add(command)
             environments.add(environment)
+            timeouts.add(timeoutMillis)
             return responder(command)
         }
+
+        /** The timeout a given guest program was run with. */
+        fun timeoutFor(fragment: String): Long? =
+            commands.indexOfFirst { it.any { part -> part.contains(fragment) } }.takeIf { it >= 0 }?.let { timeouts[it] }
     }
 
     private val timedOut = RunOutcome(null, "", "", "Timed out after 6000ms")
@@ -39,12 +45,14 @@ class XSelfTestTest {
         "",
     )
     private val xwininfoOk = RunOutcome(0, "xwininfo: Window id: 0x200000 (root window)", "")
+    private val gtkOk = RunOutcome(0, "gtk-theme-name: Adwaita\ngtk-icon-theme-name: Adwaita\n", "")
 
     /** Survivors stay alive (timeout = PASS); the probes answer immediately. */
     private fun healthyRunner() = FakeRunner { command ->
         when {
             command.any { it.contains("xdpyinfo") } -> xdpyinfoOk
             command.any { it.contains("xwininfo") } -> xwininfoOk
+            command.any { it.contains("gtk-query-settings") } -> gtkOk
             else -> timedOut
         }
     }
@@ -66,7 +74,7 @@ class XSelfTestTest {
         File(rootfs, "bin").mkdirs()
         File(rootfs, "usr/bin").mkdirs()
         if (withClients) {
-            listOf("xeyes", "xclock", "xdpyinfo", "xwininfo").forEach { name ->
+            listOf("xeyes", "xclock", "xdpyinfo", "xwininfo", "gtk-query-settings").forEach { name ->
                 File(rootfs, "usr/bin/$name").writeText("#!/bin/sh\n")
             }
         }
@@ -92,14 +100,18 @@ class XSelfTestTest {
     @Test
     fun `surviving until the timeout is PASS and carries the trace`() {
         val report = test(healthyRunner()).run()
-        assertEquals(4, report.steps.size)
-        assertEquals(listOf("xdpyinfo", "xwininfo", "xeyes", "xclock"), report.steps.map { it.id })
+        assertEquals(5, report.steps.size)
+        assertEquals(
+            listOf("xdpyinfo", "xwininfo", "gtk3-display", "xeyes", "xclock"),
+            report.steps.map { it.id },
+        )
         val probeStep = report.steps[0]
         assertEquals(probeStep.reason ?: "", StepVerdict.PASS, probeStep.verdict)
         assertTrue(probeStep.reason!!.contains("RENDER is advertised"))
         assertTrue("the trace must ride along", probeStep.output.contains("x11 trace: x11[client#1]"))
         assertEquals(StepVerdict.PASS, report.steps[1].verdict)
-        report.steps.drop(2).forEach { step ->
+        assertTrue(report.steps[2].reason!!.contains("GTK3 opened the display"))
+        report.steps.drop(3).forEach { step ->
             assertEquals(step.reason ?: "", StepVerdict.PASS, step.verdict)
             assertTrue(step.reason!!.contains("still connected"))
             assertTrue(step.output.contains("x11 trace: x11[client#1]"))
@@ -114,6 +126,7 @@ class XSelfTestTest {
                 command.any { it.contains("xdpyinfo") } ->
                     RunOutcome(0, "name of display:    :100\nnumber of extensions: 1\n    XTEST\n", "")
                 command.any { it.contains("xwininfo") } -> xwininfoOk
+                command.any { it.contains("gtk-query-settings") } -> gtkOk
                 else -> timedOut
             }
         }
@@ -122,7 +135,7 @@ class XSelfTestTest {
         assertTrue(report.steps[0].reason!!.contains("did not advertise RENDER"))
         // the other probe and the survivors still pass: the socket path itself works
         assertEquals(StepVerdict.PASS, report.steps[1].verdict)
-        assertEquals(StepVerdict.PASS, report.steps[2].verdict)
+        assertEquals(StepVerdict.PASS, report.steps[3].verdict)
 
         val hung = FakeRunner { RunOutcome(null, "", "", "Timed out after 10000ms") }
         val hungReport = test(hung, trace = null).run()
@@ -130,7 +143,7 @@ class XSelfTestTest {
         assertTrue(hungReport.steps[0].reason!!.contains("hung"))
         assertEquals(StepVerdict.FAIL, hungReport.steps[1].verdict)
         // a timeout is a PASS for the survivors but a FAIL for the probes
-        assertEquals(StepVerdict.PASS, hungReport.steps[2].verdict)
+        assertEquals(StepVerdict.PASS, hungReport.steps[3].verdict)
     }
 
     @Test
@@ -150,7 +163,9 @@ class XSelfTestTest {
         assertEquals(StepVerdict.PASS, cleanExit.steps[0].verdict)
         assertEquals(StepVerdict.FAIL, cleanExit.steps[1].verdict)
         assertTrue(cleanExit.steps[1].reason!!.contains("Window id"))
-        cleanExit.steps.drop(2).forEach { step ->
+        assertEquals("the GTK probe's verdict is the exit code alone",
+            StepVerdict.PASS, cleanExit.steps[2].verdict)
+        cleanExit.steps.drop(3).forEach { step ->
             assertEquals(StepVerdict.FAIL, step.verdict)
             assertTrue(step.reason!!.contains("exited immediately"))
         }
@@ -165,12 +180,15 @@ class XSelfTestTest {
         }
 
         val noClients = test(healthyRunner(), rootfsDir = rootfs(withClients = false)).run()
-        assertEquals(4, noClients.steps.size)
+        assertEquals(5, noClients.steps.size)
         noClients.steps.take(2).forEach { step ->
             assertEquals(StepVerdict.SKIPPED, step.verdict)
             assertTrue(step.reason!!.contains("x11-utils"))
         }
-        noClients.steps.drop(2).forEach { step ->
+        assertEquals("the GTK probe names its own package, not x11-utils",
+            StepVerdict.SKIPPED, noClients.steps[2].verdict)
+        assertTrue(noClients.steps[2].reason!!.contains("libgtk-3-bin"))
+        noClients.steps.drop(3).forEach { step ->
             assertEquals(StepVerdict.SKIPPED, step.verdict)
             assertTrue(step.reason!!.contains("x11-apps"))
         }
@@ -187,12 +205,18 @@ class XSelfTestTest {
         val selfTest = test(runner, binaries = binaries)
         val report = selfTest.run()
         assertEquals(StepVerdict.PASS, report.steps.first().verdict)
-        // The first two commands are the probes; xeyes is the third.
+        // The first three commands are the probes; xeyes is the fourth.
         assertTrue(runner.commands[0].any { it.contains("xdpyinfo") })
         assertTrue(runner.commands[0].containsAll(listOf("-ext", "RENDER")))
         assertTrue(runner.commands[1].any { it.contains("xwininfo") })
         assertTrue(runner.commands[1].contains("-root"))
-        val command = runner.commands[2]
+        // GTK parses --display=, not Xlib's -display, so the flag must be absent -
+        // DISPLAY travels in the environment instead.
+        val gtk = runner.commands[2]
+        assertTrue(gtk.any { it.endsWith("/usr/bin/gtk-query-settings") })
+        assertFalse("gtk-query-settings would refuse an Xlib flag: $gtk", gtk.contains("-display"))
+        assertEquals(":100", runner.environments[2]["DISPLAY"])
+        val command = runner.commands[3]
         assertEquals(File(binaries.nativeLibraryDir, BinaryRole.PROOT.fileName).absolutePath, command.first())
         assertTrue(command.contains("-r"))
         assertTrue(command.contains("--link2symlink"))
@@ -212,6 +236,79 @@ class XSelfTestTest {
             "clients must never be launched through wine",
             command.any { it.endsWith("/wine") || it.endsWith("/wine64") || it.contains("box64") },
         )
+    }
+
+    // --- the GTK3 probe: the one that decides whether Firefox can start ------
+
+    @Test
+    fun `the GTK3 probe gets its own longer timeout for the first-run font cache`() {
+        val runner = healthyRunner()
+        test(runner).run()
+        assertEquals("the handshake probes answer in seconds", 10_000L, runner.timeoutFor("xdpyinfo"))
+        assertEquals("the survivors get their 6s window", 6_000L, runner.timeoutFor("xeyes"))
+        assertEquals(
+            "GTK's first run builds the fontconfig cache inside the rootfs",
+            GTK_PROBE_MILLIS, runner.timeoutFor("gtk-query-settings"),
+        )
+    }
+
+    @Test
+    fun `a GTK3 failure quotes GTK's own diagnosis instead of a bare exit code`() {
+        val gtkDied = FakeRunner { command ->
+            when {
+                command.any { it.contains("xdpyinfo") } -> xdpyinfoOk
+                command.any { it.contains("xwininfo") } -> xwininfoOk
+                command.any { it.contains("gtk-query-settings") } -> RunOutcome(
+                    1,
+                    "",
+                    "The XInput2 extension is missing\n" +
+                        "X Window System error of type 128:\n" +
+                        "  (Details: serial 412 error_code 1 request_code 131 (XInputExtension) minor_code 43)\n",
+                )
+                else -> timedOut
+            }
+        }
+        val report = test(gtkDied, trace = "x11[client#3] 412 requests, 1 errors sent | unimplemented opcodes: XI2.ChangeHierarchy x1").run()
+        val gtk = report.steps.first { it.id == GTK_PROBE_ID }
+        assertEquals(StepVerdict.FAIL, gtk.verdict)
+        assertTrue(gtk.reason!!.contains("GTK3 could not open the display"))
+        assertTrue("the reason must tell the owner what to look for", gtk.reason!!.contains("names the exact X request"))
+        assertTrue("GTK's own text is the evidence", gtk.output.contains("request_code 131"))
+        assertTrue("and the server's trace rides along", gtk.output.contains("XI2.ChangeHierarchy"))
+        assertFalse("the toolkit probe failing must not read as all-green", report.allGreen)
+    }
+
+    @Test
+    fun `a hung GTK3 probe points at the font cache, not at a dead socket alone`() {
+        val hung = FakeRunner { RunOutcome(null, "", "", "Timed out after ${GTK_PROBE_MILLIS}ms") }
+        val report = test(hung, trace = null).run()
+        val gtk = report.steps.first { it.id == GTK_PROBE_ID }
+        assertEquals(StepVerdict.FAIL, gtk.verdict)
+        assertTrue(gtk.reason!!.contains("hung"))
+        assertTrue(gtk.reason!!.contains("fontconfig"))
+    }
+
+    @Test
+    fun `the GTK3 probe is skipped, not failed, when libgtk-3-bin is not installed`() {
+        val rootfs = rootfs()
+        File(rootfs, "usr/bin/gtk-query-settings").delete()
+        val report = test(healthyRunner(), rootfsDir = rootfs).run()
+        val gtk = report.steps.first { it.id == GTK_PROBE_ID }
+        assertEquals(StepVerdict.SKIPPED, gtk.verdict)
+        assertTrue(gtk.reason!!.contains("libgtk-3-bin"))
+        assertTrue("the skip must say how to fix it", gtk.reason!!.contains("Provision"))
+        // The other four steps are unaffected: a missing diagnostic is not a red run.
+        assertEquals(StepVerdict.PASS, report.steps.first { it.id == "xdpyinfo" }.verdict)
+        assertEquals(StepVerdict.PASS, report.steps.first { it.id == "xclock" }.verdict)
+    }
+
+    @Test
+    fun `provision installs the GTK3 probe's package alongside the browser stack`() {
+        assertTrue(
+            "the self-test's GTK3 probe comes from libgtk-3-bin, so Provision must install it",
+            RootfsProvisioner.BROWSER_PACKAGES.contains("libgtk-3-bin"),
+        )
+        assertTrue(RootfsProvisioner.BROWSER_PACKAGES.contains("libgtk-3-0"))
     }
 
     @Test

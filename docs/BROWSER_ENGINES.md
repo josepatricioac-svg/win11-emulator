@@ -99,9 +99,11 @@ Honest limits while gated (each named by the readiness message, nothing silent):
   may ship systemd-resolved's dangling symlink, which no bind can fix). The pinned
   ubuntu-base already points apt at `http://ports.ubuntu.com/ubuntu-ports` (correct for
   arm64, and plain http, so it works before `ca-certificates` exists), and
-  `apt-get update` runs first. The pinned list also installs `x11-apps` and
-  `x11-utils` (xeyes/xclock/xdpyinfo), which feed Diagnostics' one-tap **X
-  self-test** - proof of X11 contact before Firefox (see `docs/X_SERVER.md`). A failure reports the exit code and the last 30 apt
+  `apt-get update` runs first. The pinned list also installs `x11-apps`,
+  `x11-utils` (xeyes/xclock/xdpyinfo) and `libgtk-3-bin` (`gtk-query-settings`),
+  which feed Diagnostics' one-tap **X self-test** - proof of X11 contact before
+  Firefox, and proof that **GTK3 itself can open a display**, which is the
+  handshake Firefox actually depends on (see `docs/X_SERVER.md`). A failure reports the exit code and the last 30 apt
   output lines in the Provision card and the shared log — no more bare "apt-get failed".
   Before any of that runs, the **Provision doctor** ("Run doctor" chip on the card, and
   the automatic pre-flight inside Provision) checks every prerequisite and names the
