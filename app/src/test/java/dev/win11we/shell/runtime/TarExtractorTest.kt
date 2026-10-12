@@ -324,6 +324,7 @@ class RootfsProvisionerTest {
             return when {
                 guest.endsWith("/bin/true") -> RunOutcome(0, "", "")
                 guest.endsWith("/usr/bin/id") -> RunOutcome(0, "uid=0(root) gid=0(root) groups=0(root)", "")
+                guest.contains("command -v ldconfig") -> RunOutcome(0, "/sbin/ldconfig\n/sbin/start-stop-daemon", "")
                 guest.endsWith("--version") -> RunOutcome(0, "apt 2.4.13 (arm64)", "")
                 else -> aptOutcome
             }
@@ -450,12 +451,20 @@ class RootfsProvisionerTest {
         )
         assertTrue(result.message, result.success)
         assertEquals(1, runner.provisionCommands.size)
-        // Three smoke commands (true/id/apt-get --version) plus the apt pass.
-        assertEquals(4, runner.commands.size)
+        // Four smoke commands (true/id/apt-get --version/dpkg tools) plus the apt pass.
+        assertEquals(5, runner.commands.size)
         val env = runner.environments.last()
         assertTrue(env.containsKey("PROOT_LOADER"))
         assertEquals("1", env["PROOT_NO_SECCOMP"])
         assertEquals(File(tmp.root, "tmp").absolutePath, env["TMPDIR"])
+        // The vendored fork reads PROOT_TMP_DIR (not TMPDIR) and Android has no
+        // host /tmp, so without it every run warns "can't canonicalize /tmp/".
+        assertEquals(File(tmp.root, "tmp").absolutePath, env["PROOT_TMP_DIR"])
+        // dpkg aborts configuration unless ldconfig and start-stop-daemon (/sbin)
+        // are on the guest PATH; host paths like /system/bin are dead in the jail.
+        assertTrue(env["PATH"]!!.contains("/sbin"))
+        assertTrue(env["PATH"]!!.contains("/usr/sbin"))
+        assertFalse("no Android host paths in the guest environment", env["PATH"]!!.contains("/system/bin"))
         assertTrue(log.snapshot().any { it.text.contains("Setting up libgtk-3-0") })
         // The guest DNS file was written for the bind...
         val resolv = File(tmp.root, "tmp/resolv.conf")

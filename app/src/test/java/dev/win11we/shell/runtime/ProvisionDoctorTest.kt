@@ -383,6 +383,25 @@ class ProvisionDoctorTest {
     }
 
     @Test
+    fun `dpkg's required tools missing from the guest PATH is named before Provision wastes minutes`() {
+        // The real device failure: apt-get installs nothing because dpkg aborts with
+        // "error: 2 expected programs not found in PATH" - an environment bug that
+        // only surfaced as exit 100 minutes into a provision.
+        val runner = FakeProot(
+            failStep = "dpkg-tools",
+            failWith = RunOutcome(1, "", "command -v: ldconfig: not found"),
+        )
+        val report = doctor(shippedBinaries(), healthyRootfs(), tmp.root, includeNetwork = false, runner = runner)
+        val smoke = report.checks.first { it.id == "proot-smoke" }
+        assertEquals(CheckState.FAIL, smoke.state)
+        assertTrue(smoke.detail.contains("dpkg requires ldconfig and start-stop-daemon"))
+        assertTrue(smoke.detail.contains("/sbin"))
+        assertFalse(report.ok)
+        assertEquals("the four steps run in order and stop at the first failure",
+            RootfsProvisioner.SMOKE_STEPS.size, runner.commands.size)
+    }
+
+    @Test
     fun `the smoke command shares provision's proot prefix - same binds, same fake root`() {
         val binaries = shippedBinaries()
         val rootfs = healthyRootfs()
@@ -431,6 +450,7 @@ class ProvisionDoctorTest {
                 return when (step.id) {
                     "exec" -> RunOutcome(0, "", "")
                     "fake-root" -> RunOutcome(0, "uid=0(root) gid=0(root) groups=0(root)", "")
+                    "dpkg-tools" -> RunOutcome(0, "/sbin/ldconfig\n/sbin/start-stop-daemon", "")
                     else -> RunOutcome(0, "apt 2.4.13 (arm64)", "")
                 }
             }

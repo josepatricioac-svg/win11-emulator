@@ -37,7 +37,11 @@ object RootfsProvisioner {
     /** The Firefox ESR runtime set; apt resolves the transitive closure. */
     val BROWSER_PACKAGES = listOf(
         "libgtk-3-0", // GTK3 + gdk-pixbuf, pango, cairo, atk, the X11 libs...
-        "libdbus-glib-1-2-2", // Firefox's D-Bus bindings
+        // libdbus-glib-1-2 (NOT libdbus-glib-1-2-2: the "-N" suffix convention of
+        // libdbus-1-3 does not carry over - verified against the jammy arm64 index
+        // on 2026-10-12, where the suffixed name does not exist and one bad name
+        // made the whole apt-get install fail with exit 100).
+        "libdbus-glib-1-2", // Firefox's D-Bus bindings
         "libdbus-1-3",
         "libasound2", // audio backend (PulseAudio bridge arrives with P1)
         "libxt6", // X Toolkit, still used by Gecko
@@ -211,13 +215,41 @@ object RootfsProvisioner {
             expectOutput = "apt",
             explains = "apt-get itself does not run inside the jail, so Provision has nothing to call.",
         ),
+        // dpkg aborts configuration with "error: 2 expected programs not found in
+        // PATH" when these are unreachable - which is an environment bug (the
+        // guest PATH missing /sbin), not a rootfs bug, and it used to surface only
+        // minutes into a provision as exit 100.
+        SmokeStep(
+            id = "dpkg-tools",
+            label = "proot -> /bin/sh -c 'command -v ldconfig && command -v start-stop-daemon'",
+            guestCommand = listOf("/bin/sh", "-c", "command -v ldconfig && command -v start-stop-daemon"),
+            expectOutput = "ldconfig",
+            explains = "dpkg requires ldconfig and start-stop-daemon on the guest PATH (/sbin, /usr/sbin); " +
+                "the provision environment's PATH is wrong.",
+        ),
     )
 
-    /** Host-side environment; LD_LIBRARY_PATH carries the vendored libtalloc. */
+    /**
+     * The environment provision runs with; LD_LIBRARY_PATH carries the vendored
+     * libtalloc.
+     *
+     * Two device-proven details:
+     *
+     * - `PATH` is the GUEST root's PATH, not a host-flavoured one. dpkg refuses to
+     *   configure anything with "error: 2 expected programs not found in PATH"
+     *   unless `ldconfig` and `start-stop-daemon` (both in /sbin) are reachable -
+     *   seen on a real device as the second Provision failure after the package
+     *   list. `/system/bin` and friends are dead entries inside the jail.
+     * - `PROOT_TMP_DIR`, not `TMPDIR`, is what the vendored fork's temp module
+     *   reads (`src/path/temp.c`: `getenv("PROOT_TMP_DIR")` else `P_tmpdir`, i.e.
+     *   "/tmp"). Android has no host /tmp, so without it every run prints
+     *   "proot warning: can't canonicalize /tmp/" and the f2fs-probe warning.
+     *   TMPDIR is set as well for guests that honour it.
+     */
     fun environment(nativeLibraryDir: File, loaderPaths: Map<String, String>, tmpDir: File? = null): Map<String, String> =
         (
             mapOf(
-                "PATH" to "/system/bin:/vendor/bin:/usr/bin:/bin",
+                "PATH" to GUEST_PATH,
                 "HOME" to "/root",
                 "LANG" to "C.UTF-8",
                 "DEBIAN_FRONTEND" to "noninteractive",
@@ -226,8 +258,12 @@ object RootfsProvisioner {
                 // (plain ptrace: a bit slower, always correct).
                 "PROOT_NO_SECCOMP" to "1",
                 "LD_LIBRARY_PATH" to nativeLibraryDir.absolutePath,
-            ) + (tmpDir?.let { mapOf("TMPDIR" to it.absolutePath) } ?: emptyMap()) + loaderPaths
+            ) + (tmpDir?.let { mapOf("TMPDIR" to it.absolutePath, "PROOT_TMP_DIR" to it.absolutePath) } ?: emptyMap()) +
+                loaderPaths
             ).toSortedMap()
+
+    /** The guest root's PATH: dpkg needs /sbin and /usr/sbin in it (see [environment]). */
+    const val GUEST_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
     /**
      * Runs one provisioning pass. Called from a guarded worker thread (the

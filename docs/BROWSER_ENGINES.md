@@ -101,7 +101,10 @@ Honest limits while gated (each named by the readiness message, nothing silent):
   may ship systemd-resolved's dangling symlink, which no bind can fix). The pinned
   ubuntu-base already points apt at `http://ports.ubuntu.com/ubuntu-ports` (correct for
   arm64, and plain http, so it works before `ca-certificates` exists), and
-  `apt-get update` runs first. The pinned list also installs `x11-apps`,
+  `apt-get update` runs first. The pinned list is verified against the jammy arm64
+  index and pinned by a test: one wrong name (`libdbus-glib-1-2-2`, an analogy with
+  `libdbus-1-3` that does not exist - the real package is `libdbus-glib-1-2`) failed
+  the whole install with exit 100 on a real device. The pinned list also installs `x11-apps`,
   `x11-utils` (xeyes/xclock/xdpyinfo) and `libgtk-3-bin` (`gtk-query-settings`),
   which feed Diagnostics' one-tap **X self-test** - proof of X11 contact before
   Firefox, and proof that **GTK3 itself can open a display**, which is the
@@ -116,6 +119,15 @@ Honest limits while gated (each named by the readiness message, nothing silent):
   free, writable host TMPDIR — plus a non-blocking https probe of ports.ubuntu.com (host
   TLS and the guest's http path can disagree, so only apt's own output decides the
   in-jail route).
+  Two environment facts are device-proven and pinned by tests: the guest `PATH` must be
+  the root's (`/usr/local/sbin:…:/sbin:/bin`), because dpkg aborts configuration with
+  *"error: 2 expected programs not found in PATH"* unless `ldconfig` and
+  `start-stop-daemon` (both in `/sbin`) are reachable; and the vendored fork's temp module
+  reads **`PROOT_TMP_DIR`**, not `TMPDIR` (`src/path/temp.c`), falling back to a host
+  `/tmp` Android does not have - hence the "can't canonicalize /tmp/" warnings until it
+  is set. The doctor's smoke test gained a fourth step for exactly this class
+  (`command -v ldconfig && command -v start-stop-daemon` inside the jail), so a broken
+  guest PATH is named in seconds instead of as an exit-100 apt failure minutes later.
   The doctor's last row is not a file check: it **really execs proot** with three trivial
   guest commands in the exact jail Provision uses (`-0`, the `/proc`+`/sys`+`/dev`+
   resolv.conf binds, short options, `PROOT_NO_SECCOMP=1`) - `/bin/true` (can proot enter

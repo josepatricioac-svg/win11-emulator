@@ -100,13 +100,19 @@ class XSelfTest(
     fun environment(): Map<String, String> =
         (
             mapOf(
-                "PATH" to "/usr/bin:/bin:/system/bin:/vendor/bin",
+                // The guest root's PATH (same reason as provision: dpkg and the
+                // X clients live under /usr/bin and /sbin, and host paths are dead
+                // entries inside the jail), plus PROOT_TMP_DIR - the variable the
+                // vendored fork actually reads for its temp directory; without it
+                // every run warns "can't canonicalize /tmp/" on Android.
+                "PATH" to RootfsProvisioner.GUEST_PATH,
                 "HOME" to "/root",
                 "LANG" to "C.UTF-8",
                 "DISPLAY" to RuntimePaths.X_DISPLAY,
                 "PROOT_NO_SECCOMP" to "1",
                 "LD_LIBRARY_PATH" to binaries.nativeLibraryDir.absolutePath,
                 "TMPDIR" to File(filesDir, "tmp").absolutePath,
+                "PROOT_TMP_DIR" to File(filesDir, "tmp").absolutePath,
             ) + binaries.loaderPaths()
             ).toSortedMap()
 

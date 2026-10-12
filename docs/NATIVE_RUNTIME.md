@@ -87,6 +87,11 @@ argument that does not begin with `-`**:
 
 Consequences, both enforced in code:
 
+- the environment variable for proot's own temp directory is **`PROOT_TMP_DIR`**,
+  not `TMPDIR`: `src/path/temp.c` does `getenv("PROOT_TMP_DIR")` and falls back to
+  `P_tmpdir` ("/tmp"), which does not exist on Android - every run then prints
+  `proot warning: can't canonicalize /tmp/` and the f2fs-probe warning. Both launch
+  environments set it to the shell's `files/tmp`;
 - the guest command follows the last option directly - no separator;
 - the guest command must therefore never begin with `-`. `ProotCommand.build()`
   refuses such a command with a named reason rather than emitting a line proot

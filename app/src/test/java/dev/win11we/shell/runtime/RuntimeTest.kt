@@ -371,6 +371,36 @@ class ProotCommandTest {
     }
 
     @Test
+    fun `the pinned package list is exactly the names verified against jammy arm64`() {
+        // One wrong name fails the whole apt-get install (exit 100, "Unable to locate
+        // package"), which is what libdbus-glib-1-2-2 did on a real device. Every name
+        // here was checked against the jammy main+universe binary-arm64 Packages index
+        // on 2026-10-12; changing the list means re-checking and editing this pin.
+        assertEquals(
+            listOf(
+                "libgtk-3-0",
+                "libdbus-glib-1-2",
+                "libdbus-1-3",
+                "libasound2",
+                "libxt6",
+                "libx11-xcb1",
+                "libegl1",
+                "libgl1",
+                "x11-apps",
+                "x11-utils",
+                "libgtk-3-bin",
+                "fontconfig",
+                "fonts-dejavu-core",
+                "fonts-liberation",
+                "ca-certificates",
+                "dbus",
+                "dbus-x11",
+            ),
+            RootfsProvisioner.BROWSER_PACKAGES,
+        )
+    }
+
+    @Test
     fun `a guest command starting with a dash is refused, not sent to proot`() {
         // With no '--' to stop option parsing, "-v" would be read as proot's own
         // verbose option - silently changing what runs. Refuse loudly instead.

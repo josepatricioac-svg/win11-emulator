@@ -219,11 +219,16 @@ publishers (Ubuntu `SHA256SUMS`, the Ubuntu archive `Packages` index, Mozilla
 inside proot (`RootfsProvisioner`, package list pinned in code, every line logged). Its
 **Run doctor** chip first checks the host-side prerequisites — pinned proot set,
 extracted rootfs, rootfs really is arm64, `ports.ubuntu.com` sources, resolv.conf, free
-space, writable TMPDIR, archive reachability — and then **really execs proot** with three
+space, writable TMPDIR, archive reachability — and then **really execs proot** with four
 trivial guest commands in the exact jail Provision uses (`/bin/true`, `id` = does `-0`
-give the guest uid 0, `apt-get --version`), so an argument-form, ptrace/seccomp or
-fake-root problem is named in seconds, with the exact command line to rerun, instead of
-letting apt die with a bare "apt-get failed" minutes later.
+give the guest uid 0, `apt-get --version`, and `command -v ldconfig &&
+start-stop-daemon` = are dpkg's required programs on the guest PATH), so an
+argument-form, ptrace/seccomp, fake-root or guest-PATH problem is named in seconds, with
+the exact command line to rerun, instead of letting apt die with a bare "apt-get failed"
+minutes later. Two of those were found this way on a real device: this fork has no `--`
+end-of-options marker at all (it aborts with `unknown option "--"`), and dpkg refuses to
+configure anything unless `/sbin` is in the guest PATH; the provision environment also
+sets `PROOT_TMP_DIR`, which is what the fork's temp module reads instead of `TMPDIR`.
 
 ## Container runtime (R2)
 
@@ -349,7 +354,7 @@ open decisions.
 
 ## UI tests
 
-`./gradlew testDebugUnitTest` runs the 554 pure-JVM tests (window geometry, snap zones,
+`./gradlew testDebugUnitTest` runs the 558 pure-JVM tests (window geometry, snap zones,
 Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing, argv
 splitting, the log buffer, the built-in commands, the terminal transcript/history, the
 container codec/store, guest<->host path mapping, the Wine environment builder, the
@@ -481,9 +486,9 @@ app/src/main/java/dev/win11we/shell/
   runtime/SelfTestRunner.kt    the R4 self-test: 3 steps, verdicts, reasons, report/log excerpt
 ```
 
-Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 554 tests, measured by
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 558 tests, measured by
 annotation count; the pure-JVM subset is additionally compiled and executed off-device
-against JDK 17 + Kotlin 2.1.10 with minimal Android stubs, so 416 of them are run for
+against JDK 17 + Kotlin 2.1.10 with minimal Android stubs, so 420 of them are run for
 real outside Gradle too): snap zones,
 maximize/restore, halves snapping, edge/corner resize with minimums, on-screen clamping,
 z-order/focus, taskbar toggle open-minimize-restore, Explorer listing/filtering/sorting,
