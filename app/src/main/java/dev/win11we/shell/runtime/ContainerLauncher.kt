@@ -92,9 +92,34 @@ class ContainerLauncher(
         }
         val prefix = File(request.container.prefixPath)
         if (!prefix.isDirectory) {
+            // Name the whole chain, because "prefix missing" reads like a bug the
+            // user can fix by retrying. It is not: a prefix is populated by running
+            // wineboot inside the rootfs, wineboot needs a Wine payload, and no
+            // payload is provisioned yet (Provision installs the browser's GTK3
+            // stack, not Wine). That is Goal 2 step 2 / R4 - see docs/NATIVE_RUNTIME.md.
+            val wine = WinePayload.launcherIn(request.rootfsDir)
+            val cause = if (wine == null) {
+                "the rootfs has no Wine payload (${WinePayload.CANDIDATES.first()} absent), " +
+                    "so wineboot could not have created one"
+            } else {
+                "Wine exists at ${wine.absolutePath} but wineboot has never been run for this container"
+            }
             return LaunchResult.fail(
                 LaunchFailure.PREFIX_MISSING,
-                "Wine prefix not found at ${prefix.absolutePath} - it is created on first launch (R3/R4).",
+                "Wine prefix not found at ${prefix.absolutePath}: $cause. A prefix is built by " +
+                    "wineboot inside the rootfs (Goal 2 step 2 / R4) - it is NOT created on first " +
+                    "launch, and nothing creates it yet. Diagnostics ▸ Run self-test shows exactly " +
+                    "where the chain stops (box64 --version, wine64 --version, wine64 cmd).",
+            )
+        }
+        if (!WinePayload.prefixLooksInitialised(prefix)) {
+            // An empty directory is not a prefix: wine would treat it as a fresh
+            // one and try to initialise it mid-launch, half-way through a ptrace
+            // session. Refuse first, with the reason.
+            return LaunchResult.fail(
+                LaunchFailure.PREFIX_MISSING,
+                "Wine prefix at ${prefix.absolutePath} exists but was never initialised " +
+                    "(no system.reg/user.reg/drive_c) - wineboot has not run for it (Goal 2 step 2 / R4).",
             )
         }
         return LaunchResult.ok("Validated")

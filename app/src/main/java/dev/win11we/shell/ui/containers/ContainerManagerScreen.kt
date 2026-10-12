@@ -176,7 +176,8 @@ private fun Header(state: ContainerManagerState) {
             Text("Containers", color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
             Text(
                 text = if (state.runtime.ready) {
-                    "Runtime ready - Start launches proot -> box64 -> wine in a foreground service."
+                    "Runtime binaries ready - Start still validates each container: a Wine prefix " +
+                        "needs wineboot + a Wine payload (Goal 2 step 2), which nothing builds yet."
                 } else {
                     "Runtime not ready: " + state.runtimeStatus.ifBlank {
                         "no libbox64.so / libproot.so in this APK (R1), rootfs in R3. See Diagnostics."

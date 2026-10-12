@@ -70,6 +70,12 @@ class ContainerLauncherTest {
         nativeDir = tmp.newFolder("lib")
         rootfs = tmp.newFolder("rootfs")
         prefix = tmp.newFolder("prefix")
+        // An initialised prefix: wineboot's three markers. Without them the
+        // launcher refuses with PREFIX_MISSING before any of these tests' subject
+        // (command shape, status mapping, stop/restart) is even reached.
+        File(prefix, "system.reg").writeText("REGEDIT4\n")
+        File(prefix, "user.reg").writeText("REGEDIT4\n")
+        File(prefix, "drive_c").mkdirs()
         listOf(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER, BinaryRole.TALLOC).forEach { role ->
             File(nativeDir, role.fileName).writeBytes(ByteArray(2048) { 0x41 })
         }
@@ -130,6 +136,74 @@ class ContainerLauncherTest {
         val broken = container.copy(prefixPath = File(tmp.root, "no-prefix").absolutePath)
         val result = launcher().start(request().copy(container = broken))
         assertEquals(LaunchFailure.PREFIX_MISSING, result.failure)
+    }
+
+    @Test
+    fun `a missing prefix names the whole chain instead of promising a first-launch fix`() {
+        // The old message said the prefix "is created on first launch" - nothing
+        // creates it, so the user retried forever. The refusal must name every link:
+        // no Wine payload -> no wineboot -> no prefix -> Goal 2 step 2.
+        val broken = container.copy(prefixPath = File(tmp.root, "no-prefix").absolutePath)
+        val result = launcher().start(request().copy(container = broken))
+        assertTrue(result.message, result.message.contains("wineboot"))
+        assertTrue(result.message, result.message.contains("Goal 2 step 2"))
+        assertTrue(result.message, result.message.contains("no Wine payload"))
+        assertTrue("must negate the old lie, not repeat it",
+            result.message.contains("NOT created on first launch"))
+        assertTrue(result.message, result.message.contains(WinePayload.CANDIDATES.first()))
+        assertTrue("and point at the self-test that shows where the chain stops",
+            result.message.contains("Run self-test"))
+    }
+
+    @Test
+    fun `with Wine present but no wineboot run, the refusal says exactly that`() {
+        File(rootfs, "usr/bin").mkdirs()
+        File(rootfs, "usr/bin/wine64").writeText("#!/bin/sh\n")
+        val broken = container.copy(prefixPath = File(tmp.root, "no-prefix-2").absolutePath)
+        val result = launcher().start(request().copy(container = broken))
+        assertEquals(LaunchFailure.PREFIX_MISSING, result.failure)
+        assertTrue(result.message, result.message.contains("wineboot has never been run"))
+        assertTrue(result.message, result.message.contains("usr/bin/wine64"))
+    }
+
+    @Test
+    fun `an empty prefix directory is not a prefix - wineboot never initialised it`() {
+        val empty = tmp.newFolder("empty-prefix")
+        val result = launcher().start(request().copy(container = container.copy(prefixPath = empty.absolutePath)))
+        assertEquals(LaunchFailure.PREFIX_MISSING, result.failure)
+        assertTrue(result.message, result.message.contains("never initialised"))
+        assertTrue(result.message, result.message.contains("system.reg"))
+    }
+
+    @Test
+    fun `an initialised prefix passes validation and reaches the spawn stage`() {
+        val prefixDir = tmp.newFolder("real-prefix")
+        File(prefixDir, "system.reg").writeText("REGEDIT4\n")
+        File(prefixDir, "user.reg").writeText("REGEDIT4\n")
+        File(prefixDir, "drive_c").mkdirs()
+        val fake = FakeLauncher()
+        val result = launcher(fake).start(request().copy(container = container.copy(prefixPath = prefixDir.absolutePath)))
+        assertFalse("validation must not be what refuses now", result.failure == LaunchFailure.PREFIX_MISSING)
+        assertTrue("and the guest command really reaches the spawn stage", fake.commands.isNotEmpty())
+    }
+
+    @Test
+    fun `WinePayload reports provisioning from the rootfs alone`() {
+        val bare = tmp.newFolder("bare-rootfs")
+        assertFalse(WinePayload.isProvisioned(bare))
+        assertNull(WinePayload.launcherIn(bare))
+        File(bare, "usr/lib/wine").mkdirs()
+        File(bare, "usr/lib/wine/wine64").writeText("elf")
+        assertTrue(WinePayload.isProvisioned(bare))
+        assertEquals(File(bare, "usr/lib/wine/wine64"), WinePayload.launcherIn(bare))
+        // A directory alone is not a payload, and not a prefix either.
+        val prefixDir = tmp.newFolder("dir-only-prefix")
+        assertFalse(WinePayload.prefixLooksInitialised(prefixDir))
+        File(prefixDir, "system.reg").writeText("x")
+        assertFalse(WinePayload.prefixLooksInitialised(prefixDir))
+        File(prefixDir, "user.reg").writeText("x")
+        File(prefixDir, "drive_c").mkdirs()
+        assertTrue(WinePayload.prefixLooksInitialised(prefixDir))
     }
 
     @Test

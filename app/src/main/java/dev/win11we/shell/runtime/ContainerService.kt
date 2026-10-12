@@ -59,7 +59,13 @@ object RuntimePaths {
     fun rootfsExtracted(rootfsDir: File): Boolean =
         rootfsDir.isDirectory && File(rootfsDir, "bin").isDirectory && File(rootfsDir, "usr").isDirectory
 
-    /** R3/R4 create the prefix with `wineboot` before the first real launch. */
+    /**
+     * mkdirs only - it makes a directory, NOT a Wine prefix. The only caller is the
+     * Firefox session's profile directory (which is all it needs). A real prefix is
+     * populated by `wineboot` inside the rootfs (Goal 2 step 2 / R4); until that
+     * exists, [ContainerLauncher.validate] refuses wine containers with that reason
+     * instead of letting `mkdirs` imply a prefix was created.
+     */
     fun ensurePrefix(prefixPath: String): File = File(prefixPath).also { it.mkdirs() }
 }
 

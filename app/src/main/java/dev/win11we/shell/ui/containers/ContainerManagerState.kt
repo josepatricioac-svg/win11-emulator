@@ -38,7 +38,8 @@ class ContainerManagerState(
     /** One-line runtime verdict, straight from the launcher's own validation. */
     val runtimeStatus: String
         get() = if (runtime.ready) {
-            "Runtime ready - Start launches proot -> box64 -> wine as a foreground service."
+            "Runtime binaries ready - Start still validates each container: a Wine prefix " +
+                "needs wineboot + a Wine payload (Goal 2 step 2), which nothing builds yet."
         } else {
             containers.firstOrNull()?.let { runtime.logExcerpt(it, 1) } ?: ""
         }
@@ -52,7 +53,9 @@ class ContainerManagerState(
         message = if (created == null) {
             "Could not create \"$name\" - the name is empty or already used."
         } else {
-            "Created \"${created.name}\". Its Wine prefix is built on first start (R2/R3)."
+            "Created \"${created.name}\". Its Wine prefix is NOT built on first start - a prefix " +
+                "needs wineboot inside the rootfs plus a Wine payload (Goal 2 step 2); Start " +
+                "refuses with that reason until then."
         }
         if (created != null) expandedId = created.id
         return created != null

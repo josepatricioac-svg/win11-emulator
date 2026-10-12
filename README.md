@@ -138,8 +138,8 @@ fails if that ever changes silently:
 
 | Thing | State today | Unlocked by |
 | --- | --- | --- |
-| Container Manager (Wine) | Real UI, real persisted containers; Start now validates the *per-guest* binary set — Wine still refuses with "missing libbox64.so" until the CI build is vendored, and the wine payload/prefix provisioning (R4/P2) is not built | box64 + wine provisioning |
-| Wine prefix, `wineboot`, installing apps | Not created | box64 + R2 + R3 |
+| Container Manager (Wine) | Real UI, real persisted containers; `libbox64.so` is now vendored + pinned, so Start validates binaries, rootfs and then the prefix — and refuses with the whole chain named (no Wine payload → no `wineboot` → no prefix) instead of the old "created on first launch" promise nothing kept | Goal 2 step 2: Wine payload decision + `wineboot` |
+| Wine prefix, `wineboot`, installing apps | Not created, and nothing pretends otherwise: `ContainerLauncher.validate` refuses with `PREFIX_MISSING`, names `wineboot`, quotes whether the rootfs even has a Wine payload (`WinePayload`), and treats an empty prefix directory as un-initialised rather than launching into it | Goal 2 step 2 (R4) |
 | Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Firefox ESR is **fully plumbed**: pinned R3 artifact, readiness checks that name the missing piece, proot launch plan through R2's launcher on the shell's X server, a private D-Bus session so a second URL reaches the *running* instance, and a Provision **doctor** that names the first blocking prerequisite before apt ever runs. Until the runtime exists, selecting it falls back to an Android browser; Edge/Chromium stay listed with their gating steps | **R1 binaries** + R3 rootfs/GUI libs (Firefox ESR), **R1/R2/R3 + D2** (Edge) |
 | Terminal `wine`/`box64`/`proot`/`cmd` | Answer "not available yet" and name the step | R1 + R2 |
 | Task Manager container rows | Absent (no processes to show) | R2 |
@@ -298,6 +298,19 @@ tuning, with the container's `extraEnv` applied last so a user can override anyt
 `GuestPaths` converts host↔Windows paths (longest mapping wins) for the P1 "open with"
 plumbing.
 
+**What a container cannot do yet, stated plainly:** Start validates, in order, the
+pinned binary set (proot + box64 both vendored now), the extracted rootfs, and the
+prefix — and the prefix is where the chain stops. A prefix is *populated* by running
+`wineboot` inside the rootfs; `wineboot` needs a Wine payload; no payload is
+provisioned (the browser's Provision list installs GTK3/X11/fonts, not Wine). The
+refusal therefore names all four links, quotes the first missing Wine path it looked
+for, and points at Diagnostics ▸ Run self-test, whose three R4 rows
+(`box64 --version`, `wine64 --version`, `wine64 cmd /c echo hello`) show exactly how
+far the chain gets — the first is green on device now, the other two wait on Goal 2
+step 2. An empty prefix directory is refused as "never initialised" rather than being
+handed to wine mid-launch. `RuntimePaths.ensurePrefix` only mkdirs (the Firefox
+profile is its one caller) and its KDoc says so.
+
 Start/Stop/Restart go through a `ContainerRuntime` interface; today's
 `NotInstalledRuntime` answers with exactly which step is missing (R1 binaries, R2
 service, R3 rootfs) instead of failing silently, and the container is marked
@@ -354,7 +367,7 @@ open decisions.
 
 ## UI tests
 
-`./gradlew testDebugUnitTest` runs the 558 pure-JVM tests (window geometry, snap zones,
+`./gradlew testDebugUnitTest` runs the 563 pure-JVM tests (window geometry, snap zones,
 Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing, argv
 splitting, the log buffer, the built-in commands, the terminal transcript/history, the
 container codec/store, guest<->host path mapping, the Wine environment builder, the
@@ -486,9 +499,9 @@ app/src/main/java/dev/win11we/shell/
   runtime/SelfTestRunner.kt    the R4 self-test: 3 steps, verdicts, reasons, report/log excerpt
 ```
 
-Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 558 tests, measured by
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 563 tests, measured by
 annotation count; the pure-JVM subset is additionally compiled and executed off-device
-against JDK 17 + Kotlin 2.1.10 with minimal Android stubs, so 420 of them are run for
+against JDK 17 + Kotlin 2.1.10 with minimal Android stubs, so 425 of them are run for
 real outside Gradle too): snap zones,
 maximize/restore, halves snapping, edge/corner resize with minimums, on-screen clamping,
 z-order/focus, taskbar toggle open-minimize-restore, Explorer listing/filtering/sorting,
