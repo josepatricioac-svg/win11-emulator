@@ -89,11 +89,31 @@ jobs:
           # README documents exactly this file OOM-killing a small sandbox.
           # Two parallel jobs peak well inside the runner's 16 GB.
           make -j2
+          # Stage markers on purpose: run #1 failed *after* a successful build and
+          # its log said nothing but "exit code 74", so nobody could tell which of
+          # the three post-build commands died. Each stage now announces itself.
+          echo "--- stage: built binary"
+          ls -l box64
+          echo "--- stage: strip + rename to libbox64.so"
           # The APK ships it as libbox64.so (AGP only packages lib*.so): rename
           # and strip so the artifact is drop-in for jniLibs/arm64-v8a and small
           # enough to commit (like every other vendored binary here).
           "$TC/bin/llvm-strip" --strip-all -o libbox64.so box64
-          "$TC/bin/llvm-readelf" -h libbox64.so | grep -q AArch64 # architecture guard
+          test -s libbox64.so || { echo "llvm-strip produced no output file"; exit 1; }
+          ls -l libbox64.so
+          echo "--- stage: architecture guard"
+          # WITHOUT a pipe into `grep -q` - that is exactly what failed run #1
+          # (exit code 74, no output, right after "[100%] Built target box64"):
+          # `grep -q` exits at its first match and closes the pipe, llvm-readelf
+          # then dies writing the rest of the header, and LLVM tools exit 74
+          # (EX_IOERR) on a failed write, which `pipefail` reports as the step's
+          # failure. It is a race, so the same line can also pass by luck.
+          # Capture first, print it (a real mismatch is then diagnosable), grep.
+          "$TC/bin/llvm-readelf" -h libbox64.so > libbox64-header.txt
+          cat libbox64-header.txt
+          grep -q AArch64 libbox64-header.txt || {
+            echo "libbox64.so is not an AArch64 binary - wrong ABI in the toolchain file"; exit 1; }
+          echo "--- stage: sha256"
           sha256sum libbox64.so | tee SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
@@ -249,7 +269,12 @@ jobs:
           if grep -q 'libtalloc.so\.2' /tmp/proot-dynamic.txt; then
             echo "DT_NEEDED still references libtalloc.so.2 - the SONAME respell is wrong"; exit 1
           fi
-          "$TOOLCHAIN/bin/llvm-readelf" -h src/proot | grep -q AArch64
+          # Same rule as the box64 job: never pipe an LLVM tool into `grep -q`.
+          # grep closes the pipe at its first match, llvm-readelf then exits 74
+          # (EX_IOERR) and pipefail fails the step with no output at all.
+          "$TOOLCHAIN/bin/llvm-readelf" -h src/proot > /tmp/proot-header.txt
+          cat /tmp/proot-header.txt
+          grep -q AArch64 /tmp/proot-header.txt
           # Name the outputs the way jniLibs expects them, for inspection only.
           mkdir -p "$GITHUB_WORKSPACE/proot-out"
           cp src/proot "$GITHUB_WORKSPACE/proot-out/libproot.so"

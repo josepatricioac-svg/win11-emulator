@@ -136,6 +136,31 @@ What the run does:
    GPL-2.0, so re-vendoring it stays an owner decision — this job exists so the
    corresponding-source offer remains runnable on demand.
 
+**First dispatch run (2026-10-12, run #1): the recipe is proven, the guard was not.**
+box64 `v0.4.4` configured, compiled and linked cleanly on `ubuntu-latest` with
+**NDK r30** (`30.0.16248370`, Clang 21.0.0), `-DANDROID=ON -DARM_DYNAREC=ON
+-DANDROID_PLATFORM=android-28 -DCMAKE_BUILD_TYPE=RelWithDebInfo` and `make -j2` —
+`[100%] Built target box64` in about two minutes, no OOM, which is the whole reason
+this job exists. The step then failed with **exit code 74 and no output at all**, on
+the line after the build:
+
+```bash
+"$TC/bin/llvm-readelf" -h libbox64.so | grep -q AArch64   # <- exit 74
+```
+
+`grep -q` exits at its first match and closes the pipe; `llvm-readelf` then dies
+writing the rest of the header, and LLVM tools exit **74 (EX_IOERR)** on a failed
+write, which `set -o pipefail` reports as the step's failure. It is a *race* — the
+same pattern in the proot job passed on the same run purely because readelf finished
+writing first — so both jobs now capture the header to a file, `cat` it into the log
+(so a real architecture mismatch is diagnosable), and only then `grep`. Rule for every
+CI script here: **never pipe an LLVM/binutils tool into `grep -q` under `pipefail`.**
+
+Reading that log needed one more trick: the Actions log host answers a 302 to a signed
+Azure blob URL, and following it *with* the GitHub `Authorization` header still
+attached returns `401 Server failed to authenticate the request`. Fetch the redirect
+target with no auth header and the log downloads fine.
+
 ### After the files are in place
 
 For **box64** the workflow does steps 1–2 itself (copy + pin + provenance comment in
