@@ -128,6 +128,13 @@ class XProtocolTrace(private val capacity: Int = 48) {
         val minor = if (dot >= 0) key.substring(dot + 1).toIntOrNull() else null
         return when (major) {
             XRender.MAJOR_OPCODE -> "RENDER." + XRender.minorName(minor ?: -1)
+            XBigRequests.MAJOR_OPCODE -> "BIG-REQUESTS." + when (minor) {
+                XBigRequests.MINOR_ENABLE -> "Enable"; else -> "minor$minor"
+            }
+            XGenericEvent.MAJOR_OPCODE -> "GenericEvent." + when (minor) {
+                XGenericEvent.MINOR_QUERY_VERSION -> "QueryVersion"; else -> "minor$minor"
+            }
+            XInput2.MAJOR_OPCODE -> "XI2." + XInput2.minorName(minor ?: -1)
             X11.EXT_XTEST_OPCODE -> "XTEST." + when (minor) {
                 0 -> "GetVersion"; 1 -> "CompareCursor"; 2 -> "FakeInput"; 3 -> "GrabControl"
                 else -> "minor$minor"

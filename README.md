@@ -19,7 +19,7 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | R2 | `ContainerService` (foreground, Stop all), `proot -> box64 -> wine` launch with the explicit env, per-container status, logs into the shared buffer | done (inert until R1 binaries + R3 rootfs exist) |
 | R3 | Rootfs/Wine download: pinned SHA-256 (fail closed), resumable via `Range`, free-space check, progress UI, SAF import | done — **extraction runs in-app** (pure-Kotlin TAR reader + xz-java, verified against the real pinned ubuntu-base and Firefox archives); Firefox ESR artifact pinned from Mozilla |
 | R4 | Diagnostics self-test: `box64 --version`, `wine64 --version`, `wine64 cmd /c echo hello`, green/red/skipped with the failing command + log excerpt | done |
-| D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a–D1d done: spec-accurate protocol core, socket, renderer, input, soft-keyboard text injection, focus/grabs/cursors/fonts/colours, XTest, SubstructureRedirect WM, and **RENDER 0.4** — pictures, Composite with the 14 Porter-Duff ops, FillRectangles, the full CompositeGlyphs pipeline, both rasterisers — plus the one-tap **X self-test** (xdpyinfo/xwininfo probes, xeyes/xclock survivors) in Diagnostics. 149 x11 wire tests green on a JVM; guest launch waits on the R1 binaries; see `docs/X_SERVER.md`) |
+| D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a–D1e done: spec-accurate protocol core, socket, renderer, input, soft-keyboard text injection, focus/grabs/cursors/fonts/colours, XTest, SubstructureRedirect WM, and **RENDER 0.4** — pictures, Composite with the 14 Porter-Duff ops, FillRectangles, the full CompositeGlyphs pipeline, both rasterisers — plus the one-tap **X self-test** (xdpyinfo/xwininfo probes, xeyes/xclock survivors) in Diagnostics, and **D1e**: the BIG-REQUESTS + Generic-Event transport and **XInput2 2.2** — the device list, selections, grabs and the key/button/motion/crossing/focus events GTK3 runs on. 204 x11 wire tests green on a JVM; guest launch waits on the R1 binaries; see `docs/X_SERVER.md`) |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | **partial** (P1 clipboard: the X selections ↔ Android text bridge is done and wire-tested — guest copies push out, Android-side changes reclaim PRIMARY/CLIPBOARD; rich targets and the remaining P1/P2 items are not started) |
 
 ## Animation
@@ -95,7 +95,31 @@ launches `xeyes` (core X11) and `xclock` (Xaw+Xft = the RENDER glyph path) insid
 proot - PASS means "stayed connected", FAIL carries the exit code, the client's output
 and the connection's trace summary.
 
-**The server runs, renders, takes input and passes 149 wire tests (run for real on a
+**D1e added the transport and the input extension GTK3 runs on.** `BIG-REQUESTS`
+(so cairo's window-sized `PutImage` is not truncated at the 64 KiB CARD16 ceiling -
+requests are reassembled across socket reads and normalised back to the ordinary
+header form, so every handler's absolute payload offsets stay correct) and the
+`Generic Event Extension` (`xGenericEvent` framing, which is how an extension event
+longer than 32 bytes reaches a client). On top of that, **XInput2 at version 2.2**
+(major opcode 131): a static four-device set (master pointer/keyboard plus the slave
+pair behind them, button/key/relative-valuator classes), the request set GDK3 uses -
+QueryDevice, SelectEvents/GetSelectedEvents, QueryPointer, WarpPointer, ChangeCursor
+(what `XIDefineCursor` sends), SetFocus/GetFocus, GrabDevice/Ungrab, PassiveGrab,
+client pointer, device properties - and the events it needs: KeyPress/Release,
+ButtonPress/Release, Motion, Enter/Leave, FocusIn/Out, delivered as GenericEvents to
+*the connection that selected them* and propagated up to the ancestor that selected
+the type. Three rules keep it honest: XI2 delivery is independent of the core window
+masks (GDK selects none), an XI2 grab installs a core grab with an **empty** core mask
+(GDK translates core events through the same XI2 translator, so a permissive mask
+would double every click), and the requests we cannot truthfully answer -
+`XIChangeHierarchy`, `XIBarrierReleasePointer`, the XI 1.x minors - are refused
+`BadRequest` and named in the protocol trace. The claim is 2.2 rather than 2.4 because
+we report no touch or gesture devices: touch arrives as single-pointer events, and
+real multi-touch (pinch-zoom) is the named next step. The extension registry keeps
+canonical names for `ListExtensions` and answers `QueryExtension`
+case-insensitively.
+
+**The server runs, renders, takes input and passes 204 wire tests (run for real on a
 JVM with Kotlin 2.1.10); nothing guest-side has connected on a device yet.** The native binaries (R1)
 are not vendored, so `explorer.exe /desktop` cannot be started - `ExplorerSmokeTest`
 scripts its exact wire sequence instead. `XDisplayList` records every drawing request
@@ -195,8 +219,11 @@ publishers (Ubuntu `SHA256SUMS`, the Ubuntu archive `Packages` index, Mozilla
 inside proot (`RootfsProvisioner`, package list pinned in code, every line logged). Its
 **Run doctor** chip first checks the host-side prerequisites — pinned proot set,
 extracted rootfs, rootfs really is arm64, `ports.ubuntu.com` sources, resolv.conf, free
-space, writable TMPDIR, archive reachability — and names the first blocking failure in
-plain language instead of letting apt die with a bare "apt-get failed".
+space, writable TMPDIR, archive reachability — and then **really execs proot** with three
+trivial guest commands in the exact jail Provision uses (`/bin/true`, `id` = does `-0`
+give the guest uid 0, `apt-get --version`), so an argument-form, ptrace/seccomp or
+fake-root problem is named in seconds, with the exact command line to rerun, instead of
+letting apt die with a bare "apt-get failed" minutes later.
 
 ## Container runtime (R2)
 
@@ -322,7 +349,7 @@ open decisions.
 
 ## UI tests
 
-`./gradlew testDebugUnitTest` runs the 410 pure-JVM tests (window geometry, snap zones,
+`./gradlew testDebugUnitTest` runs the 548 pure-JVM tests (window geometry, snap zones,
 Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing, argv
 splitting, the log buffer, the built-in commands, the terminal transcript/history, the
 container codec/store, guest<->host path mapping, the Wine environment builder, the
@@ -340,7 +367,16 @@ pure-Kotlin rasteriser, XTest FakeInput, soft-keyboard text injection and the IM
 extractor; and the Firefox ESR session: native (never box64) proot command shape, profile
 and X11 binds, the explicit sandbox-off environment, install/GTK checks, the R3 state
 machine's READY marker, the pinned Mozilla artifact, and the desktop-engine launch seam
-with its gating contract; and the P1 clipboard bridge: server-wide selection ownership,
+with its gating contract; the Provision doctor, including its real proot smoke run
+(argument form, fake-root uid, `apt-get --version`, and every named failure cause);
+the BIG-REQUESTS/Generic-Event transport (extended request framing, reassembly across
+socket reads, the oversize and not-enabled refusals, generic-event padding); the whole
+XInput2 surface - the device list walked class-by-class the way libXi walks it,
+selection round-trips, per-connection delivery and propagation, the modifier and
+button-mask encodings, crossing and focus details, grab redirection without a duplicate
+core event, pointer queries, warps, per-device cursors, device properties, and the
+requests that are refused and named;
+and the P1 clipboard bridge: server-wide selection ownership,
 cross-client SelectionRequest routing, the ICCCM mask-0 SendEvent idiom, inline shell
 conversions with TARGETS, ownership lifecycle, and the end-to-end guest-copy push
 through a fake bridge).
@@ -442,9 +478,10 @@ app/src/main/java/dev/win11we/shell/
   runtime/SelfTestRunner.kt    the R4 self-test: 3 steps, verdicts, reasons, report/log excerpt
 ```
 
-Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 410 tests; during D1c the
-whole suite was additionally compiled and executed off-device against android.jar 35 and
-the pinned Compose artifacts, so the counts are measured, not estimated): snap zones,
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 548 tests, measured by
+annotation count; the pure-JVM subset is additionally compiled and executed off-device
+against JDK 17 + Kotlin 2.1.10 with minimal Android stubs, so 410 of them are run for
+real outside Gradle too): snap zones,
 maximize/restore, halves snapping, edge/corner resize with minimums, on-screen clamping,
 z-order/focus, taskbar toggle open-minimize-restore, Explorer listing/filtering/sorting,
 Windows-style size and type labels, back/forward/up/trail navigation, selection,

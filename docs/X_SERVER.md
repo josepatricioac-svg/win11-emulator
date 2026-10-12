@@ -5,8 +5,9 @@ surface runs `explorer.exe /desktop`, and touch/mouse/keyboard become X input.
 No Termux, no XSDL, no adb.
 
 **Milestone status:** D1a (protocol core + socket) done, D1b (renderer + input + WM)
-done, **D1c (real-client compatibility) done**. What remains for D1 is the guest
-launch itself, which is blocked on vendoring the R1 native binaries - not on server code.
+done, D1c (real-client compatibility) done, D1d (RENDER 0.4) done, **D1e (the
+transport + XInput2 GTK3 needs) done**. What remains for D1 is the guest launch
+itself, which is blocked on vendoring the R1 native binaries - not on server code.
 
 ## D1c: what changed and why it was blocking real clients
 
@@ -140,9 +141,146 @@ claim rises when the corresponding requests are implemented; anything beyond it
 is refused **and named** in the protocol trace ("RENDER.AddTraps x42"), so the
 shared log says exactly what to implement next.
 
-Still absent (honestly reported by `QueryExtension`): XKB, XInput/XInput2,
-RANDR, MIT-SHM, XFIXES, COMPOSITE, DAMAGE, SHAPE, BIG-REQUESTS, SYNC. Device
-traces from real Firefox/GTK3 handshakes decide which one matters next.
+### XInput2 (XI2) - the input extension GTK3 runs on
+
+`QueryExtension("XInputExtension")` now answers **present** (major opcode 131,
+event base 65, error base 165 - after RENDER's five) at **version 2.2**.
+
+Why this is the one that decides whether Firefox is usable rather than merely
+visible: GDK3 asks for XI 2.4 at display-open time
+(`_gdk_x11_device_manager_new` calls `XIQueryVersion(2, 4)`) and only falls back
+to its legacy *core* device manager when the server answers `BadRequest`. The
+core fallback still draws, but it is one pointer, no device model and no XI
+grabs - the compatibility path GTK keeps alive and nothing else. With XI2 the
+shell gets the input model a desktop browser actually expects.
+
+**The version claim is 2.2, not 2.4.** GDK gates exactly two things on the minor
+version: touch (2.2) and touchpad gestures (2.4). We report **no touch and no
+gesture devices**, so a client that selects `XI_TouchBegin` simply never receives
+one - Android touch arrives as single-pointer `XI_Motion`/`XI_ButtonPress` from
+`XInput`, exactly as on the core path. Claiming 2.4 would invite gesture
+selections we cannot honour. Real multi-touch (`XI_TouchBegin/Update/End` with
+touch ids, i.e. pinch-zoom in Firefox) is the named next step and needs the
+Android pointer-index plumbing in `XDesktop`, not protocol work.
+
+**The device set is static** - one master pair with the slave pair behind it,
+which is what a single-pointer server honestly has:
+
+| id | name | use | attachment | classes |
+| --- | --- | --- | --- | --- |
+| 2 | Virtual core pointer | MasterPointer | 3 | Button (9), Valuator 0 "Rel X", Valuator 1 "Rel Y" |
+| 3 | Virtual core keyboard | MasterKeyboard | 2 | Key (keycodes 8-255) |
+| 4 | win11we touch pointer | SlavePointer | 2 | as the master pointer (source of pointer events) |
+| 5 | win11we keyboard | SlaveKeyboard | 3 | as the master keyboard (source of key events) |
+
+The valuators are deliberately **relative** ("Rel X"/"Rel Y"): GDK maps only the
+"Abs \*" labels onto axes and ignores the rest, and pointer position travels in
+every event's `root_x`/`event_x`, so an ignored axis loses nothing. Events report
+`deviceid` = the master and `sourceid` = the slave, the way Xorg reports attached
+slaves.
+
+**Requests implemented** (minors from `XI2proto.h`): QueryVersion (47),
+QueryDevice (48), SelectEvents (46), GetSelectedEvents (60), QueryPointer (40),
+WarpPointer (41), ChangeCursor (42 - which is what libXi's
+`XIDefineCursor`/`XIUndefineCursor` send, and what GDK calls), SetFocus (49),
+GetFocus (50), GrabDevice (51), UngrabDevice (52), AllowEvents (53, accepted: we
+never freeze a device), PassiveGrabDevice (54) and PassiveUngrabDevice (55) for
+button and keycode grabs (they land in the same passive-grab table the core
+`GrabButton`/`GrabKey` use, so activation and release behave identically),
+SetClientPointer (44), GetClientPointer (45), and the device-property quartet
+ListProperties (56), ChangeProperty (57, Replace/Prepend/Append), DeleteProperty
+(58), GetProperty (59 - an absent property answers type `None` with zero items,
+which is what GDK's vendor/libinput/Wacom probes expect, not an error).
+
+**Refused on purpose, and named in the trace** rather than accepted-and-ignored,
+because a Success answer would be a lie a client could act on: ChangeHierarchy
+(43 - our device set is static, there is no hotplug to model),
+BarrierReleasePointer (61 - we have no pointer barriers and never send barrier
+events), and the XI **1.x** minors 1-39 (a different protocol that shares this
+major opcode; `xinput list`-style clients would misread our answers). Every
+refusal is `BadRequest` with the minor opcode in the error and a
+`XI2.<RequestName>` entry in the protocol report.
+
+**Events delivered** - all as GenericEvents (`deliverGenericEvent`), all to the
+connection that selected them:
+
+- `XI_KeyPress`/`XI_KeyRelease` (2/3) to the focus window, `XI_ButtonPress`/
+  `XI_ButtonRelease` (4/5) and `XI_Motion` (6) to the window under the pointer,
+  each with FP1616 `root_x/root_y` and window-relative `event_x/event_y`, the
+  32-bit button mask (core's Button1Motion bit 8 becomes XI2's bit 0, and
+  Android's back/forward buttons 8/9 survive as bits 7/8), and the modifier state
+  split the way `xXIModifierInfo` wants it (base = held down, locked = CapsLock,
+  effective = both).
+- `XI_Enter`/`XI_Leave` (7/8) on pointer crossings with X's detail rules relative
+  to the event window (Inferior when the other window is below it, Ancestor when
+  above, Nonlinear between two toplevels - which is every GTK toplevel crossing),
+  and `XI_FocusIn`/`XI_FocusOut` (9/10) whenever the focus moves, with the
+  `focus` flag set for the window that really has it.
+- Not delivered: touch, gestures, `XI_Raw*`, `XI_HierarchyChanged`,
+  `XI_DeviceChanged`, `XI_PropertyEvent`, barrier events - none of which can
+  happen with a static four-device set and no raw-event source.
+
+**Three rules that make this correct rather than merely present:**
+
+1. *XI2 delivery is independent of the core window masks.* A client that selected
+   XI2 events - which is all GDK does; it selects **no** core masks - still
+   receives them. The XI2 hook therefore runs before the core `eventMask` check in
+   every input path, including `warpMove` (a warp is a real move: X promises
+   MotionNotify, XI2 clients get `XI_Motion`).
+2. *Selections are per-connection*, so events go only to the client that asked -
+   and they propagate up the window tree to the first ancestor that selected the
+   type, with `child` naming the window the pointer is really over. That is how
+   GTK, selecting on its toplevel, receives events from its children.
+3. *An XI2 grab installs a core grab with an EMPTY core mask.* The grab itself is
+   server-wide (every other client stops receiving these events, as X requires),
+   but GDK translates **core** events through the same XI2 translator - so a
+   permissive core mask would hand it a second copy of every click it already
+   received as an XI2 event. The XI2 mask is kept separately and filters the XI2
+   path; `owner_events` still adds the normal delivery to the window under the
+   pointer. `XIGetSelectedEvents`, `XIQueryPointer`, grab status codes
+   (`Success`/`AlreadyGrabbed`) and the destroy-window cleanup of selections are
+   all covered by wire tests.
+
+Still absent (honestly reported by `QueryExtension`): XKB, RANDR, MIT-SHM,
+XFIXES, COMPOSITE, DAMAGE, SHAPE, SYNC. Device traces from real Firefox/GTK3
+handshakes decide which one matters next.
+
+### The transport every other extension rides on: BIG-REQUESTS + Generic Events
+
+Two extensions carry no drawing or input semantics of their own, but nothing
+bigger than a toy client works without them, so they are implemented first:
+
+- **BIG-REQUESTS** (major opcode 132, one request: `Enable`). A normal request
+  header holds its length as a CARD16 in 4-byte units - a 64 KiB ceiling that
+  cairo/GTK blow through with a single window-sized `PutImage` or a long
+  `SetClipRectangles`. libX11 then re-sends it in the extended form (`xBigReq`):
+  the CARD16 length is **0**, the real length is a CARD32 at offset 4 and the body
+  starts at offset 8. `Enable` answers with the largest request we accept
+  (4 MiB - far above anything cairo produces for a window-sized buffer, and small
+  enough to keep one connection's reassembly buffer bounded on a phone; Xorg
+  answers 16 MiB). Requests are reassembled across socket reads, and a big
+  request is **normalised back to the ordinary 4-byte-header form** before
+  dispatch: every handler addresses its payload from absolute offsets
+  (ChangeProperty's data at 24, SendEvent's event at 12, ImageText8's string at
+  16), so one array shape keeps all of them correct for big and small requests
+  alike, and no handler reads the CARD16 length field.
+  A CARD16 length of 0 **without** `Enable` first is a protocol violation: the
+  server sends `BadLength`, stops parsing that stream (continuing would read one
+  request as many) and records the reason in the protocol trace. A big request
+  larger than the advertised maximum is refused the same way rather than buffered.
+- **Generic Event Extension** (major opcode 128, one request: `QueryVersion` ->
+  1.0). Core events are exactly 32 bytes; XInput2's device events are not (they
+  carry valuator masks, modifier/group state and a 16-bit event type). `xGenericEvent`
+  is the agreed framing - byte 0 = 35, byte 1 = the owning extension's major
+  opcode, bytes 4-7 = length in 4-byte units *after* the first 32 bytes, bytes
+  8-9 = that extension's event type - and libX11 parses it itself, so a client
+  that never enabled anything still receives XI2 events correctly.
+  `XConnection.deliverGenericEvent()` is the one place that framing is written;
+  it pads to a 4-byte boundary and declares exactly the units it carries.
+
+The extension registry (`XConnection.EXTENSIONS`) keeps each name's canonical
+spelling - `xdpyinfo` prints those - and lookups are case-insensitive, because
+clients are not consistent about it.
 
 ### Soft keyboard (the D1b open item)
 
@@ -191,9 +329,9 @@ does not re-push (X clients re-claim on every copy).
 
 ### Verification
 
-The x11 suites (108 tests: `XProtocolTest`, `XDisplayListTest`, `XRedirectTest`,
-`ExplorerSmokeTest`, `XCompatTest`, `XTextInjectionTest`, `XSnapshotTest`,
-`XSelectionsTest`) were
+The x11 suites (204 tests: `XProtocolTest`, `XCompatTest`, `XRenderTest`,
+`XBigRequestsTest`, `XInput2Test`, `XProtocolTraceTest`, `XRedirectTest`,
+`XTextInjectionTest`, `XSnapshotTest`, `XSelectionsTest`) are
 **compiled and executed** with Kotlin 2.1.10/JDK 17 against minimal Android stubs
 (only `LocalServerSocket`/`LocalSocket`/`Log`, which the wire tests never touch) -
 the first time this project's protocol code was actually run rather than written
@@ -224,8 +362,15 @@ CI `assembleDebug` + device check.
 
 - RENDER is served at version 0.4 (see above); traps/solid-fills/gradients/
   ARGB cursors/transforms are not - the claim stays at 0.4 until they are.
-- No Composite/XRandr/XShm/XKB/XInput2/XFIXES (`QueryExtension` answers "not
-  present", so clients fall back to core protocol).
+- No Composite/XRandr/XShm/XKB/XFIXES (`QueryExtension` answers "not present",
+  so clients fall back to core protocol). BIG-REQUESTS, the Generic Event
+  Extension and **XInput2** *are* served.
+- XI2 reports no touch and no gesture devices (version claim 2.2, not 2.4): one
+  pointer, no pinch-zoom. Touch arrives as emulated single-pointer events.
+- XI2 device properties are per-connection storage, not shared server state, and
+  `XIChangeHierarchy` is refused - the device set is fixed at four devices.
+- A per-device cursor (`XIChangeCursor`) sets the window cursor: with one pointer
+  there is no per-device sprite to keep apart.
 - One built-in font ("fixed", 6x13 metrics); `OpenFont` never refuses a name and
   glyph shapes are monospace approximations - `QueryFont` metrics match the
   renderer's advance, so layout maths stays consistent.

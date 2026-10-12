@@ -516,7 +516,11 @@ class XProtocolTest {
     fun `extension lookup is case-insensitive and unknown extensions are absent`() {
         assertEquals(1, send(client.queryExtension("xtest")).reply()[1].toInt())
         assertEquals(1, send(client.queryExtension("render")).reply()[1].toInt()) // case-insensitive too
-        assertEquals(0, send(client.queryExtension("BIG-REQUESTS")).reply()[1].toInt())
+        // BIG-REQUESTS and the Generic Event Extension are served (they are the
+        // transport XI2 rides on); something genuinely absent stays absent.
+        assertEquals(1, send(client.queryExtension("big-requests")).reply()[1].toInt())
+        assertEquals(1, send(client.queryExtension("Generic Event Extension")).reply()[1].toInt())
+        assertEquals(0, send(client.queryExtension("COMPOSITE")).reply()[1].toInt())
         assertEquals(0, send(client.queryExtension("XKEYBOARD")).reply()[1].toInt())
     }
 

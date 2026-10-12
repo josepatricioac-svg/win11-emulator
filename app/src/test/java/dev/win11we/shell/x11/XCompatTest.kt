@@ -684,12 +684,19 @@ class XCompatTest {
         assertEquals(0, xkb[1].toInt()) // not present
         assertEquals(0, xkb[8].toInt()) // and therefore no major opcode
         val names = send(client, c.listExtensions()).reply()
-        assertEquals(2, names[1].toInt()) // RENDER + XTEST
+        // RENDER + XTEST + the two transport extensions (BIG-REQUESTS and the
+        // Generic Event Extension) that XI2's big requests and events ride on,
+        // plus XInput2 itself.
+        assertEquals(5, names[1].toInt())
         assertEquals(32 + names.intLE(4) * 4, names.size) // ... and no stray byte
-        // Registry order: RENDER then XTEST; each entry is a length byte + name,
-        // padded to a 4-byte boundary as a whole.
+        // Registry order: RENDER, XTEST, BIG-REQUESTS, Generic Event Extension,
+        // XInputExtension; each entry is a length byte + name, padded to a 4-byte
+        // boundary as a whole.
         assertEquals("RENDER", String(names.copyOfRange(33, 39), Charsets.US_ASCII))
         assertEquals("XTEST", String(names.copyOfRange(41, 46), Charsets.US_ASCII))
+        assertEquals("BIG-REQUESTS", String(names.copyOfRange(49, 61), Charsets.US_ASCII))
+        assertEquals("Generic Event Extension", String(names.copyOfRange(65, 88), Charsets.US_ASCII))
+        assertEquals("XInputExtension", String(names.copyOfRange(89, 104), Charsets.US_ASCII))
     }
 
     @Test

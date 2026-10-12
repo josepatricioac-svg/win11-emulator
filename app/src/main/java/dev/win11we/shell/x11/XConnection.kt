@@ -211,6 +211,37 @@ class XConnection(
     }
 
     /**
+     * Delivers a **GenericEvent** (xorgproto's `xGenericEvent`): the transport
+     * every extension event that does not fit in 32 bytes uses, XInput2's device
+     * events above all.
+     *
+     * Layout: byte 0 = 35 (`GenericEvent`), byte 1 = [extensionOpcode] (the major
+     * opcode the client got from QueryExtension, which is how it knows whose event
+     * this is), bytes 2-3 = sequence, bytes 4-7 = length in 4-byte units **after**
+     * the first 32 bytes, bytes 8-9 = [evtype] (the extension's own event number),
+     * and [body] writes from byte 10. libX11 reads that header itself and hands the
+     * rest to the extension (`XGetEventData`), so nothing has to be negotiated.
+     *
+     * `internal` so the framing is unit-testable on its own; XI2/XFIXES events go
+     * through here.
+     */
+    internal fun deliverGenericEvent(extensionOpcode: Int, evtype: Int, body: (XWriter) -> Unit) {
+        val bodyWriter = XWriter(littleEndian)
+        body(bodyWriter)
+        val payload = bodyWriter.toByteArray()
+        val total = maxOf(XGenericEvent.HEADER_BYTES, X11.pad4(10 + payload.size))
+        val writer = XWriter(littleEndian)
+        writer.byte(XGenericEvent.EVENT_TYPE)
+        writer.byte(extensionOpcode)
+        writer.short(sequence)
+        writer.int((total - XGenericEvent.HEADER_BYTES) / 4)
+        writer.short(evtype)
+        writer.bytes(payload)
+        writer.pad(total - 10 - payload.size)
+        deliver(writer.toByteArray())
+    }
+
+    /**
      * Delivers a pre-built 32-byte event to the connection that owns [windowId]
      * (SendEvent, focus and passive-grab events may target other clients); falls
      * back to this connection for ownerless windows (the root) and tests.
@@ -333,6 +364,13 @@ class XConnection(
 
     // --- request stream ----------------------------------------------------
 
+    /**
+     * True once this client sent BIG-REQUESTS' `Enable`; only then may it use the
+     * extended (CARD16 length = 0, CARD32 length at offset 4) request form.
+     */
+    var bigRequestsEnabled: Boolean = false
+        private set
+
     /** Feeds socket bytes; returns how many complete requests were handled. */
     fun onBytes(chunk: ByteArray, length: Int = chunk.size): Int {
         carry = if (carry.isEmpty()) chunk.copyOf(length) else carry + chunk.copyOf(length)
@@ -343,10 +381,61 @@ class XConnection(
             } else {
                 ((carry[2].toInt() and 0xFF) shl 8) or (carry[3].toInt() and 0xFF)
             }
-            val requestBytes = if (units > 0) units * 4 else 4
-            if (requestBytes > carry.size) break
-            val request = carry.copyOf(requestBytes)
-            carry = carry.copyOfRange(requestBytes, carry.size)
+            val request: ByteArray
+            if (units == XBigRequests.BIG_REQUEST_MARKER) {
+                // A CARD16 length of 0 is the BIG-REQUESTS marker: the real length
+                // is the CARD32 at offset 4 and the body starts at offset 8
+                // (xBigReq). Without the extension enabled this is a protocol
+                // violation, and parsing on would read one request as many - so the
+                // stream stops here, BadLength is sent, and the trace says why.
+                if (!bigRequestsEnabled) {
+                    trace.recordFailure(
+                        carry[0].toInt() and 0xFF,
+                        "big request (CARD16 length 0) without BIG-REQUESTS Enable - stream stopped",
+                    )
+                    lastFailure = "big request without BIG-REQUESTS enabled"
+                    handleRequest(carry.copyOf(4), lengthError = true)
+                    carry = ByteArray(0)
+                    return handled
+                }
+                if (carry.size < XBigRequests.HEADER_BYTES) break
+                val bigUnits = if (littleEndian) {
+                    (carry[4].toInt() and 0xFF) or ((carry[5].toInt() and 0xFF) shl 8) or
+                        ((carry[6].toInt() and 0xFF) shl 16) or ((carry[7].toInt() and 0xFF) shl 24)
+                } else {
+                    ((carry[4].toInt() and 0xFF) shl 24) or ((carry[5].toInt() and 0xFF) shl 16) or
+                        ((carry[6].toInt() and 0xFF) shl 8) or (carry[7].toInt() and 0xFF)
+                }
+                if (bigUnits > XBigRequests.MAX_REQUEST_UNITS) {
+                    trace.recordFailure(
+                        carry[0].toInt() and 0xFF,
+                        "big request of $bigUnits units exceeds the advertised maximum " +
+                            "(${XBigRequests.MAX_REQUEST_UNITS}) - stream stopped",
+                    )
+                    lastFailure = "big request too large: $bigUnits units"
+                    handleRequest(carry.copyOf(XBigRequests.HEADER_BYTES), lengthError = true)
+                    carry = ByteArray(0)
+                    return handled
+                }
+                val total = bigUnits * 4
+                if (total > carry.size) break
+                // Normalised to the ordinary 4-byte header form: every request
+                // handler below addresses its payload from absolute offsets
+                // (ChangeProperty's data at 24, SendEvent's event at 12, ...), so
+                // one array shape keeps them all correct for big and small
+                // requests alike. No handler reads the CARD16 length field.
+                val normalised = ByteArray(4 + total - XBigRequests.HEADER_BYTES)
+                normalised[0] = carry[0]
+                normalised[1] = carry[1]
+                carry.copyInto(normalised, 4, XBigRequests.HEADER_BYTES, total)
+                carry = carry.copyOfRange(total, carry.size)
+                request = normalised
+            } else {
+                val requestBytes = units * 4
+                if (requestBytes > carry.size) break
+                request = carry.copyOf(requestBytes)
+                carry = carry.copyOfRange(requestBytes, carry.size)
+            }
             handled++
             handleRequest(request)
         }
@@ -357,10 +446,15 @@ class XConnection(
     var lastFailure: String? = null
         private set
 
-    private fun handleRequest(request: ByteArray) {
+    private fun handleRequest(request: ByteArray, lengthError: Boolean = false) {
         sequence = (sequence + 1) and 0xFFFF
         val opcode = request[0].toInt() and 0xFF
         val data = request[1].toInt() and 0xFF
+        if (lengthError) {
+            error(X11.ERR_BAD_LENGTH, opcode, 0)
+            flushPending()
+            return
+        }
         try {
             lastFailure = null
             trace.recordRequest()
@@ -393,6 +487,8 @@ class XConnection(
                 val parent = document.window(id)?.parent
                 if (document.destroyWindow(id)) {
                     if (id == lastPointerWindow) lastPointerWindow = null
+                    xi2Selections.forget(id)
+                    if (xi2Grab?.window == id) xi2Grab = null
                     notifyStructure(X11.EV_DESTROY_NOTIFY, parent ?: document.rootId, id)
                 } else {
                     error(X11.ERR_BAD_WINDOW, opcode, id)
@@ -631,20 +727,7 @@ class XConnection(
                 val srcX = reader.shortSigned(); val srcY = reader.shortSigned()
                 val srcW = reader.short(); val srcH = reader.short()
                 val dstX = reader.shortSigned(); val dstY = reader.shortSigned()
-                if (src != 0) {
-                    val s = document.window(src) ?: return error(X11.ERR_BAD_WINDOW, opcode, src)
-                    val w = if (srcW == 0) s.width else srcW
-                    val h = if (srcH == 0) s.height else srcH
-                    val inside = rootPointerX in s.x + srcX until s.x + srcX + w &&
-                        rootPointerY in s.y + srcY until s.y + srcY + h
-                    if (!inside) return // X: the warp silently does nothing
-                }
-                val base = if (dst != 0) {
-                    document.window(dst) ?: return error(X11.ERR_BAD_WINDOW, opcode, dst)
-                } else null
-                val nx = (base?.x ?: 0) + dstX
-                val ny = (base?.y ?: 0) + dstY
-                warpMove(nx, ny)
+                warpPointer(src, dst, srcX, srcY, srcW, srcH, dstX, dstY, opcode)
             }
             X11.REQ_SET_INPUT_FOCUS -> {
                 val revertTo = data
@@ -1050,7 +1133,7 @@ class XConnection(
                 val nameLength = reader.short()
                 reader.skip(2)
                 val name = if (nameLength in 0..512) reader.paddedString(nameLength) else ""
-                val ext = EXTENSIONS[name.uppercase()]
+                val ext = extension(name)
                 trace.recordExtension(name.uppercase(), ext != null)
                 // xQueryExtensionReply: `present` is the reply's data byte (byte 1);
                 // major-opcode, first-event and first-error are the first three bytes
@@ -1182,6 +1265,35 @@ class XConnection(
             X11.REQ_NO_OPERATION -> Unit
             X11.EXT_XTEST_OPCODE -> xtestRequest(opcode, data, reader, request)
             XRender.MAJOR_OPCODE -> renderRequest(opcode, data, reader, request)
+            XInput2.MAJOR_OPCODE -> xi2Request(opcode, data, reader, request)
+            XBigRequests.MAJOR_OPCODE -> when (data) {
+                // The only request BIG-REQUESTS has: from here on this client may
+                // use the CARD32 length form (see onBytes).
+                XBigRequests.MINOR_ENABLE -> {
+                    bigRequestsEnabled = true
+                    // xBigReqEnableReply is 32 bytes: max_request_size at offset 8
+                    // and five CARD32 pads. No extra data, so the length field is 0.
+                    reply(opcode) { writer ->
+                        writer.int(XBigRequests.MAX_REQUEST_UNITS)
+                        writer.pad(20)
+                    }
+                }
+                else -> {
+                    trace.recordUnimplemented(opcode, data)
+                    error(X11.ERR_BAD_REQUEST, opcode, 0, minor = data)
+                }
+            }
+            XGenericEvent.MAJOR_OPCODE -> when (data) {
+                XGenericEvent.MINOR_QUERY_VERSION -> reply(opcode, dataByte = data) { writer ->
+                    writer.short(XGenericEvent.VERSION_MAJOR)
+                    writer.short(XGenericEvent.VERSION_MINOR)
+                    writer.pad(20)
+                }
+                else -> {
+                    trace.recordUnimplemented(opcode, data)
+                    error(X11.ERR_BAD_REQUEST, opcode, 0, minor = data)
+                }
+            }
             else -> {
                 // BadRequest is the correct protocol answer, and it is also what
                 // kills a GTK client (its error handler calls _exit(1)), so the
@@ -2090,6 +2202,648 @@ class XConnection(
         )
     }
 
+    // --- XInput2 (XI2): the input extension GTK3/GDK uses --------------------
+
+    /**
+     * The atoms XI2's device classes label their buttons and axes with. Interned
+     * on first use: they are ordinary atoms, so `GetAtomName` answers them like any
+     * other, and GDK's `translate_valuator_class` looks them up by name ("Abs X"
+     * etc. - ours are the "Rel *" ones, which GDK deliberately ignores).
+     */
+    private var xi2LabelAtoms: Map<String, Int>? = null
+
+    private fun xi2Label(name: String): Int {
+        xi2LabelAtoms?.let { return it.getValue(name) }
+        val names = (1..XInput2.NUM_BUTTONS).map { "Button$it" } + listOf("Rel X", "Rel Y")
+        val map = names.associateWith { document.internAtom(it) }
+        xi2LabelAtoms = map
+        return map.getValue(name)
+    }
+
+    /** This connection's XI2 event selections, one set per window. */
+    private val xi2Selections = XInput2Selections()
+
+    /** XI2 grab held by this connection; null when none. */
+    private var xi2Grab: Xi2Grab? = null
+
+    /** Client pointer/keyboard pair (`XISetClientPointer`); the masters by default. */
+    private var xi2ClientPointer: Int = XInput2.MASTER_POINTER
+
+    /** Device properties set through `XIChangeProperty`, keyed by device then atom. */
+    private val xi2Properties = HashMap<Int, MutableMap<Int, Xi2Property>>()
+
+    private class Xi2Grab(
+        val deviceId: Int,
+        val window: Int,
+        val ownerEvents: Boolean,
+        val mask: ByteArray,
+        val keyboard: Boolean,
+    )
+
+    private data class Xi2Property(val type: Int, val format: Int, val data: ByteArray)
+
+    /** True once this client negotiated a version; used by tests and the trace. */
+    var xi2Negotiated: Boolean = false
+        private set
+
+    private fun xi2Request(major: Int, minor: Int, reader: XReader, request: ByteArray) {
+        when (minor) {
+            XInput2.MINOR_QUERY_VERSION -> {
+                val clientMajor = reader.short()
+                val clientMinor = reader.short()
+                // Same rule as RENDER: never claim more than we implement, and
+                // answer the client's own number when it asks for less.
+                val answeredMinor =
+                    if (clientMajor > XInput2.VERSION_MAJOR) XInput2.VERSION_MINOR
+                    else minOf(clientMinor, XInput2.VERSION_MINOR)
+                xi2Negotiated = true
+                reply(major, dataByte = minor) { writer ->
+                    writer.short(XInput2.VERSION_MAJOR)
+                    writer.short(answeredMinor)
+                    writer.pad(20)
+                }
+            }
+            XInput2.MINOR_QUERY_DEVICE -> {
+                val deviceId = reader.short()
+                reader.short() // pad
+                val devices = when (deviceId) {
+                    XInput2.ALL_DEVICES -> XInput2.DEVICES
+                    XInput2.ALL_MASTER_DEVICES -> XInput2.DEVICES.filter { XInput2.isMaster(it.id) }
+                    else -> XInput2.device(deviceId)?.let { listOf(it) }
+                        ?: return error(XInput2.ERR_BAD_DEVICE_ID, major, deviceId, minor)
+                }
+                val payload = XInput2.queryDevicePayload(
+                    littleEndian = littleEndian,
+                    keyboard = keyboard,
+                    labels = { xi2Label(it) },
+                    pointerPosition = { rootPointerX to rootPointerY },
+                    devices = devices,
+                )
+                reply(major, dataByte = minor, extraLength = payload.size) { writer ->
+                    writer.short(devices.size) // num_devices
+                    writer.pad(22)
+                    writer.bytes(payload)
+                }
+            }
+            XInput2.MINOR_SELECT_EVENTS -> {
+                val win = reader.int()
+                val numMasks = reader.short()
+                reader.short() // pad
+                if (document.window(win) == null) return error(X11.ERR_BAD_WINDOW, major, win, minor)
+                // Validate every device id before storing anything: a partially
+                // applied selection would be worse than a clean refusal.
+                val parsed = List(numMasks) {
+                    val deviceId = reader.short()
+                    val maskLen = reader.short() // 4-byte units
+                    val mask = reader.bytes(maskLen * 4)
+                    deviceId to mask
+                }
+                parsed.forEach { (deviceId, _) ->
+                    if (!XInput2.isKnownDevice(deviceId)) {
+                        return error(XInput2.ERR_BAD_DEVICE, major, deviceId, minor)
+                    }
+                }
+                parsed.forEach { (deviceId, mask) -> xi2Selections.select(win, deviceId, mask) }
+            }
+            XInput2.MINOR_GET_SELECTED_EVENTS -> {
+                val win = reader.int()
+                if (document.window(win) == null) return error(X11.ERR_BAD_WINDOW, major, win, minor)
+                val masks = xi2Selections.masksFor(win)
+                val extra = masks.sumOf { 4 + it.mask.size }
+                reply(major, dataByte = minor, extraLength = extra) { writer ->
+                    writer.short(masks.size) // num_masks
+                    writer.pad(22)
+                    masks.forEach { mask ->
+                        writer.short(mask.deviceId)
+                        writer.short(mask.mask.size / 4)
+                        writer.bytes(mask.mask)
+                    }
+                }
+            }
+            XInput2.MINOR_QUERY_POINTER -> {
+                val win = reader.int()
+                val deviceId = reader.short()
+                reader.short() // pad
+                val window = document.window(win) ?: return error(X11.ERR_BAD_WINDOW, major, win, minor)
+                if (!xi2IsPointer(deviceId)) return error(XInput2.ERR_BAD_DEVICE, major, deviceId, minor)
+                val under = document.windowAt(rootPointerX, rootPointerY)
+                val child = childOnPath(win, under?.id)
+                val (base, locked, effective) = XInput2.modifierParts(keyStateMask)
+                // sz_xXIQueryPointerReply is 56 bytes and the button mask follows
+                // it as extra data: 4 bytes here (buttons_len = 1 unit).
+                reply(major, dataByte = minor, extraLength = 28) { writer ->
+                    writer.int(document.rootId)
+                    writer.int(child)
+                    with(XInput2) {
+                        writer.fp1616(rootPointerX)
+                        writer.fp1616(rootPointerY)
+                        writer.fp1616(rootPointerX - window.x)
+                        writer.fp1616(rootPointerY - window.y)
+                    }
+                    writer.byte(1) // same_screen
+                    writer.pad(1)
+                    writer.short(1) // buttons_len: one 4-byte unit
+                    writer.int(base); writer.int(0); writer.int(locked); writer.int(effective)
+                    writer.byte(0); writer.byte(0); writer.byte(0); writer.byte(0) // group
+                    writer.int(XInput2.xi2ButtonMask(buttonMask))
+                }
+            }
+            XInput2.MINOR_WARP_POINTER -> {
+                val src = reader.int()
+                val dst = reader.int()
+                val srcX = reader.int() shr 16
+                val srcY = reader.int() shr 16
+                val srcW = reader.short()
+                val srcH = reader.short()
+                val dstX = reader.int() shr 16
+                val dstY = reader.int() shr 16
+                val deviceId = reader.short()
+                reader.short() // pad
+                if (!xi2IsPointer(deviceId)) return error(XInput2.ERR_BAD_DEVICE, major, deviceId, minor)
+                warpPointer(src, dst, srcX, srcY, srcW, srcH, dstX, dstY, major, minor)
+            }
+            XInput2.MINOR_CHANGE_CURSOR -> {
+                // XIDefineCursor / XIUndefineCursor are libXi wrappers for this
+                // request (cursor None = undefine), which is what GDK calls.
+                val win = reader.int()
+                val cursor = reader.int()
+                val deviceId = reader.short()
+                reader.short() // pad
+                val window = document.window(win) ?: return error(X11.ERR_BAD_WINDOW, major, win, minor)
+                if (!xi2IsPointer(deviceId)) return error(XInput2.ERR_BAD_DEVICE, major, deviceId, minor)
+                if (cursor != 0 && document.cursor(cursor) == null) {
+                    return error(X11.ERR_BAD_CURSOR, major, cursor, minor)
+                }
+                // One pointer, so a per-device cursor is the window cursor.
+                window.cursor = cursor
+            }
+            XInput2.MINOR_SET_CLIENT_POINTER -> {
+                reader.int() // window (unused: the client pointer is per-client)
+                val deviceId = reader.short()
+                reader.short() // pad
+                if (XInput2.device(deviceId) == null) {
+                    return error(XInput2.ERR_BAD_DEVICE_ID, major, deviceId, minor)
+                }
+                xi2ClientPointer = deviceId
+            }
+            XInput2.MINOR_GET_CLIENT_POINTER -> {
+                reader.int() // window
+                reply(major, dataByte = minor) { writer ->
+                    writer.byte(1) // set: we always have a client pointer
+                    writer.pad(1)
+                    writer.short(xi2ClientPointer)
+                    writer.pad(20)
+                }
+            }
+            XInput2.MINOR_SET_FOCUS -> {
+                val window = reader.int()
+                reader.int() // time
+                val deviceId = reader.short()
+                reader.short() // pad
+                if (!xi2IsKeyboard(deviceId)) return error(XInput2.ERR_BAD_DEVICE, major, deviceId, minor)
+                // XI2 has no revert-to field; X keeps the focus until it is set
+                // again, which is RevertToNone semantics.
+                val old = document.setInputFocus(window, XDocument.FOCUS_NONE)
+                if (old == null) return error(X11.ERR_BAD_WINDOW, major, window, minor)
+                sendFocusChange(old, window)
+            }
+            XInput2.MINOR_GET_FOCUS -> {
+                val deviceId = reader.short()
+                reader.short() // pad
+                if (!xi2IsKeyboard(deviceId)) return error(XInput2.ERR_BAD_DEVICE, major, deviceId, minor)
+                reply(major, dataByte = minor) { writer ->
+                    writer.int(document.focus)
+                    writer.pad(20)
+                }
+            }
+            XInput2.MINOR_GRAB_DEVICE -> {
+                val grabWindow = reader.int()
+                reader.int() // time
+                val cursor = reader.int()
+                val deviceId = reader.short()
+                reader.byte() // grab_mode
+                reader.byte() // paired_device_mode
+                val ownerEvents = reader.byte() != 0
+                reader.byte() // pad
+                val maskLen = reader.short()
+                val mask = reader.bytes(maskLen * 4)
+                if (document.window(grabWindow) == null) {
+                    return error(X11.ERR_BAD_WINDOW, major, grabWindow, minor)
+                }
+                val device = XInput2.device(deviceId)
+                    ?: return error(XInput2.ERR_BAD_DEVICE_ID, major, deviceId, minor)
+                if (cursor != 0 && document.cursor(cursor) == null) {
+                    return error(X11.ERR_BAD_CURSOR, major, cursor, minor)
+                }
+                // The grab is installed in the shared document so every other
+                // client stops receiving these events (X's grab semantics are
+                // server-wide), but with an EMPTY core mask: GDK translates core
+                // events through the same XI2 translator, so a permissive core
+                // mask would hand it a second copy of every click it already gets
+                // as an XI2 event. The XI2 mask lives in [xi2Grab] and filters the
+                // XI2 delivery path instead.
+                val status = if (device.pointer) {
+                    val taken = !document.grabPointer(
+                        PointerGrab(grabWindow, ownerEvents, 0, 0, cursor, this),
+                    )
+                    if (taken) XInput2.GRAB_ALREADY_GRABBED else XInput2.GRAB_SUCCESS
+                } else {
+                    val taken = !document.grabKeyboard(KeyboardGrab(grabWindow, ownerEvents, this))
+                    if (taken) XInput2.GRAB_ALREADY_GRABBED else XInput2.GRAB_SUCCESS
+                }
+                if (status == XInput2.GRAB_SUCCESS) {
+                    xi2Grab = Xi2Grab(deviceId, grabWindow, ownerEvents, mask, keyboard = !device.pointer)
+                }
+                reply(major, dataByte = minor) { writer ->
+                    writer.byte(status)
+                    writer.pad(23)
+                }
+            }
+            XInput2.MINOR_UNGRAB_DEVICE -> {
+                reader.int() // time
+                val deviceId = reader.short()
+                reader.short() // pad
+                val device = XInput2.device(deviceId)
+                    ?: return error(XInput2.ERR_BAD_DEVICE_ID, major, deviceId, minor)
+                if (device.pointer) document.ungrabPointer(this) else document.ungrabKeyboard(this)
+                if (xi2Grab?.deviceId == deviceId) xi2Grab = null
+            }
+            // We never freeze a device, so there is nothing to allow (the same
+            // rule the core AllowEvents follows).
+            XInput2.MINOR_ALLOW_EVENTS -> Unit
+            XInput2.MINOR_PASSIVE_GRAB_DEVICE -> {
+                reader.int() // time
+                val grabWindow = reader.int()
+                val cursor = reader.int()
+                val detail = reader.int()
+                val deviceId = reader.short()
+                val numModifiers = reader.short()
+                val maskLen = reader.short()
+                val grabType = reader.byte()
+                reader.byte() // grab_mode
+                reader.byte() // paired_device_mode
+                val ownerEvents = reader.byte() != 0
+                reader.short() // pad
+                val mask = reader.bytes(maskLen * 4)
+                val modifiers = List(numModifiers) { reader.int() }
+                if (document.window(grabWindow) == null) {
+                    return error(X11.ERR_BAD_WINDOW, major, grabWindow, minor)
+                }
+                if (!XInput2.isKnownDevice(deviceId)) {
+                    return error(XInput2.ERR_BAD_DEVICE, major, deviceId, minor)
+                }
+                // Button and keycode grabs map onto the core passive-grab table,
+                // which is where our activation logic already lives. Enter/FocusIn
+                // and touch grabs are not modelled - refused rather than accepted
+                // and ignored.
+                when (grabType) {
+                    XInput2.GRAB_TYPE_BUTTON, XInput2.GRAB_TYPE_KEYCODE -> {
+                        val coreMask = xi2MaskToCore(mask)
+                        modifiers.forEach { modifier ->
+                            document.addPassiveGrab(
+                                PassiveGrab(
+                                    window = grabWindow,
+                                    eventMask = coreMask,
+                                    detail = detail,
+                                    modifiers = modifier,
+                                    isKey = grabType == XInput2.GRAB_TYPE_KEYCODE,
+                                    connection = this,
+                                    ownerEvents = ownerEvents,
+                                    confineTo = 0,
+                                    cursor = cursor,
+                                ),
+                            )
+                        }
+                        if (modifiers.isEmpty()) {
+                            document.addPassiveGrab(
+                                PassiveGrab(
+                                    window = grabWindow,
+                                    eventMask = xi2MaskToCore(mask),
+                                    detail = detail,
+                                    modifiers = PassiveGrab.ANY_MODIFIER,
+                                    isKey = grabType == XInput2.GRAB_TYPE_KEYCODE,
+                                    connection = this,
+                                    ownerEvents = ownerEvents,
+                                    confineTo = 0,
+                                    cursor = cursor,
+                                ),
+                            )
+                        }
+                    }
+                    else -> {
+                        trace.recordUnimplemented(major, minor)
+                        return error(X11.ERR_BAD_REQUEST, major, grabType, minor)
+                    }
+                }
+                // No modifier conflicts to report: num_modifiers = 0.
+                reply(major, dataByte = minor) { writer ->
+                    writer.short(0)
+                    writer.pad(22)
+                }
+            }
+            XInput2.MINOR_PASSIVE_UNGRAB_DEVICE -> {
+                val grabWindow = reader.int()
+                val detail = reader.int()
+                reader.short() // deviceid
+                val numModifiers = reader.short()
+                val grabType = reader.byte()
+                reader.byte() // pad0
+                reader.short() // pad1
+                val modifiers = List(numModifiers) { reader.int() }
+                val isKey = grabType == XInput2.GRAB_TYPE_KEYCODE
+                if (modifiers.isEmpty()) {
+                    document.removePassiveGrab(grabWindow, detail, PassiveGrab.ANY_MODIFIER, isKey)
+                } else {
+                    modifiers.forEach { document.removePassiveGrab(grabWindow, detail, it, isKey) }
+                }
+            }
+            XInput2.MINOR_LIST_PROPERTIES -> {
+                val deviceId = reader.short()
+                reader.short() // pad
+                if (!XInput2.isKnownDevice(deviceId)) {
+                    return error(XInput2.ERR_BAD_DEVICE_ID, major, deviceId, minor)
+                }
+                val atoms = xi2Properties[deviceId]?.keys?.toList() ?: emptyList()
+                reply(major, dataByte = minor, extraLength = atoms.size * 4) { writer ->
+                    writer.short(atoms.size)
+                    writer.pad(22)
+                    atoms.forEach { writer.int(it) }
+                }
+            }
+            XInput2.MINOR_CHANGE_PROPERTY -> {
+                val deviceId = reader.short()
+                val mode = reader.byte()
+                val format = reader.byte()
+                val property = reader.int()
+                val type = reader.int()
+                val numItems = reader.int()
+                if (!XInput2.isKnownDevice(deviceId)) {
+                    return error(XInput2.ERR_BAD_DEVICE_ID, major, deviceId, minor)
+                }
+                val elementSize = when (format) {
+                    8 -> 1; 16 -> 2; 32 -> 4
+                    else -> return error(X11.ERR_BAD_VALUE, major, format, minor)
+                }
+                if (mode !in 0..2) return error(X11.ERR_BAD_VALUE, major, mode, minor)
+                val start = 20
+                val end = (start + numItems * elementSize).coerceAtMost(request.size)
+                val incoming = if (end > start) request.copyOfRange(start, end) else ByteArray(0)
+                val store = xi2Properties.getOrPut(deviceId) { mutableMapOf() }
+                val existing = store[property]
+                val data = when {
+                    mode == 0 || existing == null || existing.format != format -> incoming // Replace
+                    mode == 1 -> incoming + existing.data // Prepend: the new items come first
+                    else -> existing.data + incoming // Append: the new items go last
+                }
+                store[property] = Xi2Property(type, format, data)
+            }
+            XInput2.MINOR_DELETE_PROPERTY -> {
+                val deviceId = reader.short()
+                reader.short() // pad0
+                val property = reader.int()
+                if (!XInput2.isKnownDevice(deviceId)) {
+                    return error(XInput2.ERR_BAD_DEVICE_ID, major, deviceId, minor)
+                }
+                xi2Properties[deviceId]?.remove(property)
+            }
+            XInput2.MINOR_GET_PROPERTY -> {
+                val deviceId = reader.short()
+                val delete = reader.byte()
+                reader.byte() // pad0
+                val property = reader.int()
+                reader.int() // type (AnyPropertyType or a specific one)
+                reader.int() // offset
+                val length = reader.int()
+                if (!XInput2.isKnownDevice(deviceId)) {
+                    return error(XInput2.ERR_BAD_DEVICE_ID, major, deviceId, minor)
+                }
+                val stored = xi2Properties[deviceId]?.get(property)
+                if (delete != 0) xi2Properties[deviceId]?.remove(property)
+                if (stored == null) {
+                    // An absent property is not an error: type None, zero items.
+                    // This is what GDK's device-property probes expect.
+                    reply(major, dataByte = minor) { writer ->
+                        writer.int(0) // type: None
+                        writer.int(0) // bytes_after
+                        writer.int(0) // num_items
+                        writer.byte(0) // format
+                        writer.pad(11) // pad0(1) + pad1(2) + pad2(4) + pad3(4)
+                    }
+                } else {
+                    val elementSize = when (stored.format) { 16 -> 2; 32 -> 4; else -> 1 }
+                    val items = stored.data.size / elementSize
+                    val wanted = if (length <= 0) items else minOf(items, length)
+                    val bytes = wanted * elementSize
+                    val data = stored.data.copyOfRange(0, bytes.coerceAtMost(stored.data.size))
+                    reply(major, dataByte = minor, extraLength = X11.pad4(data.size)) { writer ->
+                        writer.int(stored.type)
+                        writer.int((items - wanted) * elementSize) // bytes_after
+                        writer.int(wanted)
+                        writer.byte(stored.format)
+                        writer.pad(11) // pad0(1) + pad1(2) + pad2(4) + pad3(4)
+                        writer.bytes(data)
+                        writer.pad(X11.padded(data.size))
+                    }
+                }
+            }
+            XInput2.MINOR_CHANGE_HIERARCHY, XInput2.MINOR_BARRIER_RELEASE_POINTER -> {
+                // Refused on purpose, not accepted-and-ignored: our device set is
+                // static (no hotplug to model) and we have no pointer barriers (we
+                // never send barrier events, so no client should be releasing one).
+                // Answering Success here would be a lie a client could act on, and
+                // the trace names the request so a device log says what happened.
+                trace.recordUnimplemented(major, minor)
+                error(X11.ERR_BAD_REQUEST, major, 0, minor)
+            }
+            else -> {
+                trace.recordUnimplemented(major, minor)
+                error(X11.ERR_BAD_REQUEST, major, 0, minor)
+            }
+        }
+    }
+
+    /** Pointer-ish device ids: the masters, the slave pointer and the pseudo ids. */
+    private fun xi2IsPointer(deviceId: Int): Boolean = when (deviceId) {
+        XInput2.ALL_DEVICES, XInput2.ALL_MASTER_DEVICES, XInput2.MASTER_POINTER, XInput2.SLAVE_POINTER -> true
+        else -> false
+    }
+
+    private fun xi2IsKeyboard(deviceId: Int): Boolean = when (deviceId) {
+        XInput2.ALL_DEVICES, XInput2.ALL_MASTER_DEVICES, XInput2.MASTER_KEYBOARD, XInput2.SLAVE_KEYBOARD -> true
+        else -> false
+    }
+
+    /** The child of [ancestorId] on the path to [windowId] (0 when there is none). */
+    private fun childOnPath(ancestorId: Int, windowId: Int?): Int {
+        var current = windowId ?: return 0
+        while (true) {
+            if (current == ancestorId) return 0
+            val parent = document.window(current)?.parent ?: return 0
+            if (parent == ancestorId) return current
+            current = parent
+        }
+    }
+
+    /**
+     * Maps an XI2 event mask onto the core mask our grab machinery stores, for
+     * passive grabs. Only the button/key bits matter there.
+     */
+    private fun xi2MaskToCore(mask: ByteArray): Int {
+        var core = 0
+        if (XInput2.maskIsSet(mask, XInput2.EV_BUTTON_PRESS)) core = core or EventMask.BUTTON_PRESS
+        if (XInput2.maskIsSet(mask, XInput2.EV_BUTTON_RELEASE)) core = core or EventMask.BUTTON_RELEASE
+        if (XInput2.maskIsSet(mask, XInput2.EV_KEY_PRESS)) core = core or EventMask.KEY_PRESS
+        if (XInput2.maskIsSet(mask, XInput2.EV_KEY_RELEASE)) core = core or EventMask.KEY_RELEASE
+        if (XInput2.maskIsSet(mask, XInput2.EV_MOTION)) core = core or EventMask.POINTER_MOTION
+        if (XInput2.maskIsSet(mask, XInput2.EV_ENTER)) core = core or EventMask.ENTER_WINDOW
+        if (XInput2.maskIsSet(mask, XInput2.EV_LEAVE)) core = core or EventMask.LEAVE_WINDOW
+        if (XInput2.maskIsSet(mask, XInput2.EV_FOCUS_IN) || XInput2.maskIsSet(mask, XInput2.EV_FOCUS_OUT)) {
+            core = core or EventMask.FOCUS_CHANGE
+        }
+        return core
+    }
+
+    /**
+     * Delivers one XI2 DeviceEvent (key/button/motion) to this connection when it
+     * selected it. Selections are per-connection, so only the client that asked
+     * receives anything - and the window that gets it is the first one up the tree
+     * from the pointer/focus window that selected this event type, which is how
+     * GTK (selecting on its toplevel) receives events from its children.
+     */
+    private fun xi2DeviceEvent(
+        evtype: Int,
+        detail: Int,
+        deviceId: Int,
+        sourceId: Int,
+        targetId: Int,
+        rootX: Int,
+        rootY: Int,
+        flags: Int = 0,
+    ) {
+        val grab = xi2Grab
+        if (grab != null) {
+            // While this connection holds a device grab the event goes to the grab
+            // window, filtered by the grab's own mask; owner-events adds the normal
+            // delivery to the window under the pointer.
+            if (XInput2.selectionCovers(grab.deviceId, deviceId) && XInput2.maskIsSet(grab.mask, evtype)) {
+                xi2EmitDeviceEvent(evtype, detail, deviceId, sourceId, grab.window, childOnPath(grab.window, targetId), rootX, rootY, flags)
+            }
+            if (grab.ownerEvents && targetId != grab.window) {
+                val receiver = xi2Receiver(targetId, deviceId, evtype) ?: return
+                xi2EmitDeviceEvent(evtype, detail, deviceId, sourceId, receiver.first, receiver.second, rootX, rootY, flags)
+            }
+            return
+        }
+        val receiver = xi2Receiver(targetId, deviceId, evtype) ?: return
+        xi2EmitDeviceEvent(evtype, detail, deviceId, sourceId, receiver.first, receiver.second, rootX, rootY, flags)
+    }
+
+    /** The window that receives [evtype] from [deviceId], plus the child on the path. */
+    private fun xi2Receiver(targetId: Int, deviceId: Int, evtype: Int): Pair<Int, Int>? {
+        var current = targetId
+        var child = 0
+        while (true) {
+            if (xi2Selections.wants(current, deviceId, evtype)) return current to child
+            val parent = document.window(current)?.parent ?: return null
+            child = current
+            current = parent
+        }
+    }
+
+    private fun xi2EmitDeviceEvent(
+        evtype: Int,
+        detail: Int,
+        deviceId: Int,
+        sourceId: Int,
+        receiverId: Int,
+        childId: Int,
+        rootX: Int,
+        rootY: Int,
+        flags: Int,
+    ) {
+        val receiver = document.window(receiverId) ?: return
+        val (base, locked, effective) = XInput2.modifierParts(keyStateMask)
+        val eventX = rootX - receiver.x
+        val eventY = rootY - receiver.y
+        deliverGenericEvent(XInput2.MAJOR_OPCODE, evtype) { writer ->
+            with(XInput2) {
+                writer.short(deviceId)
+                writer.int(System.currentTimeMillis().toInt())
+                writer.int(detail)
+                writer.int(document.rootId)
+                writer.int(receiverId)
+                writer.int(childId)
+                // ---- 32-byte boundary ----
+                writer.fp1616(rootX)
+                writer.fp1616(rootY)
+                writer.fp1616(eventX)
+                writer.fp1616(eventY)
+                writer.short(1) // buttons_len: one 4-byte unit covers buttons 1-32
+                writer.short(0) // valuators_len: position travels in root_x/event_x
+                writer.short(sourceId)
+                writer.short(0) // pad
+                writer.int(flags)
+                writer.int(base); writer.int(0); writer.int(locked); writer.int(effective)
+                writer.byte(0); writer.byte(0); writer.byte(0); writer.byte(0) // group
+                writer.int(xi2ButtonMask(buttonMask))
+            }
+        }
+    }
+
+    /** XI2 Enter/Leave/FocusIn/FocusOut (`xXIEnterEvent` - all four share it). */
+    private fun xi2EmitCrossing(
+        evtype: Int,
+        detail: Int,
+        deviceId: Int,
+        sourceId: Int,
+        receiverId: Int,
+        childId: Int,
+        rootX: Int,
+        rootY: Int,
+        mode: Int = XInput2.NOTIFY_NORMAL,
+    ) {
+        val receiver = document.window(receiverId) ?: return
+        val (base, locked, effective) = XInput2.modifierParts(keyStateMask)
+        val focusWindow = resolveFocusWindow()
+        val hasFocus = focusWindow != null &&
+            (focusWindow == receiverId || isDescendantOf(receiverId, focusWindow))
+        deliverGenericEvent(XInput2.MAJOR_OPCODE, evtype) { writer ->
+            with(XInput2) {
+                writer.short(deviceId)
+                writer.int(System.currentTimeMillis().toInt())
+                writer.short(sourceId)
+                writer.byte(mode)
+                writer.byte(detail)
+                writer.int(document.rootId)
+                writer.int(receiverId)
+                writer.int(childId)
+                // ---- 32-byte boundary ----
+                writer.fp1616(rootX)
+                writer.fp1616(rootY)
+                writer.fp1616(rootX - receiver.x)
+                writer.fp1616(rootY - receiver.y)
+                writer.byte(1) // same_screen
+                writer.byte(if (hasFocus) 1 else 0) // focus
+                writer.short(1) // buttons_len
+                writer.int(base); writer.int(0); writer.int(locked); writer.int(effective)
+                writer.byte(0); writer.byte(0); writer.byte(0); writer.byte(0) // group
+                writer.int(xi2ButtonMask(buttonMask))
+            }
+        }
+    }
+
+    /**
+     * Crossing detail, the way X names it: Inferior when the event window is below
+     * the other one in the tree, Ancestor when it is above, Nonlinear otherwise
+     * (which is every crossing between two GTK toplevels).
+     */
+    private fun xi2CrossingDetail(eventWindow: Int, otherWindow: Int?): Int = when {
+        otherWindow == null || otherWindow == eventWindow -> XInput2.NOTIFY_NORMAL
+        isDescendantOf(eventWindow, otherWindow) -> XInput2.NOTIFY_ANCESTOR
+        isDescendantOf(otherWindow, eventWindow) -> XInput2.NOTIFY_INFERIOR
+        else -> XInput2.NOTIFY_NONLINEAR
+    }
+
     // --- replies, errors, events -------------------------------------------
 
     /**
@@ -2281,6 +3035,22 @@ class XConnection(
         if (newFocus != XDocument.FOCUS_NONE && newFocus != XDocument.FOCUS_POINTER_ROOT) {
             deliverToOwner(newFocus, focusEvent(X11.EV_FOCUS_IN, newFocus, detailFor(oldFocus, newFocus)))
         }
+        // XI2 focus events go to the connection that selected them (GDK selects
+        // FocusIn/FocusOut on its toplevels), not to the window's owner.
+        xi2Focus(XInput2.EV_FOCUS_OUT, oldFocus, newFocus)
+        xi2Focus(XInput2.EV_FOCUS_IN, newFocus, oldFocus)
+    }
+
+    /** XI2 FocusIn/FocusOut delivery, mirroring [sendFocusChange]'s core pair. */
+    private fun xi2Focus(evtype: Int, windowId: Int, other: Int) {
+        if (windowId == XDocument.FOCUS_NONE || windowId == XDocument.FOCUS_POINTER_ROOT) return
+        if (windowId == other) return
+        val deviceId = XInput2.MASTER_KEYBOARD
+        val sourceId = XInput2.SLAVE_KEYBOARD
+        if (!xi2Selections.wantsAnywhere(deviceId, evtype)) return
+        val receiver = xi2Receiver(windowId, deviceId, evtype) ?: return
+        xi2EmitCrossing(evtype, xi2CrossingDetail(receiver.first, other), deviceId, sourceId,
+            receiver.first, receiver.second, rootPointerX, rootPointerY)
     }
 
     /** The window keyboard events go to right now (focus or pointer-root semantics). */
@@ -2301,11 +3071,48 @@ class XConnection(
     private fun warpMove(x: Int, y: Int) {
         movePointer(x, y)
         val target = document.windowAt(rootPointerX, rootPointerY)
+        // A warp is a real pointer move: X promises MotionNotify for it, and XI2
+        // clients (GDK) get the same promise as XI_Motion.
+        xi2DeviceEvent(XInput2.EV_MOTION, 0, XInput2.MASTER_POINTER, XInput2.SLAVE_POINTER,
+            target?.id ?: document.rootId, rootPointerX, rootPointerY)
         if (target != null && target.eventMask and EventMask.POINTER_MOTION != 0) {
             queue(pointerEvent(X11.EV_MOTION_NOTIFY, 0, target, rootPointerX, rootPointerY))
         }
         flushPending()
         document.onWarp?.invoke(rootPointerX, rootPointerY, this)
+    }
+
+    /**
+     * The WarpPointer rule, shared by the core request and XIWarpPointer: when a
+     * source window is given the warp only happens if the pointer is inside the
+     * (optionally shrunk) source rectangle, and X says it then silently does
+     * nothing. Coordinates are INT16 for core and FP1616 for XI2 - the caller
+     * converts.
+     */
+    private fun warpPointer(
+        src: Int,
+        dst: Int,
+        srcX: Int,
+        srcY: Int,
+        srcWidth: Int,
+        srcHeight: Int,
+        dstX: Int,
+        dstY: Int,
+        opcode: Int,
+        minor: Int = 0,
+    ) {
+        if (src != 0) {
+            val s = document.window(src) ?: return error(X11.ERR_BAD_WINDOW, opcode, src, minor)
+            val w = if (srcWidth == 0) s.width else srcWidth
+            val h = if (srcHeight == 0) s.height else srcHeight
+            val inside = rootPointerX in s.x + srcX until s.x + srcX + w &&
+                rootPointerY in s.y + srcY until s.y + srcY + h
+            if (!inside) return // X: the warp silently does nothing
+        }
+        val base = if (dst != 0) {
+            document.window(dst) ?: return error(X11.ERR_BAD_WINDOW, opcode, dst, minor)
+        } else null
+        warpMove((base?.x ?: 0) + dstX, (base?.y ?: 0) + dstY)
     }
 
     /** Shared pointer move: confine-to-grab clamping, Enter/Leave tracking, MotionNotify. */
@@ -2336,15 +3143,38 @@ class XConnection(
             if (window != null && window.eventMask and EventMask.LEAVE_WINDOW != 0) {
                 queue(enterLeaveEvent(X11.EV_LEAVE_NOTIFY, 3, window, 0, x, y))
             }
+            xi2Crossing(XInput2.EV_LEAVE, previous, current, x, y)
         }
         if (current != null) {
             val window = document.window(current)
             if (window != null && window.eventMask and EventMask.ENTER_WINDOW != 0) {
                 queue(enterLeaveEvent(X11.EV_ENTER_NOTIFY, 3, window, 0, x, y))
             }
+            xi2Crossing(XInput2.EV_ENTER, current, previous, x, y)
         }
         lastPointerWindow = current
         flushPending()
+    }
+
+    /**
+     * XI2 Enter/Leave to whoever selected it, up the tree from the window the
+     * pointer is entering or leaving. [other] is the window on the other side of
+     * the crossing, which is what the notify detail is computed from.
+     */
+    private fun xi2Crossing(evtype: Int, windowId: Int, other: Int?, x: Int, y: Int) {
+        val deviceId = XInput2.MASTER_POINTER
+        val sourceId = XInput2.SLAVE_POINTER
+        val grab = xi2Grab
+        if (grab != null && !grab.keyboard) {
+            if (XInput2.selectionCovers(grab.deviceId, deviceId) && XInput2.maskIsSet(grab.mask, evtype)) {
+                xi2EmitCrossing(evtype, xi2CrossingDetail(grab.window, other), deviceId, sourceId,
+                    grab.window, childOnPath(grab.window, windowId), x, y, mode = XInput2.NOTIFY_NORMAL)
+            }
+            return
+        }
+        val receiver = xi2Receiver(windowId, deviceId, evtype) ?: return
+        xi2EmitCrossing(evtype, xi2CrossingDetail(receiver.first, other), deviceId, sourceId,
+            receiver.first, receiver.second, x, y)
     }
 
     private fun enterLeaveEvent(code: Int, detail: Int, target: XWindow, child: Int, x: Int, y: Int): XWriter {
@@ -2383,9 +3213,16 @@ class XConnection(
             ) {
                 queue(pointerEvent(X11.EV_MOTION_NOTIFY, 0, under, nx, ny))
             }
+            xi2DeviceEvent(XInput2.EV_MOTION, 0, XInput2.MASTER_POINTER, XInput2.SLAVE_POINTER,
+                under?.id ?: document.rootId, nx, ny)
             flushPending()
             return
         }
+        // XI2 delivery is independent of the core window masks: a client that
+        // selected XI2 events (GDK does, and selects no core masks at all) must
+        // still get them, so this runs before the core mask check below.
+        xi2DeviceEvent(XInput2.EV_MOTION, 0, XInput2.MASTER_POINTER, XInput2.SLAVE_POINTER,
+            under?.id ?: document.rootId, nx, ny)
         val target = under ?: return
         if (target.eventMask and EventMask.POINTER_MOTION == 0) return
         queue(pointerEvent(X11.EV_MOTION_NOTIFY, 0, target, nx, ny))
@@ -2409,8 +3246,13 @@ class XConnection(
             if (grab.ownerEvents && under != null && under.id != grab.window && under.eventMask and wanted != 0) {
                 queue(pointerEvent(code, button, under, nx, ny))
             }
+            xi2DeviceEvent(xi2ButtonEventType(pressed), button, XInput2.MASTER_POINTER, XInput2.SLAVE_POINTER,
+                under?.id ?: document.rootId, nx, ny)
             flushPending()
-            if (!pressed) document.ungrabImplicitPointer(this)
+            if (!pressed) {
+                document.ungrabImplicitPointer(this)
+                if (xi2Grab?.keyboard == false) xi2Grab = null
+            }
             return
         }
         // A press may activate a passive grab (XGrabButton): the press and
@@ -2426,10 +3268,14 @@ class XConnection(
                 )
                 val target = document.window(passive.window) ?: return
                 queue(pointerEvent(X11.EV_BUTTON_PRESS, button, target, nx, ny))
+                xi2DeviceEvent(XInput2.EV_BUTTON_PRESS, button, XInput2.MASTER_POINTER, XInput2.SLAVE_POINTER,
+                    under?.id ?: document.rootId, nx, ny)
                 flushPending()
                 return
             }
         }
+        xi2DeviceEvent(xi2ButtonEventType(pressed), button, XInput2.MASTER_POINTER, XInput2.SLAVE_POINTER,
+            under?.id ?: document.rootId, nx, ny)
         val target = under ?: return
         val code = if (pressed) X11.EV_BUTTON_PRESS else X11.EV_BUTTON_RELEASE
         if (pressed && target.eventMask and EventMask.BUTTON_PRESS == 0) return
@@ -2437,6 +3283,10 @@ class XConnection(
         queue(pointerEvent(code, button, target, nx, ny))
         flushPending()
     }
+
+    /** XI2 splits press and release into two event types, unlike core's detail byte. */
+    private fun xi2ButtonEventType(pressed: Boolean): Int =
+        if (pressed) XInput2.EV_BUTTON_PRESS else XInput2.EV_BUTTON_RELEASE
 
     fun onKey(keycode: Int, keysym: Int, pressed: Boolean, maskAfter: Int) {
         val grab = document.keyboardGrab
@@ -2453,6 +3303,13 @@ class XConnection(
             else -> focusTarget
         }
         val target = document.window(targetId) ?: return
+        // XI2 first: key events reach the client that selected them on the focus
+        // window (or an ancestor of it), independent of any core mask.
+        xi2DeviceEvent(
+            if (pressed) XInput2.EV_KEY_PRESS else XInput2.EV_KEY_RELEASE,
+            keycode, XInput2.MASTER_KEYBOARD, XInput2.SLAVE_KEYBOARD, targetId,
+            rootPointerX, rootPointerY,
+        )
         val code = if (pressed) X11.EV_KEY_PRESS else X11.EV_KEY_RELEASE
         val wanted = if (pressed) EventMask.KEY_PRESS else EventMask.KEY_RELEASE
         if (target.eventMask and wanted != 0) {
@@ -2541,10 +3398,24 @@ class XConnection(
         const val FONT_MIN_CHAR = 0x20
         const val FONT_MAX_CHAR = 0x7E
 
-        /** name -> [majorOpcode, firstEvent, firstError]; QueryExtension answers from here. */
+        /**
+         * name -> [majorOpcode, firstEvent, firstError]; QueryExtension answers
+         * from here and ListExtensions advertises these names. Names keep their
+         * canonical spelling (Xorg's own), because `xdpyinfo` prints them; the
+         * lookup is case-insensitive through [extension] since clients are not
+         * consistent about it.
+         */
         val EXTENSIONS: Map<String, IntArray> = mapOf(
             "RENDER" to intArrayOf(XRender.MAJOR_OPCODE, 0, XRender.FIRST_ERROR),
             "XTEST" to intArrayOf(X11.EXT_XTEST_OPCODE, 0, 0),
+            XBigRequests.NAME to intArrayOf(XBigRequests.MAJOR_OPCODE, 0, 0),
+            XGenericEvent.NAME to intArrayOf(XGenericEvent.MAJOR_OPCODE, 0, 0),
+            XInput2.NAME to intArrayOf(XInput2.MAJOR_OPCODE, XInput2.FIRST_EVENT, XInput2.FIRST_ERROR),
         )
+
+        private val EXTENSIONS_BY_UPPER = EXTENSIONS.keys.associateBy { it.uppercase() }
+
+        /** Case-insensitive [EXTENSIONS] lookup; null when we do not have it. */
+        fun extension(name: String): IntArray? = EXTENSIONS[EXTENSIONS_BY_UPPER[name.uppercase()]]
     }
 }

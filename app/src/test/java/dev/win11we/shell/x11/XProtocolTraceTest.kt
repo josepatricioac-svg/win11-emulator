@@ -174,12 +174,14 @@ class XProtocolTraceTest {
     fun `every extension a client queries is recorded with the answer we gave`() {
         send(
             client.queryExtension("BIG-REQUESTS"),
+            client.queryExtension("COMPOSITE"),
             client.queryExtension("XKEYBOARD"),
             client.queryExtension("XTEST"),
             client.queryExtension("xtest"),
         )
         val asked = connection.trace.extensionsAsked()
-        assertEquals(false, asked["BIG-REQUESTS"])
+        assertEquals(true, asked["BIG-REQUESTS"])
+        assertEquals(false, asked["COMPOSITE"])
         assertEquals(false, asked["XKEYBOARD"])
         assertEquals(true, asked["XTEST"])
         val summary = connection.trace.summary()
