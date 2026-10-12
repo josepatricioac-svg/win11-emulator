@@ -53,6 +53,24 @@ class XConnection(
 
     private val gcs = HashMap<Int, GcState>()
     private val pixmaps = HashMap<Int, Int>()
+
+    /** RENDER pictures and glyph sets are per-connection resources, like GCs. */
+    private val pictures = HashMap<Int, PictureState>()
+    private val glyphSets = HashMap<Int, XRender.GlyphStore>()
+
+    private class PictureState(
+        val drawable: Int,
+        val formatId: Int,
+        /** ARGB of a solid-fill picture; -1 for drawable-backed pictures. */
+        val solidColor: Int = -1,
+    ) {
+        var repeat: Int = XRender.REPEAT_NONE
+        var componentAlpha: Boolean = false
+        var clipXOrigin: Int = 0
+        var clipYOrigin: Int = 0
+        var clipMask: Int = 0 // pixmap id or 0
+        var clipRects: List<IntArray>? = null // absolute x,y,w,h in dst space
+    }
     private val fonts = HashMap<Int, String>()
     private val colormaps = HashSet<Int>()
     private var screenSaver = intArrayOf(600, 600, 1, 1) // timeout, interval, preferBlanking, allowExposures
@@ -740,7 +758,7 @@ class XConnection(
                 val width = reader.short()
                 val height = reader.short()
                 pixmaps[id] = depth
-                sink.setSize(id, width, height)
+                sink.setSize(id, width, height, depth)
             }
             X11.REQ_FREE_PIXMAP -> {
                 val id = reader.int()
@@ -1163,6 +1181,7 @@ class XConnection(
             }
             X11.REQ_NO_OPERATION -> Unit
             X11.EXT_XTEST_OPCODE -> xtestRequest(opcode, data, reader, request)
+            XRender.MAJOR_OPCODE -> renderRequest(opcode, data, reader, request)
             else -> {
                 // BadRequest is the correct protocol answer, and it is also what
                 // kills a GTK client (its error handler calls _exit(1)), so the
@@ -1737,6 +1756,340 @@ class XConnection(
         }
     }
 
+    // --- RENDER (extension 0.4; see XRender for the version policy) ---------
+
+    /**
+     * RENDER request dispatch. The minor opcode arrives in the request's data
+     * byte, and the layouts follow xorgproto's renderproto.h exactly. Requests
+     * a 0.4 client cannot send (traps, solid fills, gradients, ARGB cursors,
+     * transforms) fall through to BadRequest WITH a trace entry, so the shared
+     * log names exactly what a future client asked for that we lack.
+     */
+    private fun renderRequest(major: Int, minor: Int, reader: XReader, request: ByteArray) {
+        when (minor) {
+            XRender.MINOR_QUERY_VERSION -> {
+                val clientMajor = reader.int()
+                val clientMinor = reader.int()
+                val answered =
+                    if (clientMajor > XRender.VERSION_MAJOR) XRender.VERSION_MINOR
+                    else minOf(clientMinor, XRender.VERSION_MINOR)
+                reply(major) { writer ->
+                    writer.int(XRender.VERSION_MAJOR)
+                    writer.int(answered)
+                    writer.pad(16)
+                }
+            }
+            XRender.MINOR_QUERY_PICT_FORMATS -> {
+                val formats = XRender.FORMATS
+                val visuals = XRender.visualFormats()
+                val depths = XRender.SCREEN_DEPTHS
+                // 28B per xPictFormInfo; one screen (8B) + per-depth blocks (8B each)
+                // + the depth-24 visuals (8B each) + one subpixel entry (4B).
+                val extra = formats.size * 28 + 8 + depths.size * 8 + visuals.size * 8 + 4
+                reply(major, extraLength = extra) { writer ->
+                    writer.int(formats.size) // num-formats @8
+                    writer.int(1) // num-screens
+                    writer.int(depths.size) // num-depths
+                    writer.int(visuals.size) // num-visuals
+                    writer.int(1) // num-subpixel (0.6 field; always sent, clients gate on it)
+                    writer.pad(4)
+                    formats.forEach { f ->
+                        writer.int(f.id)
+                        writer.byte(1) // type: Direct
+                        writer.byte(f.depth)
+                        writer.short(0) // pad1
+                        writer.short(f.redShift); writer.short(f.redMask)
+                        writer.short(f.greenShift); writer.short(f.greenMask)
+                        writer.short(f.blueShift); writer.short(f.blueMask)
+                        writer.short(f.alphaShift); writer.short(f.alphaMask)
+                        writer.int(0) // colormap: None
+                    }
+                    writer.int(depths.size) // xRenderPictScreen.depth (count)
+                    writer.int(XRender.FORMAT_X8R8G8B8) // fallback
+                    depths.forEach { depth ->
+                        val visualsHere = if (depth == 24) visuals.size else 0
+                        writer.byte(depth)
+                        writer.byte(0) // pad1
+                        writer.short(visualsHere)
+                        writer.int(0) // pad2
+                        if (depth == 24) {
+                            visuals.forEach { (visualId, formatId) -> writer.int(visualId); writer.int(formatId) }
+                        }
+                    }
+                    writer.int(0) // subpixel order: Unknown (grayscale text AA)
+                }
+            }
+            XRender.MINOR_QUERY_PICT_INDEX_VALUES -> {
+                val formatId = reader.int()
+                if (XRender.format(formatId) == null) return error(XRender.ERR_PICT_FORMAT, major, formatId, minor)
+                // All our formats are Direct; indexed palettes report zero values.
+                reply(major) { writer -> writer.int(0); writer.pad(20) }
+            }
+            XRender.MINOR_CREATE_PICTURE -> {
+                val pid = reader.int()
+                val drawable = reader.int()
+                val formatId = reader.int()
+                val mask = reader.int()
+                val format = XRender.format(formatId)
+                    ?: return error(XRender.ERR_PICT_FORMAT, major, formatId, minor)
+                val window = document.window(drawable)
+                val drawableDepth = when {
+                    window != null -> window.depth
+                    pixmaps.containsKey(drawable) -> pixmaps.getValue(drawable)
+                    else -> return error(X11.ERR_BAD_DRAWABLE, major, drawable, minor)
+                }
+                if (format.depth != drawableDepth) return error(X11.ERR_BAD_MATCH, major, formatId, minor)
+                val state = PictureState(drawable, formatId)
+                pictures[pid] = state
+                readPictureValues(reader, mask, state)
+            }
+            XRender.MINOR_CHANGE_PICTURE -> {
+                val pid = reader.int()
+                val mask = reader.int()
+                val state = pictures[pid] ?: return error(XRender.ERR_PICTURE, major, pid, minor)
+                readPictureValues(reader, mask, state)
+            }
+            XRender.MINOR_SET_PICTURE_CLIP_RECTANGLES -> {
+                val pid = reader.int()
+                val xOrigin = reader.shortSigned()
+                val yOrigin = reader.shortSigned()
+                val state = pictures[pid] ?: return error(XRender.ERR_PICTURE, major, pid, minor)
+                val count = (request.size - 12) / 8
+                val rects = List(count) {
+                    intArrayOf(
+                        reader.shortSigned() + xOrigin,
+                        reader.shortSigned() + yOrigin,
+                        reader.short(),
+                        reader.short(),
+                    )
+                }
+                state.clipRects = rects
+                state.clipMask = 0
+            }
+            XRender.MINOR_FREE_PICTURE -> {
+                val pid = reader.int()
+                pictures.remove(pid) ?: return error(XRender.ERR_PICTURE, major, pid, minor)
+            }
+            XRender.MINOR_COMPOSITE -> {
+                val op = reader.byte()
+                reader.skip(3)
+                val srcId = reader.int()
+                val maskId = reader.int()
+                val dstId = reader.int()
+                val xSrc = reader.shortSigned(); val ySrc = reader.shortSigned()
+                val xMask = reader.shortSigned(); val yMask = reader.shortSigned()
+                val xDst = reader.shortSigned(); val yDst = reader.shortSigned()
+                val width = reader.short(); val height = reader.short()
+                val src = pictures[srcId] ?: return error(XRender.ERR_PICTURE, major, srcId, minor)
+                val dst = pictures[dstId] ?: return error(XRender.ERR_PICTURE, major, dstId, minor)
+                val mask = if (maskId != 0) pictures[maskId] ?: return error(XRender.ERR_PICTURE, major, maskId, minor) else null
+                if (op !in XRender.OP_CLEAR..XRender.OP_SATURATE) return error(XRender.ERR_PICT_OP, major, op, minor)
+                sink.blend(dst.drawable, compositeSpec(op, src, mask, dst, xSrc, ySrc, xMask, yMask, xDst, yDst, width, height))
+            }
+            XRender.MINOR_FILL_RECTANGLES -> {
+                val op = reader.byte()
+                reader.skip(3)
+                val dstId = reader.int()
+                val red = reader.short(); val green = reader.short()
+                val blue = reader.short(); val alpha = reader.short()
+                val dst = pictures[dstId] ?: return error(XRender.ERR_PICTURE, major, dstId, minor)
+                if (op !in XRender.OP_CLEAR..XRender.OP_SATURATE) return error(XRender.ERR_PICT_OP, major, op, minor)
+                val color = XRender.color16ToArgb(red, green, blue, alpha)
+                val count = (request.size - 20) / 8
+                repeat(count) {
+                    val x = reader.shortSigned(); val y = reader.shortSigned()
+                    val width = reader.short(); val height = reader.short()
+                    sink.blend(
+                        dst.drawable,
+                        BlendSpec(
+                            op = op, srcDrawable = 0, srcColor = color, srcX = 0, srcY = 0,
+                            maskDrawable = 0, maskX = 0, maskY = 0,
+                            dstX = x, dstY = y, width = width, height = height,
+                            srcRepeat = XRender.REPEAT_NONE, clip = clipOf(dst),
+                        ),
+                    )
+                }
+            }
+            XRender.MINOR_CREATE_GLYPH_SET -> {
+                val gsid = reader.int()
+                val formatId = reader.int()
+                val format = XRender.format(formatId)
+                if (format == null || format.depth != 1 && format.depth != 4 && format.depth != 8) {
+                    return error(XRender.ERR_PICT_FORMAT, major, formatId, minor)
+                }
+                glyphSets[gsid] = XRender.GlyphStore(formatId)
+            }
+            XRender.MINOR_REFERENCE_GLYPH_SET -> {
+                val gsid = reader.int()
+                val existing = reader.int()
+                glyphSets[gsid] = glyphSets[existing] ?: return error(XRender.ERR_GLYPH_SET, major, existing, minor)
+            }
+            XRender.MINOR_FREE_GLYPH_SET -> {
+                val gsid = reader.int()
+                glyphSets.remove(gsid) ?: return error(XRender.ERR_GLYPH_SET, major, gsid, minor)
+            }
+            XRender.MINOR_ADD_GLYPHS -> {
+                val gsid = reader.int()
+                val nglyphs = reader.int()
+                val store = glyphSets[gsid] ?: return error(XRender.ERR_GLYPH_SET, major, gsid, minor)
+                // Every glyph costs a CARD32 id + a 12-byte xGlyphInfo before any bitmap data.
+                if (nglyphs < 0 || nglyphs.toLong() * 16 > (request.size - 12).toLong()) {
+                    return error(X11.ERR_BAD_LENGTH, major, nglyphs, minor)
+                }
+                val format = XRender.format(store.formatId) ?: return error(XRender.ERR_PICT_FORMAT, major, store.formatId, minor)
+                val ids = IntArray(nglyphs) { reader.int() }
+                val infos = Array(nglyphs) {
+                    val width = reader.short(); val height = reader.short()
+                    val x = reader.shortSigned(); val y = reader.shortSigned()
+                    val xOff = reader.shortSigned(); val yOff = reader.shortSigned()
+                    intArrayOf(width, height, x, y, xOff, yOff)
+                }
+                var offset = 12 + nglyphs * 16
+                for (index in 0 until nglyphs) {
+                    val info = infos[index]
+                    val width = info[0]; val height = info[1]
+                    val x = info[2]; val y = info[3]
+                    val xOff = info[4]; val yOff = info[5]
+                    val bytes = XRender.glyphDataBytes(format.depth, width, height)
+                    if (bytes < 0 || offset + bytes > request.size) {
+                        return error(X11.ERR_BAD_LENGTH, major, ids[index], minor)
+                    }
+                    val alpha = XRender.expandAlpha(format.depth, width, height, request, offset)
+                        ?: return error(X11.ERR_BAD_LENGTH, major, ids[index], minor)
+                    store.glyphs[ids[index]] = XRender.Glyph(width, height, x, y, xOff, yOff, alpha)
+                    offset += bytes
+                }
+            }
+            XRender.MINOR_FREE_GLYPHS -> {
+                val gsid = reader.int()
+                val store = glyphSets[gsid] ?: return error(XRender.ERR_GLYPH_SET, major, gsid, minor)
+                val count = (request.size - 8) / 4
+                repeat(count) { store.glyphs.remove(reader.int()) }
+            }
+            XRender.MINOR_COMPOSITE_GLYPHS_8, XRender.MINOR_COMPOSITE_GLYPHS_16, XRender.MINOR_COMPOSITE_GLYPHS_32 -> {
+                val idWidth = when (minor) {
+                    XRender.MINOR_COMPOSITE_GLYPHS_8 -> 1
+                    XRender.MINOR_COMPOSITE_GLYPHS_16 -> 2
+                    else -> 4
+                }
+                val op = reader.byte()
+                reader.skip(3)
+                val srcId = reader.int()
+                val dstId = reader.int()
+                reader.int() // mask-format: a hint we do not need
+                val gsid = reader.int()
+                val xSrc = reader.shortSigned(); val ySrc = reader.shortSigned()
+                val src = pictures[srcId] ?: return error(XRender.ERR_PICTURE, major, srcId, minor)
+                val dst = pictures[dstId] ?: return error(XRender.ERR_PICTURE, major, dstId, minor)
+                if (op !in XRender.OP_CLEAR..XRender.OP_SATURATE) return error(XRender.ERR_PICT_OP, major, op, minor)
+                val store = glyphSets[gsid] ?: return error(XRender.ERR_GLYPH_SET, major, gsid, minor)
+                val elements = XRender.parseGlyphElements(request, littleEndian, idWidth, 28)
+                    ?: return error(X11.ERR_BAD_LENGTH, major, 0, minor)
+                // Resolve every glyph before drawing anything: a missing id is BadGlyph
+                // and the whole request must not half-render (Xorg semantics).
+                val placements = mutableListOf<GlyphPlacement>()
+                var penX = 0
+                var penY = 0
+                for (element in elements) {
+                    penX += element.dx
+                    penY += element.dy
+                    for (id in element.ids) {
+                        val glyph = store.glyphs[id] ?: return error(XRender.ERR_GLYPH, major, id, minor)
+                        placements.add(GlyphPlacement(penX + glyph.x, penY + glyph.y, glyph))
+                        penX += glyph.xOff
+                        penY += glyph.yOff
+                    }
+                }
+                if (placements.isEmpty()) return
+                val solid = src.solidColor >= 0
+                sink.glyphRun(
+                    dst.drawable,
+                    GlyphRunSpec(
+                        op = op,
+                        srcColor = if (solid) src.solidColor else 0,
+                        srcDrawable = if (solid) 0 else src.drawable,
+                        srcX = xSrc,
+                        srcY = ySrc,
+                        srcRepeat = src.repeat,
+                        placements = placements,
+                    ),
+                )
+            }
+            else -> {
+                // Everything a RENDER 0.4 client cannot send: traps, solid fills,
+                // gradients, ARGB cursors, transforms, filters. Named in the trace
+                // so the shared log says exactly which one a client tried.
+                trace.recordUnimplemented(major, minor)
+                error(X11.ERR_BAD_REQUEST, major, 0, minor)
+            }
+        }
+    }
+
+    /** Reads CreatePicture/ChangePicture values in ascending value-mask bit order. */
+    private fun readPictureValues(reader: XReader, mask: Int, state: PictureState) {
+        if (mask and XRender.CP_REPEAT != 0) state.repeat = reader.int()
+        if (mask and XRender.CP_ALPHA_MAP != 0) reader.int()
+        if (mask and XRender.CP_ALPHA_X_ORIGIN != 0) reader.int()
+        if (mask and XRender.CP_ALPHA_Y_ORIGIN != 0) reader.int()
+        if (mask and XRender.CP_CLIP_X_ORIGIN != 0) state.clipXOrigin = reader.int()
+        if (mask and XRender.CP_CLIP_Y_ORIGIN != 0) state.clipYOrigin = reader.int()
+        if (mask and XRender.CP_CLIP_MASK != 0) state.clipMask = reader.int()
+        if (mask and XRender.CP_GRAPHICS_EXPOSURE != 0) reader.int()
+        if (mask and XRender.CP_SUBWINDOW_MODE != 0) reader.int()
+        if (mask and XRender.CP_POLY_EDGE != 0) reader.int()
+        if (mask and XRender.CP_POLY_MODE != 0) reader.int()
+        if (mask and XRender.CP_DITHER != 0) reader.int()
+        if (mask and XRender.CP_COMPONENT_ALPHA != 0) state.componentAlpha = reader.int() != 0
+    }
+
+    /** The destination picture's clip rectangles translated to absolute dst coordinates. */
+    private fun clipOf(dst: PictureState): List<IntArray>? {
+        val rects = dst.clipRects ?: return null
+        if (dst.clipXOrigin == 0 && dst.clipYOrigin == 0) return rects
+        return rects.map { intArrayOf(it[0] + dst.clipXOrigin, it[1] + dst.clipYOrigin, it[2], it[3]) }
+    }
+
+    /** Resolves a Composite request into the blend the rasterisers replay. */
+    private fun compositeSpec(
+        op: Int,
+        src: PictureState,
+        mask: PictureState?,
+        dst: PictureState,
+        xSrc: Int, ySrc: Int,
+        xMask: Int, yMask: Int,
+        xDst: Int, yDst: Int,
+        width: Int, height: Int,
+    ): BlendSpec {
+        // An explicit mask picture wins; otherwise the dst's clip-mask pixmap (a1)
+        // acts as the mask. Intersecting BOTH at once is not modelled - cairo uses
+        // one or the other, and the protocol trace shows if that ever bites.
+        var maskDrawable = 0
+        var maskColor: Int? = null
+        var maskX = xMask
+        var maskY = yMask
+        when {
+            mask != null && mask.solidColor >= 0 -> maskColor = mask.solidColor
+            mask != null -> { maskDrawable = mask.drawable }
+            dst.clipMask != 0 && pixmaps.containsKey(dst.clipMask) -> {
+                maskDrawable = dst.clipMask
+                // The clip mask sits at the clip origin in dst space, so it samples
+                // dst-aligned: mask coordinate = dst coordinate - clip origin.
+                maskX = xDst - dst.clipXOrigin
+                maskY = yDst - dst.clipYOrigin
+            }
+        }
+        return BlendSpec(
+            op = op,
+            srcDrawable = if (src.solidColor >= 0) 0 else src.drawable,
+            srcColor = if (src.solidColor >= 0) src.solidColor else 0,
+            srcX = xSrc, srcY = ySrc,
+            maskDrawable = maskDrawable, maskX = maskX, maskY = maskY, maskColor = maskColor,
+            dstX = xDst, dstY = yDst, width = width, height = height,
+            srcRepeat = src.repeat,
+            clip = clipOf(dst),
+        )
+    }
+
     // --- replies, errors, events -------------------------------------------
 
     /**
@@ -1779,7 +2132,7 @@ class XConnection(
         lastError = X11.ERR_SUCCESS
     }
 
-    fun error(code: Int, opcode: Int, badValue: Int) {
+    fun error(code: Int, opcode: Int, badValue: Int, minor: Int = 0) {
         lastError = code
         trace.recordErrorSent()
         val writer = XWriter(littleEndian)
@@ -1787,7 +2140,7 @@ class XConnection(
         writer.byte(code)
         writer.short(sequence)
         writer.int(badValue)
-        writer.short(0) // minorOpcode
+        writer.short(minor) // minorOpcode (extension errors)
         writer.byte(opcode)
         writer.pad(21) // 11 bytes written so far; X messages are always 32
         pending.add(writer.toByteArray().copyOf(32))
@@ -2190,6 +2543,7 @@ class XConnection(
 
         /** name -> [majorOpcode, firstEvent, firstError]; QueryExtension answers from here. */
         val EXTENSIONS: Map<String, IntArray> = mapOf(
+            "RENDER" to intArrayOf(XRender.MAJOR_OPCODE, 0, XRender.FIRST_ERROR),
             "XTEST" to intArrayOf(X11.EXT_XTEST_OPCODE, 0, 0),
         )
     }

@@ -485,10 +485,11 @@ class XProtocolTest {
             assertEquals(0, message.size % 4) // every X message is 4-byte aligned
             if (message[0].toInt() == 0) assertEquals(32, message.size) // errors are fixed size
         }
-        // QueryExtension (request #5): RENDER is absent, so present=0 in the data byte
+        // QueryExtension (request #5): RENDER is served (D1d) - present=1 in the
+        // data byte and a fixed-size reply like every other QueryExtension answer.
         val extension = out.replies().first { it.shortLE(2) == 5 }
         assertEquals(32, extension.size)
-        assertEquals(0, extension[1].toInt())
+        assertEquals(1, extension[1].toInt())
         // GetKeyboardMapping (request #6): keysyms-per-keycode in the data byte,
         // the two keysyms for keycode 38 ('a') start at offset 32
         val mapping = out.replies().first { it.shortLE(2) == 6 }
@@ -514,8 +515,9 @@ class XProtocolTest {
     @Test
     fun `extension lookup is case-insensitive and unknown extensions are absent`() {
         assertEquals(1, send(client.queryExtension("xtest")).reply()[1].toInt())
-        assertEquals(0, send(client.queryExtension("RENDER")).reply()[1].toInt())
+        assertEquals(1, send(client.queryExtension("render")).reply()[1].toInt()) // case-insensitive too
         assertEquals(0, send(client.queryExtension("BIG-REQUESTS")).reply()[1].toInt())
+        assertEquals(0, send(client.queryExtension("XKEYBOARD")).reply()[1].toInt())
     }
 
     @Test

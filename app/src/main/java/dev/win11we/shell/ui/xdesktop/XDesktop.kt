@@ -1,12 +1,17 @@
 package dev.win11we.shell.ui.xdesktop
 
 import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.view.MotionEvent
 import androidx.compose.foundation.background
@@ -52,12 +57,15 @@ import androidx.compose.ui.unit.dp
 import dev.win11we.shell.ui.terminal.SharedLog
 import dev.win11we.shell.x11.CursorGlyph
 import dev.win11we.shell.x11.DrawOp
+import dev.win11we.shell.x11.BlendSpec
+import dev.win11we.shell.x11.GlyphRunSpec
 import dev.win11we.shell.x11.ImeCommitExtractor
 import dev.win11we.shell.x11.ShellWindowManager
 import dev.win11we.shell.x11.XDisplayList
 import dev.win11we.shell.x11.XDocument
 import dev.win11we.shell.x11.XInput
 import dev.win11we.shell.x11.XKeyboard
+import dev.win11we.shell.x11.XRender
 import dev.win11we.shell.x11.XServer
 import kotlinx.coroutines.isActive
 
@@ -67,17 +75,21 @@ import kotlinx.coroutines.isActive
  * (a cursor per drawable), then the bitmaps are composited in
  * [XDocument.paintOrder] - root first, children back-to-front - exactly like
  * X's stacking order. D1c adds the vector primitives (points, lines, arcs,
- * polygons), ImageText backgrounds and the software cursor.
+ * polygons), ImageText backgrounds and the software cursor, and (D1d) the
+ * RENDER ops: Composite/FillRectangles blends through native Porter-Duff
+ * xfermodes and CompositeGlyphs runs through cached ALPHA_8 glyph bitmaps.
  */
 class XCanvasRenderer {
     private class Cache(val bitmap: Bitmap, val canvas: Canvas, var drawn: Int)
 
     private val caches = HashMap<Int, Cache>()
     private val imageCache = HashMap<DrawOp.Image, Bitmap>()
+    private val glyphCache = HashMap<XRender.Glyph, Bitmap>()
     private val replaying = HashSet<Int>()
     private val paint = Paint().apply { isAntiAlias = true }
     private val srcRect = Rect()
     private val dstRect = RectF()
+    private val matrix = Matrix()
     private val arcRect = RectF()
     private val path = Path()
     private val fontMetrics = Paint.FontMetrics()
@@ -297,8 +309,197 @@ class XCanvasRenderer {
                     paint.color = op.argb
                     canvas.drawPath(path, paint)
                 }
+                is DrawOp.Blend -> replayBlend(canvas, op.spec, document, lists)
+                is DrawOp.GlyphRun -> replayGlyphRun(canvas, op.spec, document, lists)
             }
         }
+    }
+
+    /**
+     * RENDER Composite/FillRectangles on the platform renderer. The 12 core
+     * Porter-Duff ops map onto native xfermodes; Add and Saturate have no
+     * PorterDuff mode and fall back to SRC_OVER (a visible-but-minor difference
+     * the JVM snapshot rasteriser does NOT share - it computes both exactly).
+     */
+    private fun xfermodeFor(op: Int): PorterDuffXfermode? = when (op) {
+        XRender.OP_CLEAR -> PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+        XRender.OP_SRC -> PorterDuffXfermode(PorterDuff.Mode.SRC)
+        XRender.OP_DST -> null // dst untouched: the caller skips drawing entirely
+        XRender.OP_OVER -> PorterDuffXfermode(PorterDuff.Mode.SRC_OVER)
+        XRender.OP_OVER_REVERSE -> PorterDuffXfermode(PorterDuff.Mode.DST_OVER)
+        XRender.OP_IN -> PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
+        XRender.OP_IN_REVERSE -> PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+        XRender.OP_OUT -> PorterDuffXfermode(PorterDuff.Mode.SRC_OUT)
+        XRender.OP_OUT_REVERSE -> PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
+        XRender.OP_ATOP -> PorterDuffXfermode(PorterDuff.Mode.SRC_ATOP)
+        XRender.OP_ATOP_REVERSE -> PorterDuffXfermode(PorterDuff.Mode.DST_ATOP)
+        XRender.OP_XOR -> PorterDuffXfermode(PorterDuff.Mode.XOR)
+        else -> PorterDuffXfermode(PorterDuff.Mode.SRC_OVER) // ADD/SATURATE: see KDoc
+    }
+
+    private fun applyClip(canvas: Canvas, clip: List<IntArray>?): Boolean {
+        if (clip == null || clip.isEmpty()) return false
+        path.reset()
+        clip.forEach { rect ->
+            path.addRect(
+                rect[0].toFloat(), rect[1].toFloat(),
+                (rect[0] + rect[2]).toFloat(), (rect[1] + rect[3]).toFloat(),
+                Path.Direction.CW,
+            )
+        }
+        canvas.save()
+        canvas.clipPath(path)
+        return true
+    }
+
+    private fun replayBlend(canvas: Canvas, spec: BlendSpec, document: XDocument, lists: XDisplayList) {
+        if (spec.width <= 0 || spec.height <= 0 || spec.op == XRender.OP_DST) return
+        val clipped = applyClip(canvas, spec.clip)
+        val masked = spec.maskDrawable != 0 || spec.maskColor != null
+        if (masked) canvas.saveLayer(null, null)
+        paint.style = Paint.Style.FILL
+        paint.shader = null
+        paint.colorFilter = null
+        paint.alpha = 255
+        if (spec.srcDrawable == 0) {
+            // Solid source: one rectangle in the requested operator.
+            paint.color = spec.srcColor
+            paint.xfermode = xfermodeFor(spec.op)
+            canvas.drawRect(
+                spec.dstX.toFloat(), spec.dstY.toFloat(),
+                (spec.dstX + spec.width).toFloat(), (spec.dstY + spec.height).toFloat(),
+                paint,
+            )
+        } else {
+            val source = sourceBitmap(spec.srcDrawable, document, lists)
+            if (source != null) {
+                paint.xfermode = xfermodeFor(spec.op)
+                val tile = when (spec.srcRepeat) {
+                    XRender.REPEAT_NORMAL -> Shader.TileMode.REPEAT
+                    XRender.REPEAT_PAD -> Shader.TileMode.CLAMP
+                    XRender.REPEAT_REFLECT -> Shader.TileMode.MIRROR
+                    else -> null
+                }
+                if (tile == null) {
+                    srcRect.set(spec.srcX, spec.srcY, spec.srcX + spec.width, spec.srcY + spec.height)
+                    dstRect.set(
+                        spec.dstX.toFloat(), spec.dstY.toFloat(),
+                        (spec.dstX + spec.width).toFloat(), (spec.dstY + spec.height).toFloat(),
+                    )
+                    canvas.drawBitmap(source.bitmap, srcRect, dstRect, paint)
+                } else {
+                    val shader = BitmapShader(source.bitmap, tile, tile)
+                    matrix.reset()
+                    matrix.setTranslate((spec.dstX - spec.srcX).toFloat(), (spec.dstY - spec.srcY).toFloat())
+                    shader.setLocalMatrix(matrix)
+                    paint.shader = shader
+                    canvas.drawRect(
+                        spec.dstX.toFloat(), spec.dstY.toFloat(),
+                        (spec.dstX + spec.width).toFloat(), (spec.dstY + spec.height).toFloat(),
+                        paint,
+                    )
+                    paint.shader = null
+                }
+                paint.xfermode = null
+            }
+        }
+        if (masked) {
+            // Keep the drawn source only where the mask's alpha says so.
+            paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+            if (spec.maskColor != null) {
+                paint.color = (spec.maskColor ushr 24 shl 24) or 0x00FFFFFF // alpha only
+                canvas.drawRect(
+                    spec.dstX.toFloat(), spec.dstY.toFloat(),
+                    (spec.dstX + spec.width).toFloat(), (spec.dstY + spec.height).toFloat(),
+                    paint,
+                )
+            } else {
+                val mask = sourceBitmap(spec.maskDrawable, document, lists)
+                if (mask != null) {
+                    srcRect.set(spec.maskX, spec.maskY, spec.maskX + spec.width, spec.maskY + spec.height)
+                    dstRect.set(
+                        spec.dstX.toFloat(), spec.dstY.toFloat(),
+                        (spec.dstX + spec.width).toFloat(), (spec.dstY + spec.height).toFloat(),
+                    )
+                    canvas.drawBitmap(mask.bitmap, srcRect, dstRect, paint)
+                }
+            }
+            paint.xfermode = null
+            canvas.restore()
+        }
+        if (clipped) canvas.restore()
+    }
+
+    private fun replayGlyphRun(canvas: Canvas, spec: GlyphRunSpec, document: XDocument, lists: XDisplayList) {
+        if (spec.placements.isEmpty() || spec.op == XRender.OP_DST) return
+        paint.style = Paint.Style.FILL
+        paint.shader = null
+        paint.colorFilter = null
+        paint.alpha = 255
+        val xfer = xfermodeFor(spec.op)
+        if (spec.srcDrawable == 0) {
+            // The common case: solid-colour text (Xft, cairo's glyph compositor).
+            paint.color = spec.srcColor
+            paint.xfermode = xfer
+            for (placement in spec.placements) {
+                val bitmap = glyphBitmap(placement.glyph) ?: continue
+                canvas.drawBitmap(bitmap, placement.dstX.toFloat(), placement.dstY.toFloat(), paint)
+            }
+            paint.xfermode = null
+        } else {
+            // Image-source glyphs: draw the source, then keep it under the glyph alphas.
+            val source = sourceBitmap(spec.srcDrawable, document, lists) ?: return
+            var left = Int.MAX_VALUE; var top = Int.MAX_VALUE
+            var right = Int.MIN_VALUE; var bottom = Int.MIN_VALUE
+            for (placement in spec.placements) {
+                left = minOf(left, placement.dstX); top = minOf(top, placement.dstY)
+                right = maxOf(right, placement.dstX + placement.glyph.width)
+                bottom = maxOf(bottom, placement.dstY + placement.glyph.height)
+            }
+            if (right <= left || bottom <= top) return
+            canvas.saveLayer(left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat(), null)
+            val tile = when (spec.srcRepeat) {
+                XRender.REPEAT_NORMAL -> Shader.TileMode.REPEAT
+                XRender.REPEAT_PAD -> Shader.TileMode.CLAMP
+                XRender.REPEAT_REFLECT -> Shader.TileMode.MIRROR
+                else -> null
+            }
+            if (tile == null) {
+                canvas.drawBitmap(
+                    source.bitmap,
+                    (-spec.srcX).toFloat(),
+                    (-spec.srcY).toFloat(),
+                    null,
+                )
+            } else {
+                val shader = BitmapShader(source.bitmap, tile, tile)
+                matrix.reset()
+                matrix.setTranslate((-spec.srcX).toFloat(), (-spec.srcY).toFloat())
+                shader.setLocalMatrix(matrix)
+                paint.shader = shader
+                canvas.drawRect(left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat(), paint)
+                paint.shader = null
+            }
+            paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+            paint.color = Color.WHITE
+            for (placement in spec.placements) {
+                val bitmap = glyphBitmap(placement.glyph) ?: continue
+                canvas.drawBitmap(bitmap, placement.dstX.toFloat(), placement.dstY.toFloat(), paint)
+            }
+            paint.xfermode = null
+            canvas.restore()
+        }
+    }
+
+    private fun glyphBitmap(glyph: XRender.Glyph): Bitmap? {
+        glyphCache[glyph]?.let { return it }
+        if (glyph.width <= 0 || glyph.height <= 0) return null
+        val bitmap = Bitmap.createBitmap(glyph.width, glyph.height, Bitmap.Config.ALPHA_8)
+        val pixels = IntArray(glyph.width * glyph.height) { (glyph.alpha[it].toInt() and 0xFF) shl 24 }
+        bitmap.setPixels(pixels, 0, glyph.width, 0, 0, glyph.width, glyph.height)
+        if (glyphCache.size > GLYPH_CACHE_LIMIT) glyphCache.clear()
+        glyphCache[glyph] = bitmap
+        return bitmap
     }
 
     private fun sourceBitmap(id: Int, document: XDocument, lists: XDisplayList): Cache? {
@@ -330,6 +531,7 @@ class XCanvasRenderer {
         const val DEFAULT_BACKGROUND = 0xFF1C1C1C.toInt()
         const val TEXT_PX = 14f
         const val IMAGE_CACHE_LIMIT = 512
+        const val GLYPH_CACHE_LIMIT = 512
     }
 }
 

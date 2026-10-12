@@ -105,6 +105,45 @@ routed through the same focus/grab machinery as real input, with keycode-derived
 keysyms and modifier-mask updates. This gives Wine its synthetic-input path
 (`SendInput`, cursor warping) and any X automation tool a working surface.
 
+### RENDER extension (D1d) - and the version the server claims
+
+GTK3/cairo cannot render without RENDER: text goes through `CompositeGlyphs`,
+fills through `FillRectangles`/`Composite`, and every anti-aliased edge through
+an a8 mask picture. `QueryExtension("RENDER")` therefore answers *present*
+(major opcode 129, error base 160), and the extension is implemented down to the
+rasterisers - the pure-JVM snapshot one (`XDisplayList.rasterise`, which GetImage
+and the wire tests read back) and the Android one (`XCanvasRenderer`, native
+Porter-Duff xfermodes + cached ALPHA_8 glyph bitmaps).
+
+**Implemented (everything a 0.4 client can send):** `QueryVersion`,
+`QueryPictFormats` (10 standard Direct formats, screen depths, the visual→format
+map for 0x21/0x22, subpixel order Unknown), `QueryPictIndexValues` (Direct
+formats have no palette), `CreatePicture` (with depth/format validation),
+`ChangePicture` (value masks consumed in bit order), `SetPictureClipRectangles`,
+`FreePicture`, `Composite` (the 14 core Porter-Duff ops, source repeat
+None/Normal/Pad/Reflect, mask pictures, clip rectangles, clip-mask pixmaps),
+`FillRectangles`, `CreateGlyphSet`/`ReferenceGlyphSet`/`FreeGlyphSet`,
+`AddGlyphs` (a1/a4/a8 bitmaps, 32-bit scanline padding, LSB-first bits),
+`FreeGlyphs`, `CompositeGlyphs8/16/32` (pen advances, the 255→CARD32 escape,
+4-byte id alignment, all-or-nothing BadGlyph semantics). Depth-8 and depth-1
+pixmaps now decode (`toArgb`) because cairo's a8 span masks need them, and a
+fill on an a8 pixmap records coverage-as-alpha.
+
+**The version answer is deliberately 0.4, not 0.11** (see `XRender`'s KDoc):
+clients gate optional requests on it. At 0.4 cairo composites anti-aliased spans
+through a8 masks + `Composite` (all implemented) instead of `AddTraps` (0.8,
+not implemented), builds "solid" sources from a repeated 1×1 pixmap instead of
+`CreateSolidFill` (0.10), and Xcursor falls back to core font cursors instead of
+ARGB cursors (0.5). Answering 0.11 would invite requests we must refuse with
+BadRequest - and a BadRequest kills GTK (`_exit(1)` in its error handler). The
+claim rises when the corresponding requests are implemented; anything beyond it
+is refused **and named** in the protocol trace ("RENDER.AddTraps x42"), so the
+shared log says exactly what to implement next.
+
+Still absent (honestly reported by `QueryExtension`): XKB, XInput/XInput2,
+RANDR, MIT-SHM, XFIXES, COMPOSITE, DAMAGE, SHAPE, BIG-REQUESTS, SYNC. Device
+traces from real Firefox/GTK3 handshakes decide which one matters next.
+
 ### Soft keyboard (the D1b open item)
 
 No XIM/XKB is needed for Latin-1 text: the X Desktop window hosts a 1dp transparent
@@ -183,8 +222,10 @@ CI `assembleDebug` + device check.
 
 ## Deliberate non-goals / known limits (D1c)
 
-- No RENDER/Composite/XRandr/XShm/XKB/XInput2 (`QueryExtension` answers "not
-  present" for all but XTEST, so clients fall back to core protocol).
+- RENDER is served at version 0.4 (see above); traps/solid-fills/gradients/
+  ARGB cursors/transforms are not - the claim stays at 0.4 until they are.
+- No Composite/XRandr/XShm/XKB/XInput2/XFIXES (`QueryExtension` answers "not
+  present", so clients fall back to core protocol).
 - One built-in font ("fixed", 6x13 metrics); `OpenFont` never refuses a name and
   glyph shapes are monospace approximations - `QueryFont` metrics match the
   renderer's advance, so layout maths stays consistent.

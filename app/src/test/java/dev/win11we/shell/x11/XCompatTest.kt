@@ -674,13 +674,22 @@ class XCompatTest {
         assertEquals(X11.EXT_XTEST_OPCODE, xtest[8].toInt() and 0xFF)
         assertEquals(0, xtest[9].toInt()) // first event
         assertEquals(0, xtest[10].toInt()) // first error
+        // RENDER is served since D1d: present, with its own opcode and error base.
         val render = send(client, c.queryExtension("RENDER")).reply()
-        assertEquals(0, render[1].toInt()) // not present
-        assertEquals(0, render[8].toInt()) // and therefore no major opcode
+        assertEquals(1, render[1].toInt())
+        assertEquals(XRender.MAJOR_OPCODE, render[8].toInt() and 0xFF)
+        assertEquals(XRender.FIRST_ERROR, render[10].toInt() and 0xFF)
+        // Something genuinely unimplemented stays honestly absent.
+        val xkb = send(client, c.queryExtension("XKEYBOARD")).reply()
+        assertEquals(0, xkb[1].toInt()) // not present
+        assertEquals(0, xkb[8].toInt()) // and therefore no major opcode
         val names = send(client, c.listExtensions()).reply()
-        assertEquals(1, names[1].toInt()) // one extension
+        assertEquals(2, names[1].toInt()) // RENDER + XTEST
         assertEquals(32 + names.intLE(4) * 4, names.size) // ... and no stray byte
-        assertEquals("XTEST", String(names.copyOfRange(33, 38), Charsets.US_ASCII))
+        // Registry order: RENDER then XTEST; each entry is a length byte + name,
+        // padded to a 4-byte boundary as a whole.
+        assertEquals("RENDER", String(names.copyOfRange(33, 39), Charsets.US_ASCII))
+        assertEquals("XTEST", String(names.copyOfRange(41, 46), Charsets.US_ASCII))
     }
 
     @Test

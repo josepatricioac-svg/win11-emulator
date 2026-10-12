@@ -72,6 +72,15 @@ sealed class DrawOp {
 
     /** A filled polygon (FillPoly): [coords] is x0,y0,x1,y1,... */
     class Polygon(val coords: IntArray, val argb: Int) : DrawOp()
+
+    /**
+     * A RENDER Composite/FillRectangles blend (XRender): source solid colour or
+     * drawable, optional mask drawable, Porter-Duff op and destination clip.
+     */
+    class Blend(val spec: BlendSpec) : DrawOp()
+
+    /** A RENDER CompositeGlyphs run: decoded 8-bit-alpha glyphs with a solid/image source. */
+    class GlyphRun(val spec: GlyphRunSpec) : DrawOp()
 }
 
 /**
@@ -90,8 +99,8 @@ interface XSink {
         width: Int, height: Int,
     )
 
-    /** Records a drawable's size when it is created (pixmaps have no window entry). */
-    fun setSize(drawable: Int, width: Int, height: Int) {}
+    /** Records a drawable's size (and pixmap depth) when it is created. */
+    fun setSize(drawable: Int, width: Int, height: Int, depth: Int = -1) {}
 
     fun points(drawable: Int, coords: IntArray, pixel: Int) {}
     fun lines(drawable: Int, coords: IntArray, pixel: Int, pairs: Boolean) {}
@@ -101,6 +110,12 @@ interface XSink {
     ) {}
 
     fun polygon(drawable: Int, coords: IntArray, pixel: Int) {}
+
+    /** RENDER Composite / FillRectangles (D1d). */
+    fun blend(drawable: Int, spec: BlendSpec) {}
+
+    /** RENDER CompositeGlyphs8/16/32 (D1d). */
+    fun glyphRun(drawable: Int, spec: GlyphRunSpec) {}
 }
 
 /** Records what a client drew. */
@@ -153,6 +168,29 @@ class RecordingSink : XSink {
     override fun polygon(drawable: Int, coords: IntArray, pixel: Int) {
         primitives.add("polygon ${coords.size / 2} #${pixel.toString(16)}")
     }
+
+    val blends = mutableListOf<BlendSpec>()
+    val glyphRuns = mutableListOf<GlyphRunSpec>()
+
+    override fun blend(drawable: Int, spec: BlendSpec) {
+        blends.add(spec)
+        primitives.add(
+            "blend ${XRender.opName(spec.op)} dst=$drawable src=" +
+                (if (spec.srcDrawable != 0) "drawable:${spec.srcDrawable}@${spec.srcX},${spec.srcY}"
+                 else "#${spec.srcColor.toString(16)}") +
+                " -> ${spec.dstX},${spec.dstY} ${spec.width}x${spec.height}" +
+                (if (spec.maskDrawable != 0) " mask=${spec.maskDrawable}" else "") +
+                (if (spec.clip != null) " clip=${spec.clip.size}" else ""),
+        )
+    }
+
+    override fun glyphRun(drawable: Int, spec: GlyphRunSpec) {
+        glyphRuns.add(spec)
+        primitives.add(
+            "glyphrun ${XRender.opName(spec.op)} dst=$drawable n=${spec.placements.size}" +
+                " color=#${spec.srcColor.toString(16)}",
+        )
+    }
 }
 
 /**
@@ -179,21 +217,40 @@ class XDisplayList : XSink {
     fun drawableIds(): Set<Int> = synchronized(lists) { lists.keys.toSet() }
 
     private val sizes = HashMap<Int, IntArray>()
+    private val depths = HashMap<Int, Int>()
 
     /** Size recorded at CreatePixmap time; null for drawables we never sized. */
     fun sizeOf(drawable: Int): IntArray? = synchronized(sizes) { sizes[drawable]?.copyOf() }
 
-    override fun setSize(drawable: Int, width: Int, height: Int) {
+    /** Depth recorded at CreatePixmap time; -1 when unknown (windows, untracked). */
+    fun depthOf(drawable: Int): Int = synchronized(depths) { depths[drawable] ?: -1 }
+
+    override fun setSize(drawable: Int, width: Int, height: Int, depth: Int) {
         synchronized(sizes) { sizes[drawable] = intArrayOf(width, height) }
+        if (depth > 0) synchronized(depths) { depths[drawable] = depth }
+    }
+
+    /**
+     * Normalises a core-protocol pixel value for the drawable's depth: on an a8
+     * pixmap the low byte IS the coverage alpha (cairo's core span fallback fills
+     * a8 masks with XFillRectangle pixel=coverage), on a1 any non-zero is opaque.
+     * Ops stay ARGB, so neither rasteriser needs to know depths at draw time.
+     */
+    private fun pixelForDepth(drawable: Int, pixel: Int): Int = when (depthOf(drawable)) {
+        8 -> (pixel and 0xFF) shl 24
+        1 -> if (pixel != 0) 0xFF000000.toInt() else 0
+        else -> opaque(pixel)
     }
 
     fun remove(drawable: Int) {
         synchronized(lists) { lists.remove(drawable) }
+        synchronized(sizes) { sizes.remove(drawable) }
+        synchronized(depths) { depths.remove(drawable) }
         revision++
     }
 
     override fun fillRect(drawable: Int, x: Int, y: Int, width: Int, height: Int, pixel: Int) =
-        append(drawable, DrawOp.Fill(x, y, width, height, opaque(pixel)))
+        append(drawable, DrawOp.Fill(x, y, width, height, pixelForDepth(drawable, pixel)))
 
     override fun putImage(drawable: Int, x: Int, y: Int, width: Int, height: Int, depth: Int, data: ByteArray) =
         append(drawable, DrawOp.Image(x, y, width, height, depth, toArgb(data, depth, width, height)))
@@ -212,6 +269,10 @@ class XDisplayList : XSink {
 
     override fun points(drawable: Int, coords: IntArray, pixel: Int) =
         append(drawable, DrawOp.Points(coords, opaque(pixel)))
+
+    override fun blend(drawable: Int, spec: BlendSpec) = append(drawable, DrawOp.Blend(spec))
+
+    override fun glyphRun(drawable: Int, spec: GlyphRunSpec) = append(drawable, DrawOp.GlyphRun(spec))
 
     override fun lines(drawable: Int, coords: IntArray, pixel: Int, pairs: Boolean) =
         append(drawable, DrawOp.Line(coords, opaque(pixel), pairs))
@@ -364,7 +425,115 @@ class XDisplayList : XSink {
                         }
                     }
                 }
-                is DrawOp.Text -> Unit // glyph rasterisation belongs to the platform renderer
+                is DrawOp.Text -> Unit // core text belongs to the platform renderer
+                is DrawOp.Blend -> rasteriseBlend(pixels, width, height, op.spec, resolveSize, stack)
+                is DrawOp.GlyphRun -> rasteriseGlyphRun(pixels, width, height, op.spec, resolveSize, stack)
+            }
+        }
+    }
+
+    /** Rasterises another drawable's ops into a fresh, zero-filled (transparent) buffer. */
+    private fun drawablePixels(
+        id: Int,
+        resolveSize: (Int) -> IntArray?,
+        stack: Set<Int>,
+    ): Pair<IntArray, IntArray>? {
+        if (id == 0 || id in stack) return null
+        val size = resolveSize(id) ?: return null
+        if (size[0] <= 0 || size[1] <= 0) return null
+        val pixels = IntArray(size[0] * size[1])
+        rasterise(pixels, size[0], size[1], ops(id), resolveSize, stack + id)
+        return pixels to size
+    }
+
+    private fun inClip(clip: List<IntArray>, x: Int, y: Int): Boolean =
+        clip.any { x >= it[0] && x < it[0] + it[2] && y >= it[1] && y < it[1] + it[3] }
+
+    /** RENDER Composite/FillRectangles: per-pixel Porter-Duff with repeat, mask and clip. */
+    private fun rasteriseBlend(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        spec: BlendSpec,
+        resolveSize: (Int) -> IntArray?,
+        stack: Set<Int>,
+    ) {
+        if (spec.width <= 0 || spec.height <= 0) return
+        val src = if (spec.srcDrawable != 0) drawablePixels(spec.srcDrawable, resolveSize, stack) else null
+        if (spec.srcDrawable != 0 && src == null && spec.srcColor == 0) return // unknown source: nothing to draw
+        val mask = if (spec.maskDrawable != 0) drawablePixels(spec.maskDrawable, resolveSize, stack) else null
+        if (spec.maskDrawable != 0 && mask == null) return // a mask we cannot read masks everything out
+        for (row in 0 until spec.height) {
+            val dy = spec.dstY + row
+            if (dy !in 0 until height) continue
+            for (col in 0 until spec.width) {
+                val dx = spec.dstX + col
+                if (dx !in 0 until width) continue
+                if (spec.clip != null && !inClip(spec.clip, dx, dy)) continue
+                val srcPx = when {
+                    spec.srcDrawable == 0 -> spec.srcColor
+                    else -> {
+                        val rx = XRender.repeatCoord(spec.srcX + col, src!!.second[0], spec.srcRepeat)
+                        val ry = XRender.repeatCoord(spec.srcY + row, src.second[1], spec.srcRepeat)
+                        if (rx == null || ry == null) continue // REPEAT_NONE outside the source
+                        src.first[ry * src.second[0] + rx]
+                    }
+                }
+                val maskAlpha = when {
+                    spec.maskColor != null -> (spec.maskColor ushr 24) and 0xFF
+                    mask == null -> 255
+                    else -> {
+                        val mx = spec.maskX + col
+                        val my = spec.maskY + row
+                        if (mx in 0 until mask.second[0] && my in 0 until mask.second[1]) {
+                            (mask.first[my * mask.second[0] + mx] ushr 24) and 0xFF
+                        } else {
+                            0
+                        }
+                    }
+                }
+                val index = dy * width + dx
+                pixels[index] = XRender.blend(spec.op, srcPx, pixels[index], maskAlpha)
+            }
+        }
+    }
+
+    /** RENDER CompositeGlyphs: 8-bit-alpha glyph bitmaps tinted by the (usually solid) source. */
+    private fun rasteriseGlyphRun(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        spec: GlyphRunSpec,
+        resolveSize: (Int) -> IntArray?,
+        stack: Set<Int>,
+    ) {
+        val src = if (spec.srcDrawable != 0) drawablePixels(spec.srcDrawable, resolveSize, stack) else null
+        if (spec.srcDrawable != 0 && src == null) return
+        for (placement in spec.placements) {
+            val glyph = placement.glyph
+            for (row in 0 until glyph.height) {
+                val dy = placement.dstY + row
+                if (dy !in 0 until height) continue
+                for (col in 0 until glyph.width) {
+                    val dx = placement.dstX + col
+                    if (dx !in 0 until width) continue
+                    val coverage = glyph.alpha[row * glyph.width + col].toInt() and 0xFF
+                    if (coverage == 0) continue
+                    val srcPx =
+                        if (spec.srcDrawable == 0) {
+                            spec.srcColor
+                        } else {
+                            // The source is sampled in destination space (xSrc/ySrc is the
+                            // origin) under the source picture's repeat mode - a repeated
+                            // 1x1 pixmap is how cairo builds solid glyph colours pre-0.10.
+                            val sx = XRender.repeatCoord(spec.srcX + dx, src!!.second[0], spec.srcRepeat)
+                            val sy = XRender.repeatCoord(spec.srcY + dy, src.second[1], spec.srcRepeat)
+                            if (sx == null || sy == null) continue
+                            src.first[sy * src.second[0] + sx]
+                        }
+                    val index = dy * width + dx
+                    pixels[index] = XRender.blend(spec.op, srcPx, pixels[index], coverage)
+                }
             }
         }
     }
@@ -374,24 +543,55 @@ class XDisplayList : XSink {
         fun opaque(pixel: Int): Int = pixel or 0xFF000000.toInt()
 
         /**
-         * Converts ZPixmap data (4 bytes/pixel, byte order B,G,R,[A]) to ARGB ints.
-         * Depth 24 forces alpha to 0xFF (clients leave the pad byte undefined);
-         * depth 32 keeps it. Anything else (XYBitmap, depth 1) is not renderable yet.
+         * Converts ZPixmap data to ARGB ints. Depth 24 (B,G,R,pad) forces alpha to
+         * 0xFF (clients leave the pad byte undefined); depth 32 keeps it; depth 8
+         * is an alpha mask (one coverage byte per pixel, scanlines padded to 32
+         * bits - cairo's a8 masks); depth 1 is a bitmap (LSB = leftmost pixel).
+         * Truncated data leaves the remaining pixels transparent instead of
+         * throwing: a short PutImage is a client bug, not a server crash.
          */
         fun toArgb(data: ByteArray, depth: Int, width: Int, height: Int): IntArray {
-            if (depth != 24 && depth != 32) return IntArray(0)
+            if (width <= 0 || height <= 0) return IntArray(0)
             val count = width.toLong() * height.toLong()
-            if (count <= 0 || count > Int.MAX_VALUE) return IntArray(0)
+            if (count > Int.MAX_VALUE) return IntArray(0)
             val total = count.toInt()
-            val available = minOf(total, data.size / 4)
             val out = IntArray(total)
-            for (i in 0 until available) {
-                val o = i * 4
-                val b = data[o].toInt() and 0xFF
-                val g = data[o + 1].toInt() and 0xFF
-                val r = data[o + 2].toInt() and 0xFF
-                val a = if (depth == 32) data[o + 3].toInt() and 0xFF else 0xFF
-                out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+            when (depth) {
+                8 -> {
+                    val rowBytes = X11.pad4(width)
+                    for (row in 0 until height) {
+                        val base = row * rowBytes
+                        for (col in 0 until width) {
+                            val i = base + col
+                            if (i >= data.size) return out
+                            out[row * width + col] = (data[i].toInt() and 0xFF) shl 24
+                        }
+                    }
+                }
+                1 -> {
+                    val rowBytes = X11.pad4((width + 7) / 8)
+                    for (row in 0 until height) {
+                        val base = row * rowBytes
+                        for (col in 0 until width) {
+                            val i = base + col / 8
+                            if (i >= data.size) return out
+                            val bit = (data[i].toInt() ushr (col % 8)) and 1
+                            out[row * width + col] = if (bit != 0) 0xFF000000.toInt() else 0
+                        }
+                    }
+                }
+                24, 32 -> {
+                    val available = minOf(total, data.size / 4)
+                    for (i in 0 until available) {
+                        val o = i * 4
+                        val b = data[o].toInt() and 0xFF
+                        val g = data[o + 1].toInt() and 0xFF
+                        val r = data[o + 2].toInt() and 0xFF
+                        val a = if (depth == 32) data[o + 3].toInt() and 0xFF else 0xFF
+                        out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+                    }
+                }
+                else -> return IntArray(0)
             }
             return out
         }

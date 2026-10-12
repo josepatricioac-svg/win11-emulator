@@ -215,7 +215,9 @@ class XProtocolTraceTest {
     fun `an unsupported XTest minor opcode is recorded as major dot minor`() {
         send(client.xtest(9))
         assertEquals(mapOf("${X11.EXT_XTEST_OPCODE}.9" to 1L), connection.trace.unimplementedOpcodes())
-        assertTrue(connection.trace.summary().contains("130.9x1"))
+        // The raw map keeps "major.minor"; the summary resolves known extensions
+        // to names so device logs say which request was missing, not just numbers.
+        assertTrue(connection.trace.summary().contains("XTEST.minor9x1"))
     }
 
     @Test

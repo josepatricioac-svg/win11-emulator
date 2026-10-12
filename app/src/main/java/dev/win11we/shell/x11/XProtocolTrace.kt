@@ -111,7 +111,7 @@ class XProtocolTrace(private val capacity: Int = 48) {
         if (unimplemented.isNotEmpty()) {
             parts.append(" | unimplemented opcodes: ")
             parts.append(unimplemented.entries.sortedByDescending { it.value }
-                .joinToString(" ") { (opcode, count) -> "${opcode}x$count" })
+                .joinToString(" ") { (opcode, count) -> "${opcodeLabel(opcode)}x$count" })
         }
         if (failures.isNotEmpty()) {
             parts.append(" | failures: ")
@@ -119,6 +119,21 @@ class XProtocolTrace(private val capacity: Int = 48) {
                 .joinToString("; ") { (key, count) -> "$key x$count" })
         }
         parts.toString()
+    }
+
+    /** "129.8" -> "RENDER.Composite": device logs should name requests, not numbers. */
+    private fun opcodeLabel(key: String): String {
+        val dot = key.indexOf('.')
+        val major = (if (dot < 0) key else key.substring(0, dot)).toIntOrNull() ?: return key
+        val minor = if (dot >= 0) key.substring(dot + 1).toIntOrNull() else null
+        return when (major) {
+            XRender.MAJOR_OPCODE -> "RENDER." + XRender.minorName(minor ?: -1)
+            X11.EXT_XTEST_OPCODE -> "XTEST." + when (minor) {
+                0 -> "GetVersion"; 1 -> "CompareCursor"; 2 -> "FakeInput"; 3 -> "GrabControl"
+                else -> "minor$minor"
+            }
+            else -> key
+        }
     }
 
     override fun toString(): String = summary()

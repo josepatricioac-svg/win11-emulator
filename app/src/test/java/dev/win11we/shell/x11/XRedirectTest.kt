@@ -108,7 +108,11 @@ class XDisplayListTest {
         val data = byteArrayOf(0x10, 0x20, 0x30, 0x40)
         // Two pixels requested but only one pixel of data: the second pads to 0.
         assertArrayEquals(intArrayOf(0x40302010, 0), XDisplayList.toArgb(data, 32, 2, 1))
-        assertArrayEquals(IntArray(0), XDisplayList.toArgb(data, 1, 2, 1)) // XYBitmap: unsupported
+        // Depth 1 decodes as a bitmap since D1d (a1 RENDER masks): LSB is the
+        // leftmost pixel, scanlines pad to 32 bits.
+        val bits = byteArrayOf(0b10, 0, 0, 0)
+        assertArrayEquals(intArrayOf(0, 0xFF000000.toInt()), XDisplayList.toArgb(bits, 1, 2, 1))
+        assertEquals(0, XDisplayList.toArgb(data, 16, 2, 1).size) // other depths: unsupported
     }
 
     @Test
