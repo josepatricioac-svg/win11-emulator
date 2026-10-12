@@ -19,7 +19,7 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | R2 | `ContainerService` (foreground, Stop all), `proot -> box64 -> wine` launch with the explicit env, per-container status, logs into the shared buffer | done (inert until R1 binaries + R3 rootfs exist) |
 | R3 | Rootfs/Wine download: pinned SHA-256 (fail closed), resumable via `Range`, free-space check, progress UI, SAF import | done — **extraction runs in-app** (pure-Kotlin TAR reader + xz-java, verified against the real pinned ubuntu-base and Firefox archives); Firefox ESR artifact pinned from Mozilla |
 | R4 | Diagnostics self-test: `box64 --version`, `wine64 --version`, `wine64 cmd /c echo hello`, green/red/skipped with the failing command + log excerpt | done |
-| D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a+D1b+D1c done: spec-accurate protocol core, socket, renderer, input, soft-keyboard text injection, focus/grabs/cursors/fonts/colours, XTest, SubstructureRedirect WM — 98 x11 wire tests green, verified by running them on a JVM; guest launch waits on the R1 binaries; see `docs/X_SERVER.md`) |
+| D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a–D1d done: spec-accurate protocol core, socket, renderer, input, soft-keyboard text injection, focus/grabs/cursors/fonts/colours, XTest, SubstructureRedirect WM, and **RENDER 0.4** — pictures, Composite with the 14 Porter-Duff ops, FillRectangles, the full CompositeGlyphs pipeline, both rasterisers — plus the one-tap **X self-test** (xdpyinfo/xwininfo probes, xeyes/xclock survivors) in Diagnostics. 149 x11 wire tests green on a JVM; guest launch waits on the R1 binaries; see `docs/X_SERVER.md`) |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | **partial** (P1 clipboard: the X selections ↔ Android text bridge is done and wire-tested — guest copies push out, Android-side changes reclaim PRIMARY/CLIPBOARD; rich targets and the remaining P1/P2 items are not started) |
 
 ## Animation
@@ -80,15 +80,31 @@ CJK needs XIM/XKB later). The keymap itself was fixed to the true evdev+8 layout
 old android+9 letter block collided with the server's own modifiers ('m' *was* Shift_L)
 and hardware punctuation landed on letters ('-' typed 'p').
 
-**The server runs, renders, takes input and passes 98 wire tests (run for real on a
-JVM with Kotlin 2.1.10); nothing guest-side connects yet.** The native binaries (R1)
+**D1d added the RENDER extension - the piece GTK3 cannot render without.**
+`QueryExtension("RENDER")` answers present (opcode 129) at a deliberately conservative
+**version 0.4**, so clients only ever send requests that are implemented: pictures with
+clip rectangles/masks, `Composite` with the 14 core Porter-Duff ops (repeat, mask and
+clip included), `FillRectangles`, and the whole glyph pipeline (`CreateGlyphSet`,
+`AddGlyphs` decoding a1/a4/a8 bitmaps, `CompositeGlyphs8/16/32` with pen advances) -
+replayed by both rasterisers (the pure-JVM snapshot and the Android Canvas renderer).
+Requests beyond 0.4 (AddTraps, CreateSolidFill, gradients, ARGB cursors, transforms)
+are refused BadRequest **and named in the protocol trace**, so device logs say exactly
+what to implement next. Proof of contact is one tap: **Diagnostics ▸ Run X self-test**
+runs `xdpyinfo -ext RENDER` and `xwininfo -root` (instant handshake probes), then
+launches `xeyes` (core X11) and `xclock` (Xaw+Xft = the RENDER glyph path) inside
+proot - PASS means "stayed connected", FAIL carries the exit code, the client's output
+and the connection's trace summary.
+
+**The server runs, renders, takes input and passes 149 wire tests (run for real on a
+JVM with Kotlin 2.1.10); nothing guest-side has connected on a device yet.** The native binaries (R1)
 are not vendored, so `explorer.exe /desktop` cannot be started - `ExplorerSmokeTest`
 scripts its exact wire sequence instead. `XDisplayList` records every drawing request
 per drawable, `XCanvasRenderer` composites the window stack into the **Start ▸ X
 Desktop** window, raw MotionEvents/key events are translated through `XInput`, and
 top-level maps/configures are redirected to `ShellWindowManager` (SubstructureRedirect)
 so the shell places guest windows. See `docs/X_SERVER.md` for the remaining limits
-(no RENDER/Composite/XShm/XKB/XIM, fixed font metrics, Latin-1 text injection).
+(RENDER served at 0.4; no Composite/XShm/XKB/XIM, fixed font metrics, Latin-1 text
+injection).
 
 ## What is deliberately not usable yet
 
@@ -100,7 +116,7 @@ fails if that ever changes silently:
 | --- | --- | --- |
 | Container Manager (Wine) | Real UI, real persisted containers; Start now validates the *per-guest* binary set — Wine still refuses with "missing libbox64.so" until the CI build is vendored, and the wine payload/prefix provisioning (R4/P2) is not built | box64 + wine provisioning |
 | Wine prefix, `wineboot`, installing apps | Not created | box64 + R2 + R3 |
-| Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Firefox ESR is **fully plumbed**: pinned R3 artifact, readiness checks that name the missing piece, proot launch plan through R2's launcher on the shell's X server. Until the runtime exists, selecting it falls back to an Android browser; Edge/Chromium stay listed with their gating steps | **R1 binaries** + R3 rootfs/GUI libs (Firefox ESR), **R1/R2/R3 + D2** (Edge) |
+| Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Firefox ESR is **fully plumbed**: pinned R3 artifact, readiness checks that name the missing piece, proot launch plan through R2's launcher on the shell's X server, a private D-Bus session so a second URL reaches the *running* instance, and a Provision **doctor** that names the first blocking prerequisite before apt ever runs. Until the runtime exists, selecting it falls back to an Android browser; Edge/Chromium stay listed with their gating steps | **R1 binaries** + R3 rootfs/GUI libs (Firefox ESR), **R1/R2/R3 + D2** (Edge) |
 | Terminal `wine`/`box64`/`proot`/`cmd` | Answer "not available yet" and name the step | R1 + R2 |
 | Task Manager container rows | Absent (no processes to show) | R2 |
 | Diagnostics wine64 self-test | Command lines are built and shown, not executed; the `proot --version` probe now has a real vendored proot to run | box64 + wine provisioning |
@@ -289,7 +305,7 @@ Firefox is never bundled in the APK.
 
 For desktop-class browsing (profiles, extensions, AI/Copilot-style sidebars) the shell
 models a second engine family - **Linux arm64 Firefox ESR / Chromium** in the rootfs and
-**Windows arm64 Edge** under Wine. **Firefox ESR's launch path is fully plumbed (D1c)**:
+**Windows arm64 Edge** under Wine. **Firefox ESR's launch path is fully plumbed (D1c/D1d)**:
 Mozilla's official self-contained arm64 build is a pinned R3 artifact, a guarded worker
 evaluates readiness (R1 binaries → rootfs → Firefox installed → GTK3 stack) into a
 Compose-state snapshot, and a ready engine launches through R2's `ContainerLauncher` as
