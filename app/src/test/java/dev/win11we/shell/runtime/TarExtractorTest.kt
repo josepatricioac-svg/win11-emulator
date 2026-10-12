@@ -361,7 +361,8 @@ class RootfsProvisionerTest {
         assertTrue(command.contains("/dev:/dev"))
         assertTrue(command.contains("/data/tmp/resolv.conf:/etc/resolv.conf"))
         val script = command.last()
-        assertTrue(script.startsWith("apt-get -o APT::Sandbox::User=root"))
+        // self-heal of a killed previous run, then the pinned apt options
+        assertTrue(script.startsWith("dpkg --configure -a; apt-get -o APT::Sandbox::User=root"))
         assertTrue(script.contains("-o Dpkg::Options::=--force-unsafe-io"))
         assertTrue(script.contains("-o Dpkg::Options::=--force-confold"))
         // update must run first, and all three apt calls carry the same options

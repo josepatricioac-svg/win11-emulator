@@ -103,6 +103,7 @@ object ProvisionDoctor {
             checkRootfsArchitecture(rootfsDir),
             checkSourcesList(rootfsDir),
             checkResolvConf(rootfsDir),
+            checkDpkgState(rootfsDir),
             checkDiskSpace(rootfsDir),
             checkTmpWritable(filesDir),
         ) + if (includeNetwork) listOf(checkNetwork(reachability)) else emptyList(),
@@ -240,7 +241,30 @@ object ProvisionDoctor {
         }
     }
 
-    /** 6. Free space on the partition holding the rootfs. */
+    /**
+     * 6. A killed provisioning run leaves /var/lib/dpkg/updates behind; apt then
+     * refuses with "dpkg was interrupted". Non-blocking because provision()
+     * self-heals with `dpkg --configure -a` before apt runs - but the owner
+     * should see WHY the last run died.
+     */
+    private fun checkDpkgState(rootfsDir: File): DoctorCheck {
+        val updates = File(rootfsDir, "var/lib/dpkg/updates")
+        val pending = runCatching { if (updates.isDirectory) updates.listFiles()?.size ?: 0 else 0 }.getOrDefault(0)
+        return if (pending > 0) {
+            DoctorCheck(
+                "dpkg-state",
+                "dpkg interrupted state",
+                CheckState.WARN,
+                "$pending file(s) in var/lib/dpkg/updates - a previous run was killed mid-configure; " +
+                    "Provision runs 'dpkg --configure -a' first to repair it.",
+                blocking = false,
+            )
+        } else {
+            DoctorCheck("dpkg-state", "dpkg interrupted state", CheckState.PASS, "no interrupted configure state")
+        }
+    }
+
+    /** 7. Free space on the partition holding the rootfs. */
     private fun checkDiskSpace(rootfsDir: File): DoctorCheck {
         val dir = if (rootfsDir.isDirectory) rootfsDir else rootfsDir.absoluteFile.parentFile ?: rootfsDir
         val usable = runCatching { dir.usableSpace }.getOrDefault(0L)
@@ -263,7 +287,7 @@ object ProvisionDoctor {
         }
     }
 
-    /** 7. The host TMPDIR the proot environment points at must be writable. */
+    /** 8. The host TMPDIR the proot environment points at must be writable. */
     private fun checkTmpWritable(filesDir: File): DoctorCheck {
         val tmp = File(filesDir, "tmp")
         return try {
@@ -278,7 +302,7 @@ object ProvisionDoctor {
     }
 
     /**
-     * 8. Host-side reachability of the archive apt will use. Non-blocking: the
+     * 9. Host-side reachability of the archive apt will use. Non-blocking: the
      * app's own TLS path and the guest's plain-http path can disagree (captive
      * portals, corporate proxies), so only running apt proves the in-jail route.
      */

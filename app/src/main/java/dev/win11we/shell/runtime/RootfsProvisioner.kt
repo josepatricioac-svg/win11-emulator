@@ -123,7 +123,12 @@ object RootfsProvisioner {
         "--cwd", "/root",
         "--",
         "/bin/bash", "-c",
-        "apt-get $APT_OPTIONS update && " +
+        // dpkg --configure -a first: a provisioning run that was killed (Stop all,
+        // process death, timeout) leaves /var/lib/dpkg/updates behind, and every
+        // later apt then refuses with "dpkg was interrupted". On a clean rootfs
+        // this is a fast no-op, so the step is self-healing rather than a guess.
+        "dpkg --configure -a; " +
+            "apt-get $APT_OPTIONS update && " +
             "apt-get $APT_OPTIONS install -y --no-install-recommends ${packages.joinToString(" ")} && " +
             "apt-get $APT_OPTIONS clean && rm -rf /var/lib/apt/lists/*",
     )

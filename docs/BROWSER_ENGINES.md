@@ -107,9 +107,11 @@ Honest limits while gated (each named by the readiness message, nothing silent):
   the automatic pre-flight inside Provision) checks every host-side prerequisite and
   names the first blocking failure in plain language: proot set pinned+executable,
   rootfs extracted, rootfs is really arm64 (ELF `e_machine`, catches amd64 SAF imports),
-  sources.list serves `ports.ubuntu.com`, guest resolv.conf state, ≥400 MB free, writable
-  host TMPDIR — plus a non-blocking https probe of ports.ubuntu.com (host TLS and the
-  guest's http path can disagree, so only apt's own output decides the in-jail route).
+  sources.list serves `ports.ubuntu.com`, guest resolv.conf state, interrupted-dpkg state
+  (a killed earlier run - provision repairs it with `dpkg --configure -a` first), ≥400 MB
+  free, writable host TMPDIR — plus a non-blocking https probe of ports.ubuntu.com (host
+  TLS and the guest's http path can disagree, so only apt's own output decides the
+  in-jail route).
 - One session at a time. A second URL no longer dies on `ALREADY_RUNNING`: the
   session starts a private `dbus-daemon --session` at a **fixed** guest address
   (`unix:path=/tmp/shell-dbus-session`, `dbus` + `dbus-x11` are in the pinned

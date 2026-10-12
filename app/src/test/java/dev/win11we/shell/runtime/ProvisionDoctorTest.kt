@@ -65,7 +65,7 @@ class ProvisionDoctorTest {
         val report = ProvisionDoctor.run(shippedBinaries(), healthyRootfs(), tmp.root, reachability = ok200)
         assertTrue(report.checks.joinToString { it.line() }, report.ok)
         assertEquals(null, report.firstFailure)
-        assertEquals(8, report.passes)
+        assertEquals(9, report.passes)
         assertTrue(report.headline().contains("All prerequisites pass"))
     }
 
@@ -154,6 +154,19 @@ class ProvisionDoctorTest {
 
         val up = ProvisionDoctor.run(shippedBinaries(), healthyRootfs(), tmp.root, reachability = ok200)
         assertEquals(CheckState.PASS, up.checks.first { it.id == "network" }.state)
+    }
+
+    @Test
+    fun `an interrupted dpkg state warns without blocking - provision repairs it`() {
+        val rootfs = healthyRootfs()
+        File(rootfs, "var/lib/dpkg/updates").mkdirs()
+        File(rootfs, "var/lib/dpkg/updates/0001").writeText("half-configured")
+        val report = ProvisionDoctor.run(shippedBinaries(), rootfs, tmp.root, includeNetwork = false)
+        val dpkg = report.checks.first { it.id == "dpkg-state" }
+        assertEquals(CheckState.WARN, dpkg.state)
+        assertFalse(dpkg.blocking)
+        assertTrue(dpkg.detail.contains("dpkg --configure -a"))
+        assertTrue(report.ok)
     }
 
     @Test
