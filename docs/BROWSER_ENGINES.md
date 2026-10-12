@@ -110,8 +110,15 @@ Honest limits while gated (each named by the readiness message, nothing silent):
   sources.list serves `ports.ubuntu.com`, guest resolv.conf state, ≥400 MB free, writable
   host TMPDIR — plus a non-blocking https probe of ports.ubuntu.com (host TLS and the
   guest's http path can disagree, so only apt's own output decides the in-jail route).
-- One session at a time (`ALREADY_RUNNING` while alive); handing a second URL to the
-  *running* instance needs a guest D-Bus session bus (P1).
+- One session at a time. A second URL no longer dies on `ALREADY_RUNNING`: the
+  session starts a private `dbus-daemon --session` at a **fixed** guest address
+  (`unix:path=/tmp/shell-dbus-session`, `dbus` + `dbus-x11` are in the pinned
+  provisioning list) and exports `DBUS_SESSION_BUS_ADDRESS`, so handing over a URL
+  runs the same wrapped command as a short-lived sibling process - firefox's own
+  remote client finds the running instance over that bus and forwards the URL,
+  then exits. Without the `dbus` packages the prelude degrades to "no bus": the
+  browser still starts, only the handoff is unavailable, and the handoff process's
+  exit code plus output land in Terminal ▸ log rather than being claimed as success.
 - Audio waits on P1's PulseAudio socket; the env already accepts it.
 - The path-form X socket cannot be bound with public Android API
   (`LocalServerSocket` is abstract-namespace only); libX11's path→abstract→TCP

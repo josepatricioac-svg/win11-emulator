@@ -50,6 +50,8 @@ object RootfsProvisioner {
         "fonts-dejavu-core",
         "fonts-liberation", // metric-compatible Arial/Times stand-ins
         "ca-certificates", // TLS roots for the web
+        "dbus", // dbus-daemon: the Firefox session's private D-Bus bus
+        "dbus-x11", // dbus-launch/dbus-send: bus probing in the session script
     )
 
     /**

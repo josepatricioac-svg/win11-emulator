@@ -115,11 +115,31 @@ object DesktopBrowserLauncher {
                 return DesktopLaunchOutcome(false, "Firefox ESR is not launchable yet: $missing")
             }
             if (launcher.isRunning(FirefoxSession.SESSION_ID)) {
-                return DesktopLaunchOutcome(
-                    false,
-                    "Firefox ESR is already running - use its address bar (opening URLs in the running " +
-                        "instance needs the guest D-Bus session, P1). Shown in the X Desktop window.",
-                )
+                if (url.isBlank()) {
+                    return DesktopLaunchOutcome(
+                        false,
+                        "Firefox ESR is already running (no URL to hand over) - shown in the X Desktop window.",
+                    )
+                }
+                // Hand the URL to the RUNNING instance through its D-Bus session:
+                // the same wrapped command, tracked under its own id; firefox's
+                // remote client forwards and exits. Its output streams to the
+                // shared log, so a failed handoff is visible, not silent.
+                val handoff = RuntimeHolder.firefoxRequest(appContext, url, rootfsOverride, handoff = true)
+                val handoffResult = launcher.start(handoff)
+                return if (handoffResult.success) {
+                    DesktopLaunchOutcome(
+                        true,
+                        "Handing \"$url\" to the running Firefox over its D-Bus session - " +
+                            "the outcome lands in Terminal \u25B8 log.",
+                    )
+                } else {
+                    DesktopLaunchOutcome(
+                        false,
+                        "Firefox ESR is running, but the URL handoff was refused " +
+                            "[${handoffResult.failure}]: ${handoffResult.message}",
+                    )
+                }
             }
             val result = launcher.start(request)
             if (result.success) {

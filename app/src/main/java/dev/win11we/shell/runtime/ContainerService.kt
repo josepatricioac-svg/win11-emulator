@@ -104,21 +104,35 @@ object RuntimeHolder {
 
     /**
      * Builds the desktop-browser session request (Firefox ESR): native arm64, so
-     * no box64 and no Wine environment - [FirefoxEnvironment] instead. The
-     * profile directory doubles as the request's "prefix" and is created here so
-     * the launcher's validation passes on first launch.
+     * no box64 and no Wine environment - [FirefoxEnvironment] instead. The guest
+     * command is the D-Bus-wrapped [FirefoxSession.sessionCommand], so the
+     * session owns a private bus at a fixed address and a later [handoff] request
+     * reaches the running instance through it. The profile directory doubles as
+     * the request's "prefix" and is created here so the launcher's validation
+     * passes on first launch.
+     *
+     * [handoff] builds the short-lived sibling process that hands a URL to the
+     * ALREADY-running session: same binds, same bus address, tracked under its
+     * own id so the launcher does not reject it as a double start.
      */
-    fun firefoxRequest(context: Context, url: String? = null, rootfsOverride: String? = null): RuntimeRequest {
+    fun firefoxRequest(
+        context: Context,
+        url: String? = null,
+        rootfsOverride: String? = null,
+        handoff: Boolean = false,
+    ): RuntimeRequest {
         val appContext = context.applicationContext
         val filesDir = appContext.filesDir
         val profile = RuntimePaths.browserProfileDir(filesDir)
         RuntimePaths.ensurePrefix(profile.absolutePath)
         val resolvConf = RuntimePaths.ensureResolvConf(filesDir)
+        val id = if (handoff) "${FirefoxSession.SESSION_ID}-handoff" else FirefoxSession.SESSION_ID
+        val name = if (handoff) "${FirefoxSession.SESSION_NAME} - URL handoff" else FirefoxSession.SESSION_NAME
         return RuntimeRequest(
-            container = Container.defaults(FirefoxSession.SESSION_ID, FirefoxSession.SESSION_NAME, profile.absolutePath),
+            container = Container.defaults(id, name, profile.absolutePath),
             rootfsDir = rootfsOverride?.let { File(it) } ?: rootfsDir ?: RuntimePaths.defaultRootfs(filesDir),
             xDisplay = RuntimePaths.X_DISPLAY,
-            guestCommand = FirefoxSession.guestCommand(url),
+            guestCommand = FirefoxSession.sessionCommand(url),
             guestPrefix = FirefoxSession.GUEST_PROFILE_DIR,
             binds = FirefoxSession.binds(profile, RuntimePaths.xSocketUnixDir(filesDir), resolvConf),
             environment = FirefoxEnvironment.build(RuntimePaths.X_DISPLAY),

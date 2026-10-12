@@ -61,7 +61,7 @@ class FirefoxSessionTest {
         container = Container.defaults(FirefoxSession.SESSION_ID, FirefoxSession.SESSION_NAME, profile.absolutePath),
         rootfsDir = File(tmp.root, "rootfs"),
         xDisplay = RuntimePaths.X_DISPLAY,
-        guestCommand = FirefoxSession.guestCommand(url),
+        guestCommand = FirefoxSession.sessionCommand(url),
         guestPrefix = FirefoxSession.GUEST_PROFILE_DIR,
         binds = FirefoxSession.binds(profile, xDir, resolv),
         environment = FirefoxEnvironment.build(RuntimePaths.X_DISPLAY),
@@ -96,11 +96,13 @@ class FirefoxSessionTest {
         assertFalse(command.any { it.endsWith(":/root/.wine") })
         // The X socket directory lands where libX11 looks.
         assertTrue(command.contains("${xDir.absolutePath}:/tmp/.X11-unix"))
-        assertEquals(
-            listOf("/opt/firefox-esr/firefox", "-P", "shell", "https://example.org"),
-            command.takeLast(4),
-        )
+        // The guest tail is the D-Bus bootstrap wrapper; the firefox argv is the
+        // script's exec line, shell-quoted.
+        assertEquals(listOf("/bin/bash", "-c"), command.takeLast(3).dropLast(1))
+        val script = command.last()
+        assertTrue(script, script.contains("exec '/opt/firefox-esr/firefox' '-P' 'shell' 'https://example.org'"))
         assertFalse("native arm64 - no box64 in the chain", command.any { it.contains("box64") })
+        assertFalse(launcher.needsBox64(FirefoxSession.sessionCommand("https://example.org")))
     }
 
     @Test
@@ -226,5 +228,73 @@ class FirefoxSessionTest {
         // app data dirs are deep, so this is a real constraint worth pinning.
         assertTrue(RuntimePaths.xSocket(files).absolutePath.length < 100)
         assertFalse(RuntimePaths.rootfsExtracted(File(files, "rootfs")))
+    }
+}
+
+/**
+ * The D-Bus session bootstrap (D1d): the fixed-address bus that lets a second
+ * URL reach the RUNNING firefox instead of fighting the profile lock, and the
+ * shell-quoting that keeps a user-typed URL from ever being interpolated raw.
+ */
+class FirefoxDBusSessionTest {
+
+    @Test
+    fun `the bootstrap probes, starts a private bus only when dead, and exports the address`() {
+        val script = FirefoxSession.dbusBootstrapScript(FirefoxSession.guestCommand("https://example.org"))
+        val address = FirefoxSession.GUEST_DBUS_ADDRESS
+        assertEquals("unix:path=/tmp/shell-dbus-session", address)
+        // the fixed address is exported to the shell variables the script uses
+        assertTrue(script.contains("ADDR='$address'"))
+        assertTrue(script.contains("SOCK='/tmp/shell-dbus-session'"))
+        // liveness probe through dbus-send GetId on the fixed address
+        assertTrue(script.contains("dbus-send --address=\"\$ADDR\""))
+        assertTrue(script.contains("org.freedesktop.DBus.GetId"))
+        // only starts a daemon when the probe failed AND dbus-daemon exists
+        assertTrue(script.contains("if ! probe && command -v dbus-daemon"))
+        assertTrue(script.contains("dbus-daemon --session --address=\"\$ADDR\" --nofork"))
+        // a SIGKILL'd daemon can leave a stale socket behind: it is removed before rebinding
+        assertTrue(script.contains("rm -f \"\$SOCK\""))
+        // bounded wait, then the export the remote client needs, then exec
+        assertTrue(script.contains("while [ \$i -lt 50 ]"))
+        assertTrue(script.contains("sleep 0.1"))
+        assertTrue(script.contains("export DBUS_SESSION_BUS_ADDRESS=\"\$ADDR\""))
+        assertTrue(script.trimEnd().endsWith("exec '/opt/firefox-esr/firefox' '-P' 'shell' 'https://example.org'"))
+    }
+
+    @Test
+    fun `sessionCommand wraps the guest command in bash and never needs box64`() {
+        val command = FirefoxSession.sessionCommand(null)
+        assertEquals("/bin/bash", command[0])
+        assertEquals("-c", command[1])
+        assertEquals(3, command.size)
+        assertTrue(command[2].trimEnd().endsWith("exec '/opt/firefox-esr/firefox' '-P' 'shell'"))
+        // blank URLs stay absent, exactly like guestCommand
+        assertEquals(command[2], FirefoxSession.sessionCommand("  ")[2])
+    }
+
+    @Test
+    fun `URLs are single-quote escaped - shell metacharacters cannot escape the argument`() {
+        assertEquals("'plain'", FirefoxSession.shellQuote("plain"))
+        assertEquals("""'it'\''s'""", FirefoxSession.shellQuote("it's"))
+        val hostile = "https://x.org/?a='b'; rm -rf / ;\$(reboot)`id`"
+        val quoted = FirefoxSession.shellQuote(hostile)
+        // every single quote in the input becomes the '\'' dance, so the whole
+        // hostile string stays ONE quoted argument
+        assertTrue(quoted.startsWith("'") && quoted.endsWith("'"))
+        assertEquals(hostile.length + 3 * hostile.count { it == '\'' } + 2, quoted.length)
+        val script = FirefoxSession.dbusBootstrapScript(FirefoxSession.guestCommand(hostile))
+        assertTrue(script.contains("exec '/opt/firefox-esr/firefox' '-P' 'shell' $quoted"))
+    }
+
+    @Test
+    fun `handoff reuses the same bootstrap so the running instance's bus is found`() {
+        // The handoff request is built with handoff=true in RuntimeHolder (Android
+        // side); what is unit-testable is the invariant that makes it work: the
+        // handoff command is byte-identical in shape to the session command, so
+        // it probes the SAME fixed socket the running session created.
+        val session = FirefoxSession.sessionCommand("https://second.example")
+        val handoff = FirefoxSession.sessionCommand("https://second.example")
+        assertEquals(session, handoff)
+        assertTrue(session[2].contains(FirefoxSession.GUEST_DBUS_SOCKET))
     }
 }

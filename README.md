@@ -293,9 +293,11 @@ models a second engine family - **Linux arm64 Firefox ESR / Chromium** in the ro
 Mozilla's official self-contained arm64 build is a pinned R3 artifact, a guarded worker
 evaluates readiness (R1 binaries → rootfs → Firefox installed → GTK3 stack) into a
 Compose-state snapshot, and a ready engine launches through R2's `ContainerLauncher` as
-`proot → /opt/firefox-esr/firefox -P shell <url>` with an explicit sandbox-off
-environment on `DISPLAY=:100` - no box64, persistent profile, foreground service, X
-Desktop window focused automatically. Until the runtime is vendored the card names the
+`proot → /bin/bash -c '<D-Bus prelude>; exec /opt/firefox-esr/firefox -P shell <url>'`
+with an explicit sandbox-off environment on `DISPLAY=:100` - no box64, persistent
+profile, foreground service, X Desktop window focused automatically. The prelude
+starts a private `dbus-daemon --session` at a fixed guest address, which is what lets
+a second URL reach the *running* instance instead of being refused as a double start. Until the runtime is vendored the card names the
 missing piece and selection falls back to an Android browser, exactly as
 `RoadmapGatingTest` pins it. See `docs/BROWSER_ENGINES.md` for the feasibility write-up,
 the licensing constraints (Edge is proprietary and must not be redistributed) and the

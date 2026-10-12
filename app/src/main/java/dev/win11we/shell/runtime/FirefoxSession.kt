@@ -48,6 +48,55 @@ object FirefoxSession {
         listOf("$GUEST_INSTALL_DIR/firefox", "-P", PROFILE_NAME) +
             listOfNotNull(url?.takeIf { it.isNotBlank() })
 
+    /**
+     * The session D-Bus socket, at a FIXED guest path so a second invocation can
+     * find the running instance's bus without any state on the host: firefox's
+     * remote client talks "org.mozilla.firefox.*" over this bus, which is how a
+     * later URL reaches the ALREADY-RUNNING session instead of fighting the
+     * profile lock.
+     */
+    const val GUEST_DBUS_SOCKET = "/tmp/shell-dbus-session"
+    const val GUEST_DBUS_ADDRESS = "unix:path=$GUEST_DBUS_SOCKET"
+
+    /** POSIX single-quote escaping - the URL is user input, never interpolated raw. */
+    fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
+
+    /**
+     * The bash prelude every session runs through: probe the fixed bus address,
+     * start a private `dbus-daemon --session` only when it is dead (removing a
+     * stale socket a SIGKILL may have left), wait briefly for it, export the
+     * address and `exec` firefox. When the `dbus` package is not provisioned the
+     * prelude degrades silently to "no bus": firefox still runs, only the
+     * remote handoff to a running instance is unavailable.
+     */
+    fun dbusBootstrapScript(firefoxCommand: List<String>): String {
+        val exec = firefoxCommand.joinToString(" ") { shellQuote(it) }
+        return buildString {
+            appendLine("ADDR='$GUEST_DBUS_ADDRESS'")
+            appendLine("SOCK='$GUEST_DBUS_SOCKET'")
+            appendLine("probe() { dbus-send --address=\"\$ADDR\" --dest=org.freedesktop.DBus " +
+                "--type=method_call --print-reply /org/freedesktop/DBus org.freedesktop.DBus.GetId " +
+                ">/dev/null 2>&1; }")
+            appendLine("if ! probe && command -v dbus-daemon >/dev/null 2>&1; then")
+            appendLine("  rm -f \"\$SOCK\"")
+            appendLine("  dbus-daemon --session --address=\"\$ADDR\" --nofork >/dev/null 2>&1 &")
+            appendLine("  i=0")
+            appendLine("  while [ \$i -lt 50 ]; do probe && break; i=\$((i+1)); sleep 0.1; done")
+            appendLine("fi")
+            appendLine("export DBUS_SESSION_BUS_ADDRESS=\"\$ADDR\"")
+            append("exec $exec")
+        }
+    }
+
+    /**
+     * What the launcher actually execs: [guestCommand] wrapped in the D-Bus
+     * bootstrap. Same command for the first launch and for handing a URL to the
+     * running instance - with a live bus, firefox's own remote client forwards
+     * the URL to the running session and exits; without one it starts fresh.
+     */
+    fun sessionCommand(url: String? = null): List<String> =
+        listOf("/bin/bash", "-c", dbusBootstrapScript(guestCommand(url)))
+
     /** Bind mounts for one session: persistent profile, X socket dir and guest DNS. */
     fun binds(profileDir: File, xSocketUnixDir: File, resolvConf: File): List<Bind> = listOf(
         Bind(profileDir.absolutePath, GUEST_PROFILE_DIR),
