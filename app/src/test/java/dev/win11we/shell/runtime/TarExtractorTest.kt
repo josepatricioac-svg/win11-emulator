@@ -372,6 +372,10 @@ class RootfsProvisionerTest {
         assertTrue(script.contains("--no-install-recommends libgtk-3-0"))
         assertTrue(script.contains("ca-certificates"))
         assertTrue(script.contains("fonts-dejavu-core"))
+        // The X self-test's clients ship in the same provisioning pass, so the
+        // one-tap Firefox setup also produces a testable X server.
+        assertTrue(script.contains("x11-apps"))
+        assertTrue(script.contains("x11-utils"))
         assertTrue(script.endsWith("rm -rf /var/lib/apt/lists/*"))
         assertTrue("no box64 in this chain", command.none { it.contains("box64") })
     }

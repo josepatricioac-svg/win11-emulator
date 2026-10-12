@@ -44,6 +44,8 @@ object RootfsProvisioner {
         "libx11-xcb1",
         "libegl1", // probed by Gecko; software rendering falls back cleanly
         "libgl1",
+        "x11-apps", // xeyes/xclock: the X self-test's proof-of-contact clients
+        "x11-utils", // xdpyinfo: the self-test's fast handshake + extension probe
         "fontconfig",
         "fonts-dejavu-core",
         "fonts-liberation", // metric-compatible Arial/Times stand-ins

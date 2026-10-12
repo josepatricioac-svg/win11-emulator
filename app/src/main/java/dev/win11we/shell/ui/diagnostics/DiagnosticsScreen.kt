@@ -71,6 +71,7 @@ fun DiagnosticsScreen(state: DiagnosticsState, modifier: Modifier = Modifier) {
             ActionChip("Re-check binaries") { state.check() }
             ActionChip(if (state.running) "Running..." else "Run --version probes") { state.runProbes() }
             ActionChip(if (state.selfTestRunning) "Testing..." else "Run self-test") { state.runSelfTest() }
+            ActionChip(if (state.xSelfTestRunning) "Testing..." else "Run X self-test") { state.runXSelfTest() }
         }
         Spacer(Modifier.height(14.dp))
 
@@ -122,6 +123,25 @@ fun DiagnosticsScreen(state: DiagnosticsState, modifier: Modifier = Modifier) {
         } else {
             SelfTestSummary(report)
             report.steps.forEachIndexed { index, step -> SelfTestRow(index + 1, step) }
+        }
+        Spacer(Modifier.height(14.dp))
+
+        Label("X self-test (xeyes/xclock on :100)")
+        val xReport = state.xSelfTest
+        if (xReport == null) {
+            Text(
+                text = "Runs xdpyinfo/xwininfo (instant handshake + RENDER probes) and launches xeyes " +
+                    "(core X11) and xclock (Xaw+Xft = the RENDER glyph path) inside proot against the " +
+                    "shell's own X server. For the clients, PASS = stayed connected the whole window; " +
+                    "a FAIL carries the exit code and the connection's protocol trace. Open Start ▸ X " +
+                    "Desktop once first so the server is bound; the clients come from x11-utils/x11-apps " +
+                    "(the Provision step installs them).",
+                color = TextTertiary,
+                fontSize = 11.5.sp,
+            )
+        } else {
+            SelfTestSummary(xReport)
+            xReport.steps.forEachIndexed { index, step -> SelfTestRow(index + 1, step) }
         }
         Spacer(Modifier.height(14.dp))
 

@@ -16,6 +16,7 @@ import dev.win11we.shell.runtime.ProbeResult
 import dev.win11we.shell.runtime.RuntimeProbe
 import dev.win11we.shell.runtime.SelfTestReport
 import dev.win11we.shell.runtime.SelfTestRunner
+import dev.win11we.shell.runtime.XSelfTest
 import dev.win11we.shell.runtime.SelfTestStep
 import dev.win11we.shell.runtime.StepVerdict
 import java.io.File
@@ -31,8 +32,12 @@ class DiagnosticsState(
     val probe: RuntimeProbe = RuntimeProbe(binaries),
     val log: LogBuffer = LogBuffer(),
     val rootfsDir: File? = null,
+    val filesDir: File? = null,
     /** Injectable so the self-test is testable without spawning anything. */
     private val runner: ProcessRunner = JvmProcessRunner(),
+    /** Android-side facts for the X self-test; defaults keep it honest ("not running"). */
+    private val xServerRunning: () -> Boolean = { false },
+    private val xTraceProvider: () -> String? = { null },
 ) {
     var prepareResult by mutableStateOf<PrepareResult?>(null)
         private set
@@ -85,6 +90,52 @@ class DiagnosticsState(
         private set
     var selfTestRunning by mutableStateOf(false)
         private set
+
+    var xSelfTest by mutableStateOf<SelfTestReport?>(null)
+        private set
+    var xSelfTestRunning by mutableStateOf(false)
+        private set
+
+    /**
+     * D1d: launches xeyes (core X11) and xclock (Xaw+Xft = the RENDER path)
+     * inside proot against the shell's own X server. PASS = the client stayed
+     * connected; failures carry the exit code plus the connection's protocol
+     * trace, so the missing request is named.
+     */
+    fun runXSelfTest(): SelfTestReport {
+        xSelfTestRunning = true
+        val test = XSelfTest(
+            binaries = binaries,
+            rootfsDir = rootfsDir ?: File("/nonexistent"),
+            filesDir = filesDir ?: File("/nonexistent"),
+            runner = runner,
+            xServerRunning = xServerRunning,
+            traceProvider = xTraceProvider,
+        )
+        val report = try {
+            test.run()
+        } finally {
+            xSelfTestRunning = false
+        }
+        xSelfTest = report
+        log.add(TerminalLine(LineKind.SYSTEM, "x self-test: ${report.summary()}"))
+        report.steps.forEach { step ->
+            log.add(
+                TerminalLine(
+                    when (step.verdict) {
+                        StepVerdict.PASS -> LineKind.INFO
+                        StepVerdict.FAIL -> LineKind.ERROR
+                        StepVerdict.SKIPPED -> LineKind.SYSTEM
+                    },
+                    "${step.id} ${step.verdict}${step.reason?.let { " - $it" } ?: ""}",
+                ),
+            )
+        }
+        report.firstFailure?.let { failure ->
+            log.add(TerminalLine(LineKind.ERROR, "x self-test first failure:\n${failure.report()}"))
+        }
+        return report
+    }
 
     /**
      * R4: box64 --version, wine64 --version and `wine64 cmd /c echo hello` through the

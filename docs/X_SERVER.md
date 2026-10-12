@@ -244,6 +244,26 @@ CI `assembleDebug` + device check.
 
 ## How to look at it on a device
 
+**One-tap proof of contact: Diagnostics ▸ *Run X self-test*.** Four steps, all
+inside proot against the running server (clients come from `x11-utils`/`x11-apps`,
+which the Provision step installs):
+
+1. `xdpyinfo -ext RENDER` - exits immediately; PASS requires a successful
+   handshake **and** RENDER in the extension list.
+2. `xwininfo -root` - the root-window query a WM-shaped client makes first.
+3. `xeyes` - survives 6 s on core X11 only (window, expose, pointer).
+4. `xclock` - survives 6 s on Xaw+Xft, i.e. the RENDER glyph path.
+
+For the survivors PASS means *stayed connected* (a healthy X client never exits
+by itself); any exit code is FAIL. Every failure carries the exit code, the
+client's last output lines and the server's `XProtocolTrace` summary for that
+connection, which names the exact extension/request the client died on. Read
+the pattern: probes red = socket/proot path broken; probes green + xeyes red =
+core protocol gap; xeyes green + xclock red = RENDER gap; all green = the
+handshake Firefox needs is there.
+Prerequisites that are missing (server not bound - open Start ▸ X Desktop once;
+rootfs not extracted; `x11-apps` not installed) SKIP with the reason named.
+
 Open **Start → X Desktop** (not pinned to the taskbar). The window starts the server on
 `:100` at its own pixel size and shows "Waiting for clients" until a guest connects.
 Anything that speaks core X11 to the abstract socket `@/tmp/.X11-unix/X100` — e.g.

@@ -229,6 +229,14 @@ fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager
                     pins = NativeBinaries.loadPinsFromAssets(appContext.assets),
                 ),
                 rootfsDir = RuntimePaths.defaultRootfs(appContext.filesDir),
+                filesDir = appContext.filesDir,
+                xServerRunning = { dev.win11we.shell.x11.XServer.running },
+                // The trace of the connection that just died, else any live one:
+                // a killed xeyes disconnects milliseconds after the timeout.
+                xTraceProvider = {
+                    dev.win11we.shell.x11.XServer.lastProtocolReport
+                        ?: dev.win11we.shell.x11.XServer.liveProtocolReports().lastOrNull()
+                },
             )
             "terminal" -> TerminalState(
                 executor = LocalCommandExecutor(
