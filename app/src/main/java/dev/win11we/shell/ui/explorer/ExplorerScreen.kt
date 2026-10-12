@@ -1,9 +1,12 @@
 package dev.win11we.shell.ui.explorer
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.net.Uri
 import android.os.Environment
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -68,6 +71,7 @@ import dev.win11we.shell.ui.theme.TextPrimary
 import dev.win11we.shell.ui.theme.TextSecondary
 import dev.win11we.shell.ui.theme.TextTertiary
 import java.io.File
+import kotlinx.coroutines.delay
 
 private val IconBtn = RoundedCornerShape(6.dp)
 
@@ -76,9 +80,10 @@ private val IconBtn = RoundedCornerShape(6.dp)
 fun ExplorerScreen(state: ExplorerState, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val wide = LocalConfiguration.current.screenWidthDp >= 720
+    // API < 30: the classic runtime permission still shows every file.
     var needsPermission by remember {
         mutableStateOf(
-            Build.VERSION.SDK_INT <= 32 &&
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.R &&
                 ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) !=
                 PackageManager.PERMISSION_GRANTED,
         )
@@ -88,6 +93,15 @@ fun ExplorerScreen(state: ExplorerState, modifier: Modifier = Modifier) {
     ) { granted -> needsPermission = !granted }
     LaunchedEffect(Unit) {
         if (needsPermission) permissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+    // API 30+: only "All files access" reveals non-media files such as .exe/.msi. It is a
+    // Settings toggle, not a dialog, so poll until the user comes back with it granted.
+    var needsAllFiles by remember { mutableStateOf(!allFilesAccessGranted()) }
+    LaunchedEffect(needsAllFiles) {
+        while (needsAllFiles) {
+            delay(1000)
+            if (allFilesAccessGranted()) needsAllFiles = false
+        }
     }
 
     var pendingNewFolder by remember { mutableStateOf(false) }
@@ -103,7 +117,13 @@ fun ExplorerScreen(state: ExplorerState, modifier: Modifier = Modifier) {
             if (entry.isDirectory) {
                 state.navigateTo(entry.file)
             } else {
-                Toast.makeText(context, "Opening ${entry.name} lands with the N2 apps / R1 runtime.", Toast.LENGTH_SHORT).show()
+                val windowsProgram = entry.extension in setOf("exe", "msi", "bat")
+                val message = if (windowsProgram) {
+                    "${entry.name}: running Windows programs needs libbox64.so + Wine (roadmap R1/R4) - not available yet."
+                } else {
+                    "Opening ${entry.name} lands with the N2 apps / R1 runtime."
+                }
+                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
             }
         },
         onContext = { entry, select ->
@@ -124,6 +144,10 @@ fun ExplorerScreen(state: ExplorerState, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
             )
             when {
+                needsAllFiles -> AllFilesAccessView(
+                    onGrant = { openAllFilesAccessSettings(context) },
+                    modifier = Modifier.fillMaxSize(),
+                )
                 needsPermission -> EmptyView("Storage permission is needed to browse this device.")
                 !state.current.isDirectory -> EmptyView("This folder is not readable.")
                 entries.isEmpty() -> EmptyView(if (state.query.isBlank()) "This folder is empty." else "No matches.")
@@ -622,4 +646,43 @@ private fun NameDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = TextSecondary) } },
     )
+}
+
+/** True when shared storage is fully browsable (always true below API 30, where the classic permission rules). */
+private fun allFilesAccessGranted(): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
+
+/** Opens this app's "All files access" toggle, falling back to the generic list if the OEM lacks the per-app page. */
+private fun openAllFilesAccessSettings(context: android.content.Context) {
+    val perApp = Intent(
+        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+        Uri.parse("package:${context.packageName}"),
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val generic = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    try {
+        context.startActivity(perApp)
+    } catch (e: Throwable) {
+        try {
+            context.startActivity(generic)
+        } catch (e: Throwable) {
+            Toast.makeText(context, "Open Settings > Apps > Special access > All files access and allow this app.", Toast.LENGTH_LONG).show()
+        }
+    }
+}
+
+/** Shown until "All files access" is granted: explains why the folders look empty and how to fix it. */
+@Composable
+private fun AllFilesAccessView(onGrant: () -> Unit, modifier: Modifier = Modifier) {
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
+            Text(
+                "Allow \"All files access\" to see every file (including .exe installers) on this device.",
+                color = TextSecondary,
+                fontSize = 13.sp,
+            )
+            Spacer(Modifier.height(12.dp))
+            TextButton(onClick = onGrant) { Text("Open settings", color = AccentBlue) }
+        }
+    }
 }

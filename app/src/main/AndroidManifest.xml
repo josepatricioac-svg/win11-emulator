@@ -15,6 +15,17 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <!--
+      Explorer browses shared storage by path. From Android 11 on, READ_EXTERNAL_STORAGE only
+      exposes media files, so .exe/.msi/etc. in Downloads or Documents are invisible without
+      "All files access". This app is sideloaded (not distributed through Play), so it asks for
+      it; Explorer shows a button that opens the system toggle. SAF drive mapping (P1) can
+      replace it later.
+    -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
     <!-- Which browsers are installed, so the Browser app and Settings can list them (API 30+). -->
     <queries>
         <intent>
