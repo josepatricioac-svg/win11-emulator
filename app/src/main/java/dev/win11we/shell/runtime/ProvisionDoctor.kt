@@ -45,16 +45,31 @@ data class DoctorReport(val checks: List<DoctorCheck>) {
 }
 
 /**
- * The Provision doctor: verifies every host-side prerequisite for
+ * The Provision doctor: verifies every prerequisite for
  * [RootfsProvisioner.provision] BEFORE spending minutes inside proot, and names
  * the first failing step in plain language. A bare "apt-get failed" is never
  * the end of the story again: either the doctor already explains why apt could
  * not work, or apt ran and its exit code + last 30 lines are on the card.
  *
- * Deliberately host-side and pure (files + one optional HTTP HEAD through the
- * [Reachability] seam): no proot, no rootfs processes, so it is fast, safe and
- * unit-tested. What it cannot verify from outside (in-jail DNS resolution,
- * dpkg lock state) is what the apt tail output is for.
+ * Two kinds of check:
+ *
+ * 1. **Host-side file checks** (pure: files + one optional HTTP HEAD through the
+ *    [Reachability] seam) - binaries pinned and executable, rootfs extracted,
+ *    rootfs really arm64, sources point at ports.ubuntu.com, guest DNS, dpkg
+ *    interrupted state, free space, writable TMPDIR.
+ * 2. **One real proot smoke test** ([RootfsProvisioner.SMOKE_STEPS]) - `true`,
+ *    `id` and `apt-get --version` inside the exact jail Provision uses. This
+ *    exists because a green file-check report proves nothing about proot
+ *    itself: the vendored termux/proot rejects a detached `--rootfs <path>`,
+ *    its seccomp filter misbehaves on several Android kernels, and `-0`'s
+ *    credential faking is what lets dpkg run at all. Any of those is a
+ *    seconds-long failure to catch here rather than a mystery minutes into apt.
+ *    It spawns nothing when an earlier prerequisite already failed (the row then
+ *    says WHY it was not run), and it is injected through [ProcessRunner] so the
+ *    whole doctor stays unit-testable.
+ *
+ * What even this cannot verify from outside (in-jail DNS resolution, the
+ * archive's own answers, dpkg lock state) is what the apt tail output is for.
  */
 object ProvisionDoctor {
 
@@ -90,14 +105,25 @@ object ProvisionDoctor {
         }
     }
 
+    /** How long one smoke command may take before it is called a hang, not a failure. */
+    const val SMOKE_TIMEOUT_MILLIS = 20_000L
+
     fun run(
         binaries: NativeBinaries,
         rootfsDir: File,
         filesDir: File,
         includeNetwork: Boolean = true,
         reachability: Reachability = defaultReachability,
-    ): DoctorReport = DoctorReport(
-        listOf(
+        /**
+         * The real proot smoke test ([checkProotSmoke]). On by default: a doctor
+         * that never runs proot cannot prove Provision will. Tests inject a
+         * [ProcessRunner] rather than turning it off.
+         */
+        includeProotSmoke: Boolean = true,
+        runner: ProcessRunner = JvmProcessRunner(),
+        smokeTimeoutMillis: Long = SMOKE_TIMEOUT_MILLIS,
+    ): DoctorReport {
+        val prerequisites = listOf(
             checkBinaries(binaries),
             checkRootfsExtracted(rootfsDir),
             checkRootfsArchitecture(rootfsDir),
@@ -106,8 +132,30 @@ object ProvisionDoctor {
             checkDpkgState(rootfsDir),
             checkDiskSpace(rootfsDir),
             checkTmpWritable(filesDir),
-        ) + if (includeNetwork) listOf(checkNetwork(reachability)) else emptyList(),
-    )
+        )
+        // The smoke test needs proot AND an unpacked rootfs; without them it can
+        // only repeat the failure the file checks already named, so it reports
+        // "not run" instead of spawning something that cannot work.
+        val smoke = if (includeProotSmoke) {
+            val blockedBy = prerequisites.firstOrNull { it.state == CheckState.FAIL && it.blocking }
+            listOf(
+                if (blockedBy != null) {
+                    DoctorCheck(
+                        SMOKE_ID, SMOKE_LABEL, CheckState.WARN,
+                        "not run: ${blockedBy.id} (${blockedBy.label}) already failed - ${blockedBy.detail}",
+                        blocking = false,
+                    )
+                } else {
+                    checkProotSmoke(binaries, rootfsDir, filesDir, runner, smokeTimeoutMillis)
+                },
+            )
+        } else {
+            emptyList()
+        }
+        return DoctorReport(
+            prerequisites + smoke + if (includeNetwork) listOf(checkNetwork(reachability)) else emptyList(),
+        )
+    }
 
     /** 1. The vendored proot set: present, executable, SHA-256-pinned (fail closed). */
     private fun checkBinaries(binaries: NativeBinaries): DoctorCheck {
@@ -301,8 +349,97 @@ object ProvisionDoctor {
         }
     }
 
+    private const val SMOKE_ID = "proot-smoke"
+    private const val SMOKE_LABEL = "proot smoke test (really exec'd)"
+
     /**
-     * 9. Host-side reachability of the archive apt will use. Non-blocking: the
+     * 9. The real thing: run three trivial commands inside the SAME proot jail
+     * Provision uses (`-0`, the system binds, the resolv.conf bind, short
+     * options, `PROOT_NO_SECCOMP=1`). Seconds, not minutes - and it catches the
+     * whole class of failure a host-side check cannot see:
+     *
+     * - the vendored termux/proot rejecting an argument form (detached `--rootfs`),
+     * - a kernel that denies ptrace or misbehaves with proot's seccomp filter,
+     * - a missing +x bit (exit 126 / EACCES),
+     * - a wrong-architecture rootfs (Exec format error),
+     * - an incomplete rootfs (guest binary not found),
+     * - `-0` not actually faking uid 0, which makes dpkg refuse outright.
+     *
+     * Steps run in order and stop at the first failure, each reporting the exact
+     * command line so the owner can reproduce it in Terminal.
+     */
+    private fun checkProotSmoke(
+        binaries: NativeBinaries,
+        rootfsDir: File,
+        filesDir: File,
+        runner: ProcessRunner,
+        timeoutMillis: Long,
+    ): DoctorCheck {
+        val tmpDir = File(filesDir, "tmp")
+        val proot = File(binaries.nativeLibraryDir, BinaryRole.PROOT.fileName)
+        val resolvConf = runCatching { RootfsProvisioner.ensureResolvConf(File(tmpDir, "resolv.conf")) }
+            .getOrElse {
+                return DoctorCheck(
+                    SMOKE_ID, SMOKE_LABEL, CheckState.FAIL,
+                    "could not write the guest DNS file for the smoke test: ${it.message}",
+                )
+            }
+        val environment = RootfsProvisioner.environment(binaries.nativeLibraryDir, binaries.loaderPaths(), tmpDir)
+        val passed = mutableListOf<String>()
+        for (step in RootfsProvisioner.SMOKE_STEPS) {
+            val command = RootfsProvisioner.smokeCommand(proot, rootfsDir, resolvConf, step.guestCommand)
+            val outcome = runCatching { runner.run(command, environment, workingDir = null, timeoutMillis) }
+                .getOrElse { return DoctorCheck(SMOKE_ID, SMOKE_LABEL, CheckState.FAIL, smokeFailure(step, command, null, it.message ?: it.javaClass.simpleName)) }
+            val output = (outcome.stdout + "\n" + outcome.stderr).trim().lineSequence()
+                .filter { it.isNotBlank() }.toList()
+            val firstLine = output.firstOrNull().orEmpty()
+            val healthy = outcome.exitCode == 0 && outcome.error == null &&
+                (step.expectOutput == null || firstLine.contains(step.expectOutput))
+            if (!healthy) {
+                return DoctorCheck(
+                    SMOKE_ID, SMOKE_LABEL, CheckState.FAIL,
+                    smokeFailure(step, command, outcome, firstLine.ifBlank { output.joinToString(" | ") }),
+                )
+            }
+            passed += "${step.id}: ${firstLine.ifBlank { "exit 0" }}"
+        }
+        return DoctorCheck(SMOKE_ID, SMOKE_LABEL, CheckState.PASS, passed.joinToString("; "))
+    }
+
+    /** Plain-language cause for one failed smoke step, including the command to rerun. */
+    private fun smokeFailure(
+        step: RootfsProvisioner.SmokeStep,
+        command: List<String>,
+        outcome: RunOutcome?,
+        output: String?,
+    ): String {
+        val text = listOfNotNull(output, outcome?.error).joinToString(" ").lowercase()
+        val cause = when {
+            outcome?.error?.contains("Timed out") == true ->
+                "proot hung (the kernel may deny ptrace even with PROOT_NO_SECCOMP=1, which the " +
+                    "environment sets) - ${step.explains}"
+            outcome?.exitCode == null ->
+                "proot could not be started (${outcome?.error ?: "no exit code"}): " +
+                    "exit 126/EACCES means the +x bit could not be set in nativeLibraryDir - ${step.explains}"
+            "exec format error" in text ->
+                "Exec format error: a guest binary in this rootfs is not arm64 (wrong flavour imported?) - ${step.explains}"
+            outcome.exitCode == 127 || "not found" in text || "no such file or directory" in text ->
+                "'${step.guestCommand.first()}' is missing from the rootfs - it is not unpacked or is the wrong " +
+                    "distribution flavour - ${step.explains}"
+            "ptrace" in text || "seccomp" in text || "operation not permitted" in text ->
+                "the kernel refused ptrace/seccomp inside proot - ${step.explains}"
+            "permission denied" in text ->
+                "permission denied while exec'ing in the jail (SELinux or a missing +x bit) - ${step.explains}"
+            step.expectOutput != null && outcome.exitCode == 0 ->
+                "the answer was not what apt needs (expected '${step.expectOutput}', got " +
+                    "'${output?.takeIf { it.isNotBlank() } ?: "no output"}') - ${step.explains}"
+            else -> "exit ${outcome?.exitCode}${output?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""} - ${step.explains}"
+        }
+        return "${step.label} failed: $cause (command: ${command.joinToString(" ")})"
+    }
+
+    /**
+     * 10. Host-side reachability of the archive apt will use. Non-blocking: the
      * app's own TLS path and the guest's plain-http path can disagree (captive
      * portals, corporate proxies), so only running apt proves the in-jail route.
      */

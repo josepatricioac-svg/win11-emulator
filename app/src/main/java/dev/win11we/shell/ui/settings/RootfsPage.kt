@@ -186,13 +186,19 @@ private fun ProvisionCard(rootfs: RootfsManager, context: android.content.Contex
     val canSetup = !working && !rootfs.busy
     val canProvision = canSetup && rootfs.rootfsReady
 
-    /** The Provision doctor: every host-side prerequisite, first failure named in plain language. */
+    /**
+     * The Provision doctor: every prerequisite, first failure named in plain
+     * language. The last row is not a file check - it really execs proot with a
+     * trivial guest command (`true`, `id`, `apt-get --version`), so an argument,
+     * ptrace/seccomp or fake-root problem is caught in seconds instead of
+     * minutes later as a bare "apt-get failed".
+     */
     fun runDoctor() {
         startWorker(rootfs, "provision-doctor") {
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                 working = true
                 detailLines = emptyList()
-                message = "Checking provisioning prerequisites…"
+                message = "Checking prerequisites, then running a real proot smoke test (a few seconds)…"
             }
             val outcome: Pair<String, List<String>> = runCatching {
                 val binaries = NativeBinaries.from(

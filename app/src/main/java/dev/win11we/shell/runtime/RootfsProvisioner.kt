@@ -99,20 +99,21 @@ object RootfsProvisioner {
         "-o Dpkg::Options::=--force-unsafe-io " +
         "-o Dpkg::Options::=--force-confold"
 
-    /** The exact proot command line: apt-get update && install && clean, as fake root. */
-    fun command(
-        prootBinary: File,
-        rootfsDir: File,
-        resolvConf: File,
-        packages: List<String> = BROWSER_PACKAGES,
-    ): List<String> = listOf(
+    /**
+     * The proot prefix every in-jail command shares - provision AND the doctor's
+     * smoke test - so the smoke really exercises the same argument form, binds
+     * and fake root that apt will. Short options only: the vendored termux/proot
+     * rejects a detached `--rootfs <path>` (RuntimeTest pins this).
+     *
+     * Fake root (`-0` == `-i 0:0`). Without it dpkg refuses outright ("requested
+     * operation requires superuser privilege") and apt cannot take its locks:
+     * proot's own help text names package managers as -0's use case. It fakes
+     * credentials and ownership only - everything still really runs as the
+     * app uid.
+     */
+    fun prootPrefix(prootBinary: File, rootfsDir: File, resolvConf: File): List<String> = listOf(
         prootBinary.absolutePath,
         "-r", rootfsDir.absolutePath,
-        // Fake root (-0 == -i 0:0). Without it dpkg refuses outright ("requested
-        // operation requires superuser privilege") and apt cannot take its locks:
-        // proot's own help text names package managers as -0's use case. It fakes
-        // credentials and ownership only - everything still really runs as the
-        // app uid.
         "-0",
         "--link2symlink",
         "--kill-on-exit",
@@ -121,6 +122,15 @@ object RootfsProvisioner {
         "-b", "/dev:/dev",
         "-b", "${resolvConf.absolutePath}:/etc/resolv.conf",
         "-w", "/root",
+    )
+
+    /** The exact proot command line: apt-get update && install && clean, as fake root. */
+    fun command(
+        prootBinary: File,
+        rootfsDir: File,
+        resolvConf: File,
+        packages: List<String> = BROWSER_PACKAGES,
+    ): List<String> = prootPrefix(prootBinary, rootfsDir, resolvConf) + listOf(
         "--",
         "/bin/bash", "-c",
         // dpkg --configure -a first: a provisioning run that was killed (Stop all,
@@ -131,6 +141,54 @@ object RootfsProvisioner {
             "apt-get $APT_OPTIONS update && " +
             "apt-get $APT_OPTIONS install -y --no-install-recommends ${packages.joinToString(" ")} && " +
             "apt-get $APT_OPTIONS clean && rm -rf /var/lib/apt/lists/*",
+    )
+
+    /** One guest command run inside the same jail [command] uses, for the doctor. */
+    fun smokeCommand(
+        prootBinary: File,
+        rootfsDir: File,
+        resolvConf: File,
+        guestCommand: List<String>,
+    ): List<String> = prootPrefix(prootBinary, rootfsDir, resolvConf) + listOf("--") + guestCommand
+
+    /**
+     * The doctor's smoke steps: three commands that each prove one thing apt
+     * depends on. They run BEFORE apt so an argument-form, ptrace/seccomp or
+     * credential-faking problem is named in seconds instead of surfacing as a
+     * bare "apt-get failed" minutes later.
+     */
+    data class SmokeStep(
+        val id: String,
+        val label: String,
+        val guestCommand: List<String>,
+        /** Text a healthy answer must contain; null means "exit 0 is enough". */
+        val expectOutput: String? = null,
+        /** What a failure of THIS step means for apt, in plain language. */
+        val explains: String,
+    )
+
+    val SMOKE_STEPS: List<SmokeStep> = listOf(
+        SmokeStep(
+            id = "exec",
+            label = "proot -> /bin/true",
+            guestCommand = listOf("/bin/true"),
+            explains = "proot cannot exec anything in this rootfs, so apt could never run.",
+        ),
+        SmokeStep(
+            id = "fake-root",
+            label = "proot -0 -> /usr/bin/id",
+            guestCommand = listOf("/usr/bin/id"),
+            expectOutput = "uid=0",
+            explains = "the guest does not see uid 0, so dpkg would refuse to install " +
+                "(\"requested operation requires superuser privilege\") and apt could not take its locks.",
+        ),
+        SmokeStep(
+            id = "apt-get",
+            label = "proot -> /usr/bin/apt-get --version",
+            guestCommand = listOf("/usr/bin/apt-get", "--version"),
+            expectOutput = "apt",
+            explains = "apt-get itself does not run inside the jail, so Provision has nothing to call.",
+        ),
     )
 
     /** Host-side environment; LD_LIBRARY_PATH carries the vendored libtalloc. */
@@ -166,7 +224,11 @@ object RootfsProvisioner {
         timeoutMillis: Long = 45 * 60 * 1000L,
         packages: List<String> = BROWSER_PACKAGES,
     ): ProvisionResult {
-        val preflight = ProvisionDoctor.run(binaries, rootfsDir, filesDir, includeNetwork = false)
+        // The doctor's pre-flight INCLUDES the real proot smoke test (true/id/
+        // apt-get --version) through the same [ProcessRunner] seam: a failure
+        // there is named in seconds, with the exact command line, instead of
+        // surfacing minutes later as a bare "apt-get failed".
+        val preflight = ProvisionDoctor.run(binaries, rootfsDir, filesDir, includeNetwork = false, runner = runner)
         if (!preflight.ok) {
             preflight.checks.forEach { check ->
                 log.add(

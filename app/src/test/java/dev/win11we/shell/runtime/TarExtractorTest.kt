@@ -303,15 +303,30 @@ class RootfsProvisionerTest {
     @get:Rule
     val tmp = TemporaryFolder()
 
+    /**
+     * One seam for BOTH the doctor's proot smoke test and apt itself: the smoke
+     * steps (`/bin/true`, `/usr/bin/id`, `apt-get --version`) answer like a
+     * healthy jail, and the real provisioning command answers [aptOutcome].
+     */
     private class FakeRunner(
-        private val outcome: RunOutcome = RunOutcome(0, "Reading package lists... Done\nSetting up libgtk-3-0 (3.24.33) ...\n", ""),
+        private val aptOutcome: RunOutcome = RunOutcome(0, "Reading package lists... Done\nSetting up libgtk-3-0 (3.24.33) ...\n", ""),
     ) : ProcessRunner {
         val commands = mutableListOf<List<String>>()
         val environments = mutableListOf<Map<String, String>>()
+
+        /** Just the apt pass; the three smoke commands are in [commands] too. */
+        val provisionCommands: List<List<String>> get() = commands.filter { it.last().contains("dpkg --configure -a") }
+
         override fun run(command: List<String>, environment: Map<String, String>, workingDir: File?, timeoutMillis: Long): RunOutcome {
             commands.add(command)
             environments.add(environment)
-            return outcome
+            val guest = command.joinToString(" ")
+            return when {
+                guest.endsWith("/bin/true") -> RunOutcome(0, "", "")
+                guest.endsWith("/usr/bin/id") -> RunOutcome(0, "uid=0(root) gid=0(root) groups=0(root)", "")
+                guest.endsWith("--version") -> RunOutcome(0, "apt 2.4.13 (arm64)", "")
+                else -> aptOutcome
+            }
         }
     }
 
@@ -429,8 +444,10 @@ class RootfsProvisionerTest {
             runner = runner,
         )
         assertTrue(result.message, result.success)
-        assertEquals(1, runner.commands.size)
-        val env = runner.environments.single()
+        assertEquals(1, runner.provisionCommands.size)
+        // Three smoke commands (true/id/apt-get --version) plus the apt pass.
+        assertEquals(4, runner.commands.size)
+        val env = runner.environments.last()
         assertTrue(env.containsKey("PROOT_LOADER"))
         assertEquals("1", env["PROOT_NO_SECCOMP"])
         assertEquals(File(tmp.root, "tmp").absolutePath, env["TMPDIR"])

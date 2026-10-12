@@ -104,14 +104,31 @@ Honest limits while gated (each named by the readiness message, nothing silent):
   self-test** - proof of X11 contact before Firefox (see `docs/X_SERVER.md`). A failure reports the exit code and the last 30 apt
   output lines in the Provision card and the shared log — no more bare "apt-get failed".
   Before any of that runs, the **Provision doctor** ("Run doctor" chip on the card, and
-  the automatic pre-flight inside Provision) checks every host-side prerequisite and
-  names the first blocking failure in plain language: proot set pinned+executable,
-  rootfs extracted, rootfs is really arm64 (ELF `e_machine`, catches amd64 SAF imports),
+  the automatic pre-flight inside Provision) checks every prerequisite and names the
+  first blocking failure in plain language: proot set pinned+executable, rootfs
+  extracted, rootfs is really arm64 (ELF `e_machine`, catches amd64 SAF imports),
   sources.list serves `ports.ubuntu.com`, guest resolv.conf state, interrupted-dpkg state
   (a killed earlier run - provision repairs it with `dpkg --configure -a` first), ≥400 MB
   free, writable host TMPDIR — plus a non-blocking https probe of ports.ubuntu.com (host
   TLS and the guest's http path can disagree, so only apt's own output decides the
   in-jail route).
+  The doctor's last row is not a file check: it **really execs proot** with three trivial
+  guest commands in the exact jail Provision uses (`-0`, the `/proc`+`/sys`+`/dev`+
+  resolv.conf binds, short options, `PROOT_NO_SECCOMP=1`) - `/bin/true` (can proot enter
+  the jail and exec at all), `/usr/bin/id` (does `-0`'s credential faking really give the
+  guest uid 0, without which dpkg refuses outright) and `/usr/bin/apt-get --version`
+  (does the program Provision calls actually run). Steps run in order and stop at the
+  first failure; the row then names the cause in plain language - cannot be started
+  (exit 126/EACCES = the +x bit), `Exec format error` (wrong-architecture rootfs),
+  exit 127/not found (incomplete rootfs), ptrace/seccomp refused, hung (timeout), or an
+  answer that is not what apt needs - **and prints the exact command line**, so it can be
+  re-run from Terminal. This exists because a green file-check report proves nothing
+  about proot itself: the vendored termux/proot rejects a detached `--rootfs <path>`, its
+  seccomp filter misbehaves on several Android kernels, and both used to surface only as
+  a bare "apt-get failed" minutes into a provision. When an earlier prerequisite already
+  failed the row reports *not run* (with the reason) instead of spawning something that
+  cannot work. The smoke runs through the same injectable `ProcessRunner` seam as apt, so
+  the whole doctor stays unit-tested without spawning anything.
 - One session at a time. A second URL no longer dies on `ALREADY_RUNNING`: the
   session starts a private `dbus-daemon --session` at a **fixed** guest address
   (`unix:path=/tmp/shell-dbus-session`, `dbus` + `dbus-x11` are in the pinned
