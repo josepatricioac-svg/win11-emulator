@@ -303,6 +303,31 @@ class XSelfTestTest {
     }
 
     @Test
+    fun `the excerpt keeps GTK's Details line even when it falls outside the first six`() {
+        // GDK's fatal handler prints a preamble; the request_code line that names
+        // the missing X request comes later and is the whole point of the probe.
+        val preamble = (1..10).joinToString("\n") { "Gtk-Message: $it: preamble" }
+        val runner = FakeRunner { command ->
+            when {
+                command.any { it.contains("gtk-query-settings") } -> RunOutcome(
+                    1, "",
+                    preamble + "\nX Error of failed request:  BadRequest\n" +
+                        "  (Details: serial 512 error_code 1 request_code 135 (XKEYBOARD) minor_code 8)\n",
+                )
+                command.any { it.contains("xdpyinfo") } -> xdpyinfoOk
+                command.any { it.contains("xwininfo") } -> xwininfoOk
+                else -> timedOut
+            }
+        }
+        val report = test(runner, trace = null).run()
+        val gtk = report.steps.first { it.id == GTK_PROBE_ID }
+        assertEquals(StepVerdict.FAIL, gtk.verdict)
+        assertTrue("the request_code line must survive truncation: ${gtk.output}",
+            gtk.output.contains("request_code 135 (XKEYBOARD) minor_code 8"))
+        assertTrue(gtk.output.contains("serial 512"))
+    }
+
+    @Test
     fun `provision installs the GTK3 probe's package alongside the browser stack`() {
         assertTrue(
             "the self-test's GTK3 probe comes from libgtk-3-bin, so Provision must install it",

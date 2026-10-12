@@ -304,10 +304,35 @@ class XSelfTest(
         if (displayFlag) "proot -> $id -display ${RuntimePaths.X_DISPLAY}"
         else "proot -> $id (DISPLAY=${RuntimePaths.X_DISPLAY})"
 
-    private fun excerpt(outcome: RunOutcome): String =
-        (outcome.stdout + "\n" + outcome.stderr).lineSequence()
+    /**
+     * The first six non-blank output lines, PLUS any later line that names a
+     * failure. The plus matters for the GTK3 probe: GDK's fatal X-error handler
+     * prints a dozen lines of preamble before the line that actually diagnoses
+     * the problem - "(Details: serial N error_code X request_code Y (EXT)
+     * minor_code Z)" - and that request code is the entire reason the probe
+     * exists. Truncating at six lines would throw the answer away.
+     */
+    private fun excerpt(outcome: RunOutcome): String {
+        val lines = (outcome.stdout + "\n" + outcome.stderr).lineSequence()
             .map { it.trimEnd() }
             .filter { it.isNotBlank() }
-            .take(6)
-            .joinToString("\n")
+            .toList()
+        val head = lines.take(6)
+        val diagnostic = lines.drop(6).filter { line ->
+            DIAGNOSTIC_MARKERS.any { line.contains(it) }
+        }
+        return (head + diagnostic).distinct().take(12).joinToString("\n")
+    }
+
+    companion object {
+        /** Lines worth keeping from anywhere in a client's output. */
+        val DIAGNOSTIC_MARKERS: List<String> = listOf(
+            "Details:", // GDK/libX11 fatal X-error detail: serial/error/request/minor
+            "request_code",
+            "X Error",
+            "Cannot open display",
+            "can't open display",
+            "fatal",
+        )
+    }
 }
