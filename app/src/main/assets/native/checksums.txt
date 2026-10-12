@@ -14,11 +14,11 @@
 #   libtalloc.so       Termux libtalloc 2.5.0 aarch64 package (LGPL-3.0+),
 #                      SONAME respelled libtalloc.so.2 -> libtalloc.so so AGP
 #                      packages it and the linker resolves it by file name.
-#   libbox64.so        not vendored yet: built by .github/workflows/build-native.yml
-#                      (the D1c sandbox lacked the RAM to compile the dynarec);
-#                      only x86/x64 Wine payloads need it - Firefox ESR does not.
+#   libbox64.so        ptitSeb/box64 v0.4.4 (MIT), built and committed
+#                      by .github/workflows/build-native.yml (NDK, android-28,
+#                      ARM_DYNAREC=ON, llvm-strip'd).
 libproot.so=43e98a71e9c10501b7984f1c6a30637fd57eac6b08627bee7b22420f0a36d957
 libproot-loader.so=0738d73bc8e3c0b22f9b59a019a29087195453dcb0b73ced979b00fafe1caefe
 libtalloc.so=160d39bc0d7ed946f22310d1d6f20addda21b02b0972dffe929fe49951543941
-# libbox64.so=
+libbox64.so=bec2a61f2c2bee8607d41e6d5b992580ccb9cad878cc6e0a255f539957823710
 # libproot-loader32.so=
