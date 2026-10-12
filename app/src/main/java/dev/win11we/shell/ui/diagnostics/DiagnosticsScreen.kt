@@ -126,16 +126,21 @@ fun DiagnosticsScreen(state: DiagnosticsState, modifier: Modifier = Modifier) {
         }
         Spacer(Modifier.height(14.dp))
 
-        Label("X self-test (xeyes/xclock on :100)")
+        Label("X self-test (GTK3 + xeyes/xclock on :100)")
         val xReport = state.xSelfTest
         if (xReport == null) {
             Text(
-                text = "Runs xdpyinfo/xwininfo (instant handshake + RENDER probes) and launches xeyes " +
-                    "(core X11) and xclock (Xaw+Xft = the RENDER glyph path) inside proot against the " +
-                    "shell's own X server. For the clients, PASS = stayed connected the whole window; " +
-                    "a FAIL carries the exit code and the connection's protocol trace. Open Start ▸ X " +
-                    "Desktop once first so the server is bound; the clients come from x11-utils/x11-apps " +
-                    "(the Provision step installs them).",
+                text = "Five steps inside proot against the shell's own X server: xdpyinfo/xwininfo " +
+                    "(instant handshake + RENDER probes), gtk-query-settings (can GTK3 - the toolkit " +
+                    "Firefox is built on - open the display at all?), then xeyes (core X11) and xclock " +
+                    "(Xaw+Xft = the RENDER glyph path). For the two clients PASS = stayed connected the " +
+                    "whole window; a FAIL carries the exit code, the client's own output and the " +
+                    "connection's protocol trace. If GTK3 fails, its row quotes GTK's " +
+                    "\"request_code\" line - that number names the X request to implement next. " +
+                    "Open Start ▸ X Desktop once first so the server is bound. The clients come from " +
+                    "x11-utils, x11-apps and libgtk-3-bin (the Provision step installs all three); a " +
+                    "missing one SKIPs with the package named. Runs on a worker thread, and the first " +
+                    "GTK3 run can take a minute while it builds the font cache.",
                 color = TextTertiary,
                 fontSize = 11.5.sp,
             )
