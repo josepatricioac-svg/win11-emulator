@@ -371,6 +371,28 @@ class ProotCommandTest {
     }
 
     @Test
+    fun `the rootfs every component judges is the configured one, from one function`() {
+        // Diagnostics once hardcoded <files>/rootfs while the launcher honoured the
+        // container.rootfsLocation setting: with the setting set, the X self-test
+        // skipped all five rows while judging a directory with no rootfs in it.
+        val files = File(tmp.root, "files")
+        assertEquals(
+            RuntimePaths.defaultRootfs(files),
+            RuntimePaths.configuredRootfs(files, null),
+        )
+        assertEquals(
+            RuntimePaths.defaultRootfs(files),
+            RuntimePaths.configuredRootfs(files, ""),
+        )
+        assertEquals(
+            RuntimePaths.defaultRootfs(files),
+            RuntimePaths.configuredRootfs(files, "   "),
+        )
+        val custom = File(tmp.root, "elsewhere/rootfs")
+        assertEquals(custom, RuntimePaths.configuredRootfs(files, custom.absolutePath))
+    }
+
+    @Test
     fun `the pinned package list is exactly the names verified against jammy arm64`() {
         // One wrong name fails the whole apt-get install (exit 100, "Unable to locate
         // package"), which is what libdbus-glib-1-2-2 did on a real device. Every name

@@ -367,7 +367,7 @@ open decisions.
 
 ## UI tests
 
-`./gradlew testDebugUnitTest` runs the 564 pure-JVM tests (window geometry, snap zones,
+`./gradlew testDebugUnitTest` runs the 565 pure-JVM tests (window geometry, snap zones,
 Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing, argv
 splitting, the log buffer, the built-in commands, the terminal transcript/history, the
 container codec/store, guest<->host path mapping, the Wine environment builder, the
@@ -499,9 +499,9 @@ app/src/main/java/dev/win11we/shell/
   runtime/SelfTestRunner.kt    the R4 self-test: 3 steps, verdicts, reasons, report/log excerpt
 ```
 
-Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 564 tests, measured by
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 565 tests, measured by
 annotation count; the pure-JVM subset is additionally compiled and executed off-device
-against JDK 17 + Kotlin 2.1.10 with minimal Android stubs, so 426 of them are run for
+against JDK 17 + Kotlin 2.1.10 with minimal Android stubs, so 427 of them are run for
 real outside Gradle too): snap zones,
 maximize/restore, halves snapping, edge/corner resize with minimums, on-screen clamping,
 z-order/focus, taskbar toggle open-minimize-restore, Explorer listing/filtering/sorting,

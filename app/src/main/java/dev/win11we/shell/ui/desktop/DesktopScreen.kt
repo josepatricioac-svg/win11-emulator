@@ -45,7 +45,11 @@ fun DesktopScreen(store: SettingsStore) {
     // the PackageManager browser query and the SHA-256 of the shipped binaries.
     LaunchedEffect(Unit) {
         dev.win11we.shell.ui.browser.Browsers.warmUp(context)
-        val launcher = dev.win11we.shell.runtime.RuntimeHolder.init(context, store.rootfsLocation.ifBlank { null })
+        val launcher = dev.win11we.shell.runtime.RuntimeHolder.init(
+            context,
+            dev.win11we.shell.runtime.RuntimePaths
+                .configuredRootfs(context.filesDir, store.rootfsLocation).absolutePath,
+        )
         launcher.binaries.warmChecksums()
         // Pay the first-window costs (class loading, PackageManager queries, disk reads,
         // container list parsing) now, in the background, instead of on the first tap.

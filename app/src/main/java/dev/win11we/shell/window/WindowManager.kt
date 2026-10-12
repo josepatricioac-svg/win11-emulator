@@ -208,14 +208,22 @@ fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager
                 // filled by DesktopEngineReadiness' guarded worker.
                 desktopEngineReady = { engineId -> DesktopEngineReadiness.ready(engineId) },
                 launchDesktopBrowser = { engineId, url ->
-                    DesktopBrowserLauncher.launch(appContext, engineId, url, store.rootfsLocation.ifBlank { null })
+                    DesktopBrowserLauncher.launch(
+                        appContext, engineId, url,
+                        dev.win11we.shell.runtime.RuntimePaths
+                            .configuredRootfs(appContext.filesDir, store.rootfsLocation).absolutePath,
+                    )
                 },
             )
             "settings" -> SettingsState()
             // Task Manager observes the window list, so it gets the manager itself.
             "taskmgr" -> manager
             "containers" -> {
-                val launcher = RuntimeHolder.init(appContext, store.rootfsLocation.ifBlank { null })
+                val launcher = RuntimeHolder.init(
+                    appContext,
+                    dev.win11we.shell.runtime.RuntimePaths
+                        .configuredRootfs(appContext.filesDir, store.rootfsLocation).absolutePath,
+                )
                 ContainerManagerState(
                     store = ContainerStore(File(appContext.filesDir, "containers")),
                     runtime = LauncherRuntime(launcher, appContext),
@@ -228,7 +236,12 @@ fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager
                     nativeLibraryDirPath = appContext.applicationInfo.nativeLibraryDir,
                     pins = NativeBinaries.loadPinsFromAssets(appContext.assets),
                 ),
-                rootfsDir = RuntimePaths.defaultRootfs(appContext.filesDir),
+                // The SAME resolution the launcher uses: a custom rootfsLocation
+                // must not make the self-test judge a directory that has no rootfs
+                // in it (that read as "all five rows skipped" on a device whose
+                // server was perfectly healthy).
+                rootfsDir = dev.win11we.shell.runtime.RuntimePaths
+                    .configuredRootfs(appContext.filesDir, store.rootfsLocation),
                 filesDir = appContext.filesDir,
                 xServerRunning = { dev.win11we.shell.x11.XServer.running },
                 // The trace of the connection that just died, else any live one:

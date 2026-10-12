@@ -52,6 +52,19 @@ object RuntimePaths {
     /** Where R3 downloads and unpacks the Ubuntu rootfs. */
     fun defaultRootfs(filesDir: File) = File(filesDir, "rootfs")
 
+    /**
+     * THE rootfs every part of the app must agree on: the user's
+     * `container.rootfsLocation` setting when set, else [defaultRootfs].
+     *
+     * This existed implicitly in three call sites (browser launch, container
+     * launcher, X Desktop) and NOT in two others (Diagnostics, which therefore
+     * skipped all five X self-test rows whenever the setting pointed elsewhere,
+     * and the download page). One function, so the self-test, Provision and the
+     * launcher can never disagree about which directory they are judging.
+     */
+    fun configuredRootfs(filesDir: File, location: String?): File =
+        location?.takeIf { it.isNotBlank() }?.let { File(it) } ?: defaultRootfs(filesDir)
+
     /** The Firefox ESR session's persistent profile host directory (D1/R3). */
     fun browserProfileDir(filesDir: File) = File(filesDir, "browser/firefox-profile")
 
