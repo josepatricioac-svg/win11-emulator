@@ -300,7 +300,7 @@ class ProotCommandTest {
     fun `the prefix bind mount is fixed so wine paths stay valid`() {
         val command = ProotCommand.build(proot, rootfs, prefix, guestCommand = listOf("wine64", "--version"))
         assertEquals(proot.absolutePath, command.first())
-        val index = command.indexOf("--bind")
+        val index = command.indexOf("-b")
         assertEquals(prefix.absolutePath + ":/root/.wine", command[index + 1])
         assertEquals("/root/.wine", ProotCommand.GUEST_PREFIX)
     }
@@ -314,20 +314,36 @@ class ProotCommandTest {
         assertEquals(
             listOf(
                 proot.absolutePath,
-                "--rootfs", rootfs.absolutePath,
+                "-r", rootfs.absolutePath,
                 "--link2symlink",
                 "--kill-on-exit",
-                "--bind", prefix.absolutePath + ":/root/.wine",
+                "-b", prefix.absolutePath + ":/root/.wine",
                 // Bare --rootfs binds nothing else (termux/proot cli/proot.c): the
                 // kernel interfaces the guest needs are bound explicitly.
-                "--bind", "/dev",
-                "--bind", "/proc",
-                "--bind", "/sys",
-                "--cwd", "/root",
+                "-b", "/dev",
+                "-b", "/proc",
+                "-b", "/sys",
+                "-w", "/root",
                 "wine64", "cmd", "/c", "echo", "hello",
             ),
             command,
         )
+    }
+
+    @Test
+    fun `termux proot gets short options so values are never detached from long ones`() {
+        // termux/proot rejects "--rootfs /path" (value must be joined by '='); the short
+        // forms take a separate argument. Seen on a real device as
+        // "option '--rootfs' and its value must be separated by '='".
+        val command = ProotCommand.build(proot, rootfs, prefix, guestCommand = listOf("true"))
+        val guestStart = command.indexOf("true")
+        val prootArgs = command.subList(1, guestStart)
+        listOf("--rootfs", "--bind", "--cwd").forEach { long ->
+            assertFalse("$long must not be emitted as a detached pair", prootArgs.contains(long))
+        }
+        assertEquals(rootfs.absolutePath, prootArgs[prootArgs.indexOf("-r") + 1])
+        assertEquals("/root", prootArgs[prootArgs.indexOf("-w") + 1])
+        assertTrue(prootArgs.contains("-b"))
     }
 
     @Test
@@ -351,7 +367,7 @@ class ProotCommandTest {
         val prefixBind = command.indexOf(prefix.absolutePath + ":/root/.wine")
         val extraBind = command.indexOf("/storage/emulated/0/Documents:/mnt/documents")
         assertTrue(extraBind > prefixBind)
-        assertEquals("--bind", command[extraBind - 1])
+        assertEquals("-b", command[extraBind - 1])
     }
 
     @Test

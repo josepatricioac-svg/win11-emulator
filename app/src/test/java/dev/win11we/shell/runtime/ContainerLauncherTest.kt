@@ -160,7 +160,7 @@ class ContainerLauncherTest {
 
         val command = fake.commands.single()
         assertEquals(File(nativeDir, "libproot.so").absolutePath, command.first())
-        assertTrue(command.containsAll(listOf("--rootfs", rootfs.absolutePath)))
+        assertTrue(command.containsAll(listOf("-r", rootfs.absolutePath)))
         assertTrue(command.contains(prefix.absolutePath + ":/root/.wine"))
         assertTrue("box64 must sit between proot and wine", command.contains(File(nativeDir, "libbox64.so").absolutePath))
         assertEquals(listOf("wine64", "cmd"), command.subList(command.size - 2, command.size))

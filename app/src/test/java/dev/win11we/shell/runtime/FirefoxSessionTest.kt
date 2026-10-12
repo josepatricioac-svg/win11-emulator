@@ -83,13 +83,13 @@ class FirefoxSessionTest {
         val xDir = File(tmp.root, "x11")
         val command = launcher.buildCommand(request("https://example.org", profile, xDir))
         // Bare --rootfs binds nothing else; the kernel interfaces must be explicit.
-        assertTrue(command.containsAll(listOf("--bind", "/dev")))
+        assertTrue(command.containsAll(listOf("-b", "/dev")))
         assertTrue(command.contains("/proc"))
         assertTrue(command.contains("/sys"))
         // Guest DNS: Android has no /etc/resolv.conf for the jail.
         assertTrue(command.contains("${File(tmp.root, "resolv.conf").absolutePath}:/etc/resolv.conf"))
         assertEquals(binaries.nativeLibraryDir.absolutePath + "/libproot.so", command.first())
-        assertTrue(command.containsAll(listOf("--rootfs", "--link2symlink", "--kill-on-exit")))
+        assertTrue(command.containsAll(listOf("-r", "--link2symlink", "--kill-on-exit")))
         // The session's state dir replaces the Wine prefix bind...
         assertTrue(command.contains("${profile.absolutePath}:/root/.mozilla"))
         // ...and nothing is bound at /root/.wine.

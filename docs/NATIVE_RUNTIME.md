@@ -7,7 +7,7 @@
 `app/src/main/jniLibs/arm64-v8a/` and **executed in place from `nativeLibraryDir`**:
 
 ```
-applicationInfo.nativeLibraryDir/libproot.so   --rootfs … --bind <prefix>:/root/.wine … -- box64 … wine64 …
+applicationInfo.nativeLibraryDir/libproot.so   -r … -b <prefix>:/root/.wine … -- box64 … wine64 …
 ```
 
 Three build settings make that work and are already in `app/build.gradle.kts`:

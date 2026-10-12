@@ -351,7 +351,7 @@ class RootfsProvisionerTest {
             resolvConf = File("/data/tmp/resolv.conf"),
         )
         assertEquals("/lib/arm64/libproot.so", command.first())
-        assertTrue(command.containsAll(listOf("--rootfs", "/data/rootfs", "--link2symlink", "--kill-on-exit")))
+        assertTrue(command.containsAll(listOf("-r", "/data/rootfs", "--link2symlink", "--kill-on-exit")))
         // Without -0 dpkg refuses ("requires superuser privilege") and apt cannot
         // take its locks; it must come before the `--` separator.
         assertTrue("-0 (fake root) is missing", command.contains("-0"))

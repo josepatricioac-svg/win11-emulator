@@ -107,7 +107,7 @@ object RootfsProvisioner {
         packages: List<String> = BROWSER_PACKAGES,
     ): List<String> = listOf(
         prootBinary.absolutePath,
-        "--rootfs", rootfsDir.absolutePath,
+        "-r", rootfsDir.absolutePath,
         // Fake root (-0 == -i 0:0). Without it dpkg refuses outright ("requested
         // operation requires superuser privilege") and apt cannot take its locks:
         // proot's own help text names package managers as -0's use case. It fakes
@@ -116,11 +116,11 @@ object RootfsProvisioner {
         "-0",
         "--link2symlink",
         "--kill-on-exit",
-        "--bind", "/proc:/proc",
-        "--bind", "/sys:/sys",
-        "--bind", "/dev:/dev",
-        "--bind", "${resolvConf.absolutePath}:/etc/resolv.conf",
-        "--cwd", "/root",
+        "-b", "/proc:/proc",
+        "-b", "/sys:/sys",
+        "-b", "/dev:/dev",
+        "-b", "${resolvConf.absolutePath}:/etc/resolv.conf",
+        "-w", "/root",
         "--",
         "/bin/bash", "-c",
         // dpkg --configure -a first: a provisioning run that was killed (Stop all,

@@ -210,8 +210,9 @@ unit-tested with a fake `ProcessLauncher`:
 1. **Validate before spawning** and refuse with a named reason: `BINARIES_NOT_READY`
    (which includes the fail-closed SHA-256 verdicts), `ROOTFS_MISSING`, `PREFIX_MISSING`,
    `NO_COMMAND`, `ALREADY_RUNNING`, `SPAWN_FAILED`.
-2. **Build the command**: `proot --rootfs <rootfs> --link2symlink --kill-on-exit
-   --bind <prefix>:/root/.wine --bind <drive>:/mnt/<letter> … --cwd /root -- box64 wine64 cmd`.
+2. **Build the command**: `proot -r <rootfs> --link2symlink --kill-on-exit
+   -b <prefix>:/root/.wine -b <drive>:/mnt/<letter> … -w /root -- box64 wine64 cmd`
+   (short options on purpose: the vendored termux/proot rejects a detached `--rootfs <path>`).
    box64 is inserted only for Windows payloads (`wine*`, `*.exe`), not for native commands.
 3. **Build the environment**: `WineEnvironment.build()` plus this container's
    `PROOT_LOADER`/`PROOT_LOADER_32`, sorted so Diagnostics can diff it.

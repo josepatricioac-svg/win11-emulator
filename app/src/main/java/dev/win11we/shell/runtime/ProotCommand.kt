@@ -28,6 +28,14 @@ object ProotCommand {
      */
     val SYSTEM_BINDS = listOf("/dev", "/proc", "/sys")
 
+    /*
+     * ARGUMENT FORM MATTERS. The vendored termux/proot fork refuses a long option whose
+     * value is a separate argument: `--rootfs /path` dies with "option '--rootfs' and its
+     * value must be separated by '='" (seen on a real device; it broke Provision and every
+     * launch). Short options take the value as the next argument, so this builder and
+     * RootfsProvisioner use -r / -b / -w. Never emit "--rootfs", "--bind" or "--cwd" as
+     * detached pairs; RuntimeTest pins this.
+     */
     fun build(
         prootBinary: File,
         rootfsDir: File,
@@ -44,22 +52,22 @@ object ProotCommand {
     ): List<String> {
         require(guestCommand.isNotEmpty()) { "a guest command is required" }
         val command = mutableListOf(prootBinary.absolutePath)
-        command += "--rootfs"
+        command += "-r"
         command += rootfsDir.absolutePath
         if (link2symlink) command += "--link2symlink"
         if (killOnExit) command += "--kill-on-exit"
-        command += "--bind"
+        command += "-b"
         command += "${prefixDir.absolutePath}:$guestPrefix"
         systemBinds.forEach { path ->
-            command += "--bind"
+            command += "-b"
             command += path
         }
         binds.forEach { bind ->
-            command += "--bind"
+            command += "-b"
             command += bind.argument
         }
         command += extraArgs
-        command += "--cwd"
+        command += "-w"
         command += GUEST_HOME
         command += guestCommand
         return command

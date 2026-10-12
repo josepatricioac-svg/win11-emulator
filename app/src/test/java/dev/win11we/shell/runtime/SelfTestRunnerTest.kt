@@ -84,7 +84,7 @@ class SelfTestRunnerTest {
         listOf(1, 2).forEach { index ->
             val command = scripted.calls[index]
             assertEquals(File(nativeDir, "libproot.so").absolutePath, command.first())
-            assertTrue(command.containsAll(listOf("--rootfs", rootfs.absolutePath)))
+            assertTrue(command.containsAll(listOf("-r", rootfs.absolutePath)))
             assertTrue(command.contains("--kill-on-exit"))
         }
         assertTrue(scripted.calls[1].containsAll(listOf("wine64", "--version")))

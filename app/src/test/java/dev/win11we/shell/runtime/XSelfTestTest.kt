@@ -194,7 +194,7 @@ class XSelfTestTest {
         assertTrue(runner.commands[1].contains("-root"))
         val command = runner.commands[2]
         assertEquals(File(binaries.nativeLibraryDir, BinaryRole.PROOT.fileName).absolutePath, command.first())
-        assertTrue(command.contains("--rootfs"))
+        assertTrue(command.contains("-r"))
         assertTrue(command.contains("--link2symlink"))
         // The X socket dir bind is what makes /tmp/.X11-unix exist inside the guest.
         val bindIndex = command.indexOf("${tmp.root.absolutePath}/tmp/.X11-unix:/tmp/.X11-unix")

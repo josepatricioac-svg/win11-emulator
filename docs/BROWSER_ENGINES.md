@@ -69,8 +69,8 @@ unlocks itself the moment the runtime is complete:
    exact missing step; no disk I/O ever runs during composition (crash-safety rules 1–2).
 3. **Launch (`FirefoxSession` + `DesktopBrowserLauncher`)**: pure, unit-tested command
    and environment plans. The session runs through R2's `ContainerLauncher` —
-   `proot --rootfs … --link2symlink --kill-on-exit --bind <profile>:/root/.mozilla
-   --bind <x11 dir>:/tmp/.X11-unix --cwd /root -- /opt/firefox-esr/firefox -P shell
+   `proot -r … --link2symlink --kill-on-exit -b <profile>:/root/.mozilla
+   -b <x11 dir>:/tmp/.X11-unix -w /root -- /opt/firefox-esr/firefox -P shell
    <url>` — **no box64** (native arm64), an explicit `FirefoxEnvironment`
    (`DISPLAY=:100`, `MOZ_ENABLE_WAYLAND=0`, the `MOZ_DISABLE_*_SANDBOX` switches proot
    deployments need, sorted for Diagnostics diffs, plus the `PROOT_LOADER*` paths).
