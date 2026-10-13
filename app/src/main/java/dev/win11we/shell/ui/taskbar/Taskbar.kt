@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import dev.win11we.shell.R
 import dev.win11we.shell.settings.SettingsStore
 import dev.win11we.shell.settings.TaskbarAlignment
+import dev.win11we.shell.ui.theme.Fluent
 import dev.win11we.shell.ui.theme.ShellSurfaces
 import dev.win11we.shell.window.AppSpec
 import dev.win11we.shell.window.ShellApps
@@ -52,7 +53,7 @@ fun Taskbar(
             .clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp))
             .background(ShellSurfaces.taskbar)
             .navigationBarsPadding()
-            .height(56.dp),
+            .height(Fluent.Size.taskbarHeight),
     ) {
         // Hairline separating the bar from the desktop.
         Box(Modifier.fillMaxWidth().height(1.dp).background(ShellSurfaces.stroke))

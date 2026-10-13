@@ -29,6 +29,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
@@ -41,16 +43,19 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.win11we.shell.R
+import dev.win11we.shell.ui.theme.Fluent
 import dev.win11we.shell.ui.theme.ShellSurfaces
+import dev.win11we.shell.ui.theme.fluentPalette
+import dev.win11we.shell.ui.theme.fluentShadow
+import dev.win11we.shell.ui.desktop.BackdropSample
+import dev.win11we.shell.ui.desktop.micaBackdrop
 import dev.win11we.shell.window.SnapZone
 import dev.win11we.shell.window.WindowManager
 import dev.win11we.shell.window.WindowMode
 import dev.win11we.shell.window.WindowState
 
-private val FrameShape = RoundedCornerShape(10.dp)
+private val FrameShape = RoundedCornerShape(Fluent.Radius.window)
 private val TitleBarDark = Color(0xFF252B36)
-private val FocusedElevation = 26.dp
-private val RestElevation = 10.dp
 private val TitleHeight = 40.dp
 private val HandleEdge = 10.dp
 private val HandleCorner = 22.dp
@@ -67,7 +72,21 @@ fun WindowFrame(
 ) {
     val lightContent = window.app.id == "notepad"
     val consoleContent = window.app.id == "terminal"
-    val elevation = if (focused) FocusedElevation else RestElevation
+    val palette = fluentPalette()
+    // Where this window sits on the desktop, read in the draw phase: mica stays
+    // put while the window drags over it, exactly like the real material.
+    val micaSample = remember(window) {
+        BackdropSample(
+            position = {
+                val o = window.bounds(desktopSize).offset
+                Offset(o.x.value, o.y.value)
+            },
+            size = {
+                val b = window.bounds(desktopSize).size
+                Size(b.width.value, b.height.value)
+            },
+        )
+    }
 
     BoxWithConstraints(
         modifier = Modifier
@@ -87,21 +106,16 @@ fun WindowFrame(
                 IntOffset(bounds.offset.x.roundToPx(), bounds.offset.y.roundToPx())
             }
             .size(window.sizeFor(desktopSize))
-            .shadow(
-                elevation = elevation,
-                shape = FrameShape,
-                spotColor = Color.Black,
-                ambientColor = Color.Black,
+            // The spec's two-layer window shadow (focused) or single soft one.
+            .fluentShadow(
+                if (focused) Fluent.Elevation.window else Fluent.Elevation.windowUnfocused,
+                Fluent.Radius.window,
             )
             .clip(FrameShape)
-            .background(
-                when {
-                    lightContent -> Color(0xFFF7F9FC)
-                    consoleContent -> Color(0xFF0B0F16)
-                    else -> ShellSurfaces.window
-                },
-            )
-            .border(1.dp, if (focused) Color(0x594CC2FF) else ShellSurfaces.stroke, FrameShape)
+            // Mica: blurred, saturated desktop sampled at this window's position,
+            // under the translucent mica tint and the standard Fluent edge.
+            .micaBackdrop(micaSample, Fluent.Radius.window)
+            .border(1.dp, if (focused) palette.accent.copy(alpha = 0.35f) else Color.Transparent, FrameShape)
             .pointerInput(window.id) { detectTapGestures(onTap = { manager.focus(window) }) },
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -109,7 +123,8 @@ fun WindowFrame(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(TitleHeight)
-                    .background(if (lightContent) Color(0xFFEFF4FA) else ShellSurfaces.window),
+                    // Transparent over mica, except apps that own a light chrome.
+                    .background(if (lightContent) Color(0xFFEFF4FA) else Color.Transparent),
             ) {
                 TitleBar(
                     window = window,
@@ -125,7 +140,7 @@ fun WindowFrame(
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
                         .height(1.dp)
-                        .background(if (lightContent) Color(0x14000000) else ShellSurfaces.stroke),
+                        .background(if (lightContent) Color(0x14000000) else palette.stroke),
                 )
             }
             Box(

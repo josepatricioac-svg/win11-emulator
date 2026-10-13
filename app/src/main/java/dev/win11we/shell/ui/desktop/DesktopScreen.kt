@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,7 +24,11 @@ import dev.win11we.shell.settings.SettingsStore
 import dev.win11we.shell.ui.start.StartMenuPanel
 import dev.win11we.shell.settings.ThemeMode
 import dev.win11we.shell.ui.taskbar.Taskbar
+import dev.win11we.shell.ui.theme.Fluent
 import dev.win11we.shell.ui.theme.FluentTheme
+import dev.win11we.shell.ui.theme.fluentPalette
+import dev.win11we.shell.ui.desktop.FluentBackdrop
+import dev.win11we.shell.ui.desktop.LocalFluentBackdrop
 import dev.win11we.shell.ui.window.WindowLayer
 import dev.win11we.shell.window.rememberWindowManager
 
@@ -66,9 +71,17 @@ fun DesktopScreen(store: SettingsStore) {
     }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
-        val taskbarHeight = 56.dp
+        val taskbarHeight = Fluent.Size.taskbarHeight
         val desktopSize = DpSize(maxWidth, maxHeight - taskbarHeight)
+        val palette = fluentPalette()
+        // Mica/acrylic source: the bloom wallpaper pre-rendered tiny, blurred by
+        // its own downscale and saturated. Once per desktop size and theme, in a
+        // remember - never per frame, never from disk.
+        val backdrop = remember(desktopSize, palette) {
+            FluentBackdrop.create(desktopSize.width.value, desktopSize.height.value, palette.isDark)
+        }
 
+        CompositionLocalProvider(LocalFluentBackdrop provides backdrop) {
         BloomWallpaper(
             modifier = Modifier
                 .fillMaxSize()
@@ -102,6 +115,7 @@ fun DesktopScreen(store: SettingsStore) {
             onStartClick = { startOpen = !startOpen },
             modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
         )
+        }
     }
     }
 }

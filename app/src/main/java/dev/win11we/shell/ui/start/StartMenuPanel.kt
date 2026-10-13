@@ -6,6 +6,12 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.toSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -58,6 +64,11 @@ import androidx.compose.ui.unit.sp
 import dev.win11we.shell.R
 import dev.win11we.shell.ui.theme.AccentBlue
 import dev.win11we.shell.ui.theme.CardSurface
+import dev.win11we.shell.ui.theme.Fluent
+import dev.win11we.shell.ui.theme.FluentMotion
+import dev.win11we.shell.ui.theme.fluentShadow
+import dev.win11we.shell.ui.desktop.BackdropSample
+import dev.win11we.shell.ui.desktop.acrylicBackdrop
 import dev.win11we.shell.ui.theme.HoverLight
 import dev.win11we.shell.ui.theme.PressedLight
 import dev.win11we.shell.ui.theme.ShellSurfaces
@@ -68,8 +79,8 @@ import dev.win11we.shell.ui.theme.TextTertiary
 import dev.win11we.shell.window.AppSpec
 import dev.win11we.shell.window.ShellApps
 
-private val PanelShape = RoundedCornerShape(14.dp)
-private val TileShape = RoundedCornerShape(8.dp)
+private val PanelShape = RoundedCornerShape(Fluent.Radius.flyout)
+private val TileShape = RoundedCornerShape(Fluent.Radius.control)
 
 /** Scrim + animated Start panel anchored above the taskbar. */
 @Composable
@@ -81,8 +92,10 @@ fun StartMenuPanel(
 ) {
     AnimatedVisibility(
         visible = open,
-        enter = fadeIn(tween(140)) + slideInVertically(tween(200)) { it / 8 },
-        exit = fadeOut(tween(120)) + slideOutVertically(tween(160)) { it / 8 },
+        enter = fadeIn(tween(FluentMotion.FAST_MILLIS.toInt(), easing = Fluent.decelerateEasing)) +
+            slideInVertically(tween(FluentMotion.MEDIUM_MILLIS.toInt(), easing = Fluent.decelerateEasing)) { it / 8 },
+        exit = fadeOut(tween(FluentMotion.FAST_MILLIS.toInt(), easing = Fluent.standardEasing)) +
+            slideOutVertically(tween(FluentMotion.FAST_MILLIS.toInt(), easing = Fluent.standardEasing)) { it / 8 },
         modifier = modifier.fillMaxSize(),
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
@@ -112,13 +125,28 @@ fun StartMenuPanel(
 private fun StartMenu(onLaunch: (AppSpec) -> Unit, modifier: Modifier = Modifier) {
     var query by rememberSaveable { mutableStateOf("") }
     var showAllApps by rememberSaveable { mutableStateOf(false) }
+    val density = LocalDensity.current
+    // Where the panel lands on the desktop, captured at layout and read in the
+    // draw phase, so acrylic samples the blurred desktop at the right spot.
+    var rootPos by remember { mutableStateOf(Offset.Zero) }
+    var rootSize by remember { mutableStateOf(Size.Zero) }
+    val acrylicSample = remember(density) {
+        BackdropSample(
+            position = { Offset(rootPos.x / density.density, rootPos.y / density.density) },
+            size = { Size(rootSize.width / density.density, rootSize.height / density.density) },
+        )
+    }
 
     Column(
         modifier = modifier
+            .onGloballyPositioned { coords ->
+                rootPos = coords.positionInRoot()
+                rootSize = coords.size.toSize()
+            }
             .fillMaxWidth()
+            .fluentShadow(Fluent.Elevation.flyout, Fluent.Radius.flyout)
             .clip(PanelShape)
-            .background(ShellSurfaces.start)
-            .border(1.dp, ShellSurfaces.stroke, PanelShape)
+            .acrylicBackdrop(acrylicSample, Fluent.Radius.flyout)
             .padding(horizontal = 22.dp, vertical = 20.dp),
     ) {
         StartSearchBar(query = query, onQueryChange = { query = it })

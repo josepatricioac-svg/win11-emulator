@@ -9,58 +9,63 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import dev.win11we.shell.ui.theme.DesktopDeep
+import dev.win11we.shell.ui.theme.fluentPalette
 import kotlin.math.cos
 import kotlin.math.sin
 
-private data class Petal(val tint: Color, val degrees: Float, val spread: Float)
-
 /**
- * Original procedurally drawn "bloom" wallpaper: deep blue field with soft
- * petals around the lower-right third. No bitmap, no Microsoft artwork.
+ * Original procedurally drawn "bloom" wallpaper: a deep field with soft petals
+ * around the lower-right third. No bitmap, no Microsoft artwork.
+ *
+ * The geometry and colours live in [BloomSpec] so the mica/acrylic backdrops
+ * (which pre-render this same artwork, blurred and saturated) can never drift
+ * from what the desktop shows.
  */
 @Composable
 fun BloomWallpaper(modifier: Modifier = Modifier) {
+    val spec = BloomSpec.forDark(fluentPalette().isDark)
     // Brushes and petal geometry are rebuilt only when the surface size changes, not
     // on every frame: the wallpaper is redrawn whenever a window above it animates.
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(DesktopDeep)
+            .background(Color(spec.background.last()))
             .drawWithCache {
                 val w = size.width
                 val h = size.height
-                val cx = w * 0.62f
-                val cy = h * 0.46f
-                val r = minOf(w, h) * 0.62f
+                val cx = w * BloomSpec.CENTER_X
+                val cy = h * BloomSpec.CENTER_Y
+                val r = minOf(w, h) * BloomSpec.RADIUS
                 val center = Offset(cx, cy)
 
-                val background = Brush.verticalGradient(
-                    colors = listOf(Color(0xFF0A1630), Color(0xFF050B1C), Color(0xFF02040C)),
-                )
+                val background = Brush.verticalGradient(spec.background.map { Color(it) })
                 val glowRadius = r * 1.25f
                 val glow = Brush.radialGradient(
-                    colors = listOf(Color(0x551E4C8A), Color.Transparent),
+                    colors = spec.glow.map { Color(it) },
                     center = center,
                     radius = glowRadius,
                 )
-                val coreRadius = r * 0.16f
+                val coreRadius = r * BloomSpec.CORE_FRACTION
                 val core = Brush.radialGradient(
-                    colors = listOf(Color(0xB3CFEBFF), Color.Transparent),
+                    colors = spec.core.map { Color(it) },
                     center = center,
                     radius = coreRadius,
                 )
-                val petals = PETALS.map { petal ->
+                val petals = spec.petals.map { petal ->
                     val rad = Math.toRadians(petal.degrees.toDouble())
                     val petalCenter = center + Offset(
                         x = (r * petal.spread * cos(rad)).toFloat(),
                         y = (r * petal.spread * sin(rad)).toFloat(),
                     )
-                    val petalRadius = r * 0.46f
+                    val petalRadius = r * BloomSpec.PETAL_RADIUS
                     Triple(
                         petalCenter,
                         petalRadius,
-                        Brush.radialGradient(listOf(petal.tint, Color.Transparent), petalCenter, petalRadius),
+                        Brush.radialGradient(
+                            listOf(Color(petal.tint), Color.Transparent),
+                            petalCenter,
+                            petalRadius,
+                        ),
                     )
                 }
                 onDrawBehind {
@@ -74,10 +79,3 @@ fun BloomWallpaper(modifier: Modifier = Modifier) {
             },
     )
 }
-
-private val PETALS = listOf(
-    Petal(Color(0x8C4CC2FF), -35f, 0.52f),
-    Petal(Color(0x737A5CFF), 55f, 0.58f),
-    Petal(Color(0x592ED0C8), 150f, 0.50f),
-    Petal(Color(0x594A78E8), 235f, 0.55f),
-)

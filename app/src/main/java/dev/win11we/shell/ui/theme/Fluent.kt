@@ -100,6 +100,7 @@ object Fluent {
  * see step 2), never baked onto an opaque panel.
  */
 data class FluentPalette(
+    val isDark: Boolean,
     val accent: Color,
     val accentSolid: Color,
     val mica: Color,
@@ -120,6 +121,7 @@ data class FluentPalette(
 ) {
     companion object {
         val Dark = FluentPalette(
+            isDark = true,
             accent = Color(0xFF4CC2FF),
             accentSolid = Color(0xFF0078D4),
             mica = Color(0xD1242426), // rgba(36,36,38,.82)
@@ -138,6 +140,7 @@ data class FluentPalette(
         )
 
         val Light = FluentPalette(
+            isDark = false,
             accent = Color(0xFF005FB8),
             accentSolid = Color(0xFF0067C0),
             mica = Color(0xD9F3F3F3), // rgba(243,243,243,.85)
