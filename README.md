@@ -22,13 +22,22 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a–D1e done: spec-accurate protocol core, socket, renderer, input, soft-keyboard text injection, focus/grabs/cursors/fonts/colours, XTest, SubstructureRedirect WM, and **RENDER 0.4** — pictures, Composite with the 14 Porter-Duff ops, FillRectangles, the full CompositeGlyphs pipeline, both rasterisers — plus the one-tap **X self-test** (xdpyinfo/xwininfo probes, a **GTK3 display-open probe**, xeyes/xclock survivors) in Diagnostics, and **D1e**: the BIG-REQUESTS + Generic-Event transport and **XInput2 2.2** — the device list, selections, grabs and the key/button/motion/crossing/focus events GTK3 runs on. 204 x11 wire tests green on a JVM; guest launch waits on the R1 binaries; see `docs/X_SERVER.md`) |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | **partial** (P1 clipboard: the X selections ↔ Android text bridge is done and wire-tested — guest copies push out, Android-side changes reclaim PRIMARY/CLIPBOARD; rich targets and the remaining P1/P2 items are not started) |
 
-## Animation
+## Visual language and animation
 
-Windows fade in and settle from 94% scale anchored at the caption (220 ms), closing
-plays the reverse and only then leaves the window list, minimizing/restoring shrinks
-and grows in place (140 ms), and the snap preview cross-fades. One frame loop in
-`WindowLayer` drives every window - no per-window coroutines. Settings ▸
-Personalisation ▸ *Window animations* turns all of it off.
+The shell speaks one token set: `ui/theme/Fluent.kt` (palettes dark + light, radii,
+heights, text sizes, the three shadow specs, the 1dp stroke + inset top highlight
+every surface carries) and `ui/theme/FluentMotion.kt` (the two curves - decelerate
+`cubic-bezier(.16,1,.3,1)` and standard `cubic-bezier(.33,0,.67,1)` - and the two
+durations, fast 160 ms and medium 280 ms). The face is **Inter** (SIL OFL 1.1), an
+open stand-in for Segoe UI Variable; no Microsoft asset is shipped.
+
+Windows fade in and settle from 94% scale anchored at the caption over the medium
+280 ms on the decelerate curve, closing plays the reverse and only then leaves the
+window list, minimizing/restoring shrinks and grows in place over the fast 160 ms,
+and the snap preview cross-fades on the same fast curve. One frame loop in
+`WindowLayer` drives every window - no per-window coroutines - and geometry is still
+read only inside `graphicsLayer`/`offset` lambdas. Settings ▸ Personalisation ▸
+*Window animations* turns all of it off.
 
 ## Crash-safety rules
 

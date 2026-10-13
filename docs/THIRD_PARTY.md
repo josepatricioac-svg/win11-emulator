@@ -56,6 +56,20 @@ Chromium, Tor Browser, Firefox Focus/Fennec) are used only for detection - no
 affiliation or endorsement. Search fallback URL: DuckDuckGo (`https://duckduckgo.com/?q=`),
 a plain HTTPS GET, no integration or API key.
 
+### Restyle additions (Fluent tokens)
+
+| Component | Version | Licence | Used for |
+| --- | --- | --- | --- |
+| Inter (Regular, SemiBold, Bold) | 4.1 (rsms/inter release `v4.1`, zip sha256 `9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e`) | **SIL OFL 1.1** | The shell's UI face: an open stand-in for Segoe UI Variable (metrically similar humanist sans), bundled as `app/src/main/res/font/inter_{regular,semibold,bold}.ttf`. No Microsoft font files are shipped. |
+
+Per-file SHA-256 (as bundled):
+
+| File | SHA-256 |
+| --- | --- |
+| `inter_regular.ttf` | `40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82` |
+| `inter_semibold.ttf` | `78a843fade9d4612a5567302fb595b56976eb5fcebf4fea5a5912d638bafcde3` |
+| `inter_bold.ttf` | `288316099b1e0a47a4716d159098005eef7c0066921f34e3200393dbdb01947f` |
+
 ### UI-test additions (opt-in, `-PuiTests=true`)
 
 | Component | Version | Licence | Used for |

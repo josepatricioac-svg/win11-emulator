@@ -23,7 +23,7 @@ import dev.win11we.shell.settings.SettingsStore
 import dev.win11we.shell.ui.start.StartMenuPanel
 import dev.win11we.shell.settings.ThemeMode
 import dev.win11we.shell.ui.taskbar.Taskbar
-import dev.win11we.shell.ui.theme.Win11Theme
+import dev.win11we.shell.ui.theme.FluentTheme
 import dev.win11we.shell.ui.window.WindowLayer
 import dev.win11we.shell.window.rememberWindowManager
 
@@ -37,7 +37,7 @@ fun DesktopScreen(store: SettingsStore) {
     val manager = rememberWindowManager(context, store)
     var startOpen by remember { mutableStateOf(false) }
 
-    Win11Theme(darkTheme = store.themeMode == ThemeMode.DARK) {
+    FluentTheme(dark = store.themeMode == ThemeMode.DARK) {
     // P1: bridge X selections <-> the Android clipboard while the desktop lives
     // (guest copies push out; Android-side changes reclaim selection ownership).
     dev.win11we.shell.ui.xdesktop.ClipboardBridgeEffect()

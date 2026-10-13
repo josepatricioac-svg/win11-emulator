@@ -25,11 +25,12 @@ import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import dev.win11we.shell.settings.ShellSettings
+import dev.win11we.shell.ui.theme.Fluent
+import dev.win11we.shell.ui.theme.FluentMotion
 import dev.win11we.shell.window.SnapZone
 import dev.win11we.shell.window.WindowManager
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.pow
 
 /**
  * How far along the open/close transition a window is, and what to draw.
@@ -72,11 +73,16 @@ private enum class Phase { ENTERING, STEADY, LEAVING }
 /** Where a window is in its enter/leave transition, and when it started. */
 private class Lifecycle(val phase: Phase, val sinceNanos: Long)
 
-private const val OPEN_CLOSE_MILLIS = 220L
-private const val MINIMIZE_MILLIS = 140L
+/** Open/close is the medium Fluent duration; minimize/restore the fast one. */
+private const val OPEN_CLOSE_MILLIS = FluentMotion.MEDIUM_MILLIS
+private const val MINIMIZE_MILLIS = FluentMotion.FAST_MILLIS
 
-/** Decelerating ramp, close to Windows' own window animation feel. */
-internal fun easeOut(t: Float): Float = 1f - (1f - t.coerceIn(0f, 1f)).pow(3f)
+/**
+ * The enter/leave ramp: Fluent's decelerate curve cubic-bezier(.16, 1, .3, 1),
+ * evaluated by [FluentMotion] (pure Kotlin, unit-tested). It replaces the old
+ * cubic ease-out; the 94%-scale settle and the single frame loop are unchanged.
+ */
+internal fun easeOut(t: Float): Float = FluentMotion.DECELERATE(t)
 
 /**
  * Maps the dragged pointer position (fractions of the desktop) to a snap target.
@@ -195,7 +201,7 @@ private fun SnapOverlay(zone: SnapZone, desktopSize: DpSize) {
     val visible = zone != SnapZone.NONE
     val alpha by animateFloatAsState(
         targetValue = if (visible) 1f else 0f,
-        animationSpec = tween(140),
+        animationSpec = tween(FluentMotion.FAST_MILLIS.toInt(), easing = Fluent.decelerateEasing),
         label = "snapAlpha",
     )
     val inset = 6.dp
