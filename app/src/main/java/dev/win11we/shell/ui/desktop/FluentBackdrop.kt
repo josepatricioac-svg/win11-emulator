@@ -20,14 +20,11 @@ import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import dev.win11we.shell.ui.theme.Fluent
 import dev.win11we.shell.ui.theme.fluentStroke
-import dev.win11we.shell.ui.theme.FluentPalette
 import dev.win11we.shell.ui.theme.fluentStroke
 import kotlin.math.max
 import kotlin.math.min
@@ -200,11 +197,13 @@ private fun DrawScope.drawBackdrop(backdrop: BackdropSet, sample: BackdropSample
     val srcTop = (pos.y * scaleY).toInt().coerceIn(0, image.height - 1)
     val srcRight = ((pos.x + area.width) * scaleX).toInt().coerceIn(srcLeft + 1, image.width)
     val srcBottom = ((pos.y + area.height) * scaleY).toInt().coerceIn(srcTop + 1, image.height)
-    // Positional: the IntRect overload's parameter names differ across Compose
-    // versions, positions never do.
+    // The IntRect drawImage overload is gone in current Compose; the offset/size
+    // one is what remains (names taken from this Compose version's own signature).
     drawImage(
-        image,
-        IntRect(srcLeft, srcTop, srcRight, srcBottom),
-        IntRect(0, 0, size.width.toInt(), size.height.toInt()),
+        image = image,
+        srcOffset = IntOffset(srcLeft, srcTop),
+        srcSize = IntSize(srcRight - srcLeft, srcBottom - srcTop),
+        dstOffset = IntOffset.Zero,
+        dstSize = IntSize(size.width.toInt(), size.height.toInt()),
     )
 }
