@@ -5,9 +5,10 @@ surface runs `explorer.exe /desktop`, and touch/mouse/keyboard become X input.
 No Termux, no XSDL, no adb.
 
 **Milestone status:** D1a (protocol core + socket) done, D1b (renderer + input + WM)
-done, D1c (real-client compatibility) done, D1d (RENDER 0.4) done, **D1e (the
-transport + XInput2 GTK3 needs) done**. What remains for D1 is the guest launch
-itself, which is blocked on vendoring the R1 native binaries - not on server code.
+done, D1c (real-client compatibility) done, D1d (RENDER 0.4) done, D1e (the
+transport + XInput2 GTK3 needs) done, **D1f (XFIXES 5.0 + SYNC 3.1) done**. What
+remains for D1 is the guest launch itself: the R1 binaries are vendored, so that
+is now a device-provisioning step (Goal 2 step 2), not server code.
 
 ## D1c: what changed and why it was blocking real clients
 
@@ -242,8 +243,9 @@ connection that selected them:
    all covered by wire tests.
 
 Still absent (honestly reported by `QueryExtension`): XKB, RANDR, MIT-SHM,
-XFIXES, COMPOSITE, DAMAGE, SHAPE, SYNC. Device traces from real Firefox/GTK3
-handshakes decide which one matters next.
+COMPOSITE, DAMAGE, SHAPE. **XFIXES and SYNC are served (D1f, next section).**
+Device traces from real Firefox/GTK3 handshakes decide which of the remaining
+ones matters next.
 
 ### The transport every other extension rides on: BIG-REQUESTS + Generic Events
 
@@ -281,6 +283,81 @@ bigger than a toy client works without them, so they are implemented first:
 The extension registry (`XConnection.EXTENSIONS`) keeps each name's canonical
 spelling - `xdpyinfo` prints those - and lookups are case-insensitive, because
 clients are not consistent about it.
+
+### XFIXES 5.0 + SYNC 3.1 (D1f) - what GTK3 watches, what resizes sync with
+
+**XFIXES** (major opcode 133, event base 66, error base 170: BadRegion,
+BadBarrier) is the extension GDK3's clipboard machinery switches to when it is
+there: `XFixesSelectSelectionInput` on PRIMARY/CLIPBOARD turns paste-side
+refreshes into events (`owner-change`), which is how Firefox notices the shell's
+Android-clipboard reclaims instead of holding stale ownership. Implemented:
+
+- **QueryVersion answers 5.0, deliberately not 6.0** - the same rule as RENDER's
+  0.4: v6 adds pointer barriers and the client-disconnect mode we refuse, and a
+  BadRequest on something a client believed available is how GTK dies. The v6
+  tail is still refused *and named* in the trace if something sends it anyway.
+- **Selection watches with real event delivery**: SelectionNotify (event 66)
+  with the SetSelectionOwner / SelectionWindowDestroy / SelectionClientClose
+  subtypes fires from *every* ownership path - client claims, window destroys,
+  connection closes, and the shell's own reclaims (which, in real X, are
+  ordinary SetSelectionOwner round trips and must be visible). Watches remember
+  the *selecting connection*, so GTK's root-window watch works even though the
+  root has no owner; masks filter subtypes and mask 0 unregisters.
+- **Cursor watches + names + images**: SelectCursorInput delivers CursorNotify
+  (event 67) when a watched window's CWCursor changes (serial bumps);
+  SetCursorName/GetCursorName/ChangeCursor(ByName) manage real named cursor
+  resources; GetCursorImage(AndName) rasterises the built-in 16x16 glyph art
+  (the same shapes the software cursor draws - honest approximation, documented
+  in `XFixesCursorArt`); HideCursor/ShowCursor is honoured by the X Desktop
+  surface (`effectiveCursorGlyph` answers `CURSOR_HIDDEN`, the renderer skips).
+- **Real region algebra** (`XRegionOps`, pure + unit-tested): union, intersect,
+  subtract (slab splitting), invert against bounds, translate, expand, extents,
+  normalised (dedupe + vertical merge) so FetchRegion answers are stable.
+  CreateRegionFromBitmap scans the *recorded ops* - not a snapshot, because the
+  display list decodes a set depth-1 bit to opaque black, indistinguishable
+  from its background - and enforces the spec's depth-1 rule (BadMatch
+  otherwise); FromWindow answers bounding and clip (siblings above subtracted);
+  FromGC returns the stored clip or the screen extent; FromPicture the picture
+  clip or its drawable extent.
+- **The two wirings that have visible effects**: SetPictureClipRegion feeds the
+  *enforced* RENDER picture clip (absolute dst-space rects, the storage
+  SetPictureClipRectangles uses), and SetWindowShapeRegion's **Input** kind
+  feeds hit-testing (`XWindow.inputShapeAllows` inside `windowAt`).
+
+Honest limits (all named here rather than discovered on a device): bounding/clip
+window shapes are stored and round-trip but the renderer does not clip visually
+(the same documented class as backing-store/save-under); SetGCClipRegion stores
+the clip for CreateRegionFromGC round-trips but core drawing does not apply GC
+clips - exactly the pre-existing core `SetClipRectangles` limit ("accepted, not
+rendered"); timestamps are truncated epoch millis (no server-start epoch is
+tracked); Copy/CursorNotify fire on attribute changes, not on pointer motion
+into a differently-cursored window (Xorg fires there too - a refinement for a
+device trace to demand, not a guess).
+
+**SYNC** (major opcode 134, event base 68: AlarmNotify/CounterNotify, error
+base 171: BadCounter, BadAlarm, BadIdle) is the frame-synchronisation half GDK3
+and Wine's X11 driver ask for. Implemented: **Initialize negotiates 3.1**;
+ListSystemCounters honestly reports none (clients create their own); INT64
+counters (Create/Set/Change/Query/Destroy) with full 64-bit range; **held
+Await** - satisfied-now conditions reply immediately, unsatisfied ones are
+queued and answered the moment a counter change satisfies *every* condition,
+with the reply stamped with the AWAIT request's own sequence number (the
+observable behaviour of a blocking Await for a pipelining client); the spec's
+transition (edge, evaluated against the old->new pair) versus comparison
+(level) semantics, and relative test-types resolved at Await time; alarms
+(Create/Change/Query/Destroy, value lists in mask bit order) fire AlarmNotify
+(32 bytes: counter_value and alarm_value as INT64 hi/lo pairs, state at
+trigger) when events are requested, and their deltas re-adjust the counter
+after firing; priorities are accepted and honestly zero.
+
+Refused and named rather than faked: **fences** (SYNC 3.0 GPU sync objects -
+there is no GL/DRI path they could mean anything on) answer BadRequest with a
+`SYNC.CreateFence`-style trace entry. CounterNotify streaming (Await's
+event_threshold) is not delivered - Await's reply is the contract clients use.
+Alarm deltas apply after evaluation without re-entry, so a notify carries the
+pre-delta counter value (a documented simplification of the spec's ordering;
+the delta itself is part of the alarm the client holds). Counters, alarms and
+held awaits die with their connection (`dropSyncOf`), per X's resource rules.
 
 ### Soft keyboard (the D1b open item)
 
@@ -329,9 +406,10 @@ does not re-push (X clients re-claim on every copy).
 
 ### Verification
 
-The x11 suites (204 tests: `XProtocolTest`, `XCompatTest`, `XRenderTest`,
+The x11 suites (256 tests: `XProtocolTest`, `XCompatTest`, `XRenderTest`,
 `XBigRequestsTest`, `XInput2Test`, `XProtocolTraceTest`, `XRedirectTest`,
-`XTextInjectionTest`, `XSnapshotTest`, `XSelectionsTest`) are
+`XTextInjectionTest`, `XSnapshotTest`, `XSelectionsTest`, `XFixesTest`,
+`XSyncTest`) are
 **compiled and executed** with Kotlin 2.1.10/JDK 17 against minimal Android stubs
 (only `LocalServerSocket`/`LocalSocket`/`Log`, which the wire tests never touch) -
 the first time this project's protocol code was actually run rather than written
@@ -362,9 +440,14 @@ CI `assembleDebug` + device check.
 
 - RENDER is served at version 0.4 (see above); traps/solid-fills/gradients/
   ARGB cursors/transforms are not - the claim stays at 0.4 until they are.
-- No Composite/XRandr/XShm/XKB/XFIXES (`QueryExtension` answers "not present",
-  so clients fall back to core protocol). BIG-REQUESTS, the Generic Event
-  Extension and **XInput2** *are* served.
+- No Composite/XRandr/XShm/XKB (`QueryExtension` answers "not present", so
+  clients fall back to core protocol). BIG-REQUESTS, the Generic Event
+  Extension, **XInput2**, **XFIXES** (5.0) and **SYNC** (3.1) *are* served.
+- XFIXES: window bounding/clip shapes store but do not clip the renderer; GC
+  clips store but are not applied to core drawing (the pre-existing core
+  SetClipRectangles limit); timestamps are truncated epoch millis.
+- SYNC: no CounterNotify streaming, no fences (refused + named), alarm deltas
+  apply after the notify without re-entry.
 - XI2 reports no touch and no gesture devices (version claim 2.2, not 2.4): one
   pointer, no pinch-zoom. Touch arrives as emulated single-pointer events.
 - XI2 device properties are per-connection storage, not shared server state, and

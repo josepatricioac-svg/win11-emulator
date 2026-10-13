@@ -157,6 +157,15 @@ data class XWindow(
     var doNotPropagateMask: Int = 0,
     /** CWCursor: cursor resource id, 0 = inherit from the parent (X semantics). */
     var cursor: Int = 0,
+    /**
+     * XFIXES SetWindowShapeRegion rectangles (D1f), root coordinates; null = unshaped.
+     * Only the INPUT shape has an effect (hit-testing); bounding/clip shapes are stored
+     * and round-trip through CreateRegionFromWindow, but the renderer does not clip
+     * visually - the documented limit shared with backing-store/save-under.
+     */
+    var boundingShape: List<IntArray>? = null,
+    var clipShape: List<IntArray>? = null,
+    var inputShape: List<IntArray>? = null,
     val children: MutableList<Int> = mutableListOf(),
     val properties: MutableMap<Int, WindowProperty> = mutableMapOf(),
 ) {
@@ -164,6 +173,10 @@ data class XWindow(
     val bottom: Int get() = y + height
 
     fun contains(px: Int, py: Int): Boolean = px in x until right && py in y until bottom
+
+    /** XFIXES input-shape-aware hit test: a shaped window only owns points inside its region. */
+    fun inputShapeAllows(px: Int, py: Int): Boolean =
+        inputShape?.let { XRegionOps.contains(it, px, py) } ?: true
 }
 
 data class WindowProperty(val atom: Int, val type: Int, val format: Int, val data: ByteArray) {
@@ -250,6 +263,9 @@ class XDocument(
         /** SetInputFocus revert/focus values: None = no events, PointerRoot = follow the pointer. */
         const val FOCUS_NONE = 0
         const val FOCUS_POINTER_ROOT = 1
+
+        /** [effectiveCursorGlyph] answer when XFIXES HideCursor covers the point. */
+        const val CURSOR_HIDDEN = -1
 
         /**
          * The shell's internal window: never mapped, never parented to the root
@@ -394,10 +410,21 @@ class XDocument(
     fun effectiveCursorGlyph(px: Int, py: Int): Int {
         var window = windowAt(px, py)
         while (window != null) {
+            if (cursorHiddenAt(window.id)) return CURSOR_HIDDEN
             if (window.cursor != 0) return cursor(window.cursor)?.glyph ?: CursorGlyph.LEFT_PTR
             window = window.parent?.let { windows[it] }
         }
         return CursorGlyph.LEFT_PTR
+    }
+
+    /** The cursor resource id in effect at the point (0 = the default arrow). */
+    fun effectiveCursorId(px: Int, py: Int): Int {
+        var window = windowAt(px, py)
+        while (window != null) {
+            if (window.cursor != 0) return window.cursor
+            window = window.parent?.let { windows[it] }
+        }
+        return 0
     }
 
     // --- selections (server-wide ownership, P1 clipboard bridge) ------------
@@ -426,6 +453,9 @@ class XDocument(
         synchronized(selectionOwners) {
             if (owner == null) selectionOwners.remove(atom) else selectionOwners[atom] = owner
         }
+        // XFIXES watchers see EVERY ownership change (including shell reclaims -
+        // in real X those are ordinary SetSelectionOwner round trips).
+        fireSelectionNotify(atom, XFixes.SUBTYPE_SELECTION_SET, window)
         return owner
     }
 
@@ -441,6 +471,8 @@ class XDocument(
             atomId("PRIMARY")?.let { selectionOwners[it] = shell }
             atomId("CLIPBOARD")?.let { selectionOwners[it] = shell }
         }
+        atomId("PRIMARY")?.let { fireSelectionNotify(it, XFixes.SUBTYPE_SELECTION_SET, SHELL_WINDOW_ID) }
+        atomId("CLIPBOARD")?.let { fireSelectionNotify(it, XFixes.SUBTYPE_SELECTION_SET, SHELL_WINDOW_ID) }
     }
 
     /** Ownership dies with its window (X semantics); the shell reclaims when bridged. */
@@ -453,12 +485,18 @@ class XDocument(
             synchronized(selectionOwners) {
                 if (shell == null) selectionOwners.remove(atom) else selectionOwners[atom] = shell
             }
+            fireSelectionNotify(atom, XFixes.SUBTYPE_SELECTION_DESTROY, shell?.window ?: 0)
         }
     }
 
     /** Detaching the bridge: shell-owned selections go back to "nobody". */
     fun dropShellSelections() {
-        synchronized(selectionOwners) { selectionOwners.entries.removeAll { it.value.isShell } }
+        val lost = synchronized(selectionOwners) {
+            val atoms = selectionOwners.entries.filter { it.value.isShell }.map { it.key }.toList()
+            selectionOwners.entries.removeAll { it.value.isShell }
+            atoms
+        }
+        lost.forEach { fireSelectionNotify(it, XFixes.SUBTYPE_SELECTION_DESTROY, 0) }
     }
 
     /** A disconnected client's ownerships fall back the same way. */
@@ -471,6 +509,7 @@ class XDocument(
             synchronized(selectionOwners) {
                 if (shell == null) selectionOwners.remove(atom) else selectionOwners[atom] = shell
             }
+            fireSelectionNotify(atom, XFixes.SUBTYPE_CLIENT_CLOSE, shell?.window ?: 0)
         }
     }
 
@@ -603,6 +642,7 @@ class XDocument(
         windows.remove(id)
         revertFocusIf(id)
         dropSelectionsOfWindow(id)
+        dropWatchesOfWindow(id)
         synchronized(redirectOwners) { redirectOwners.remove(id) }
         synchronized(windowOwners) { windowOwners.remove(id) }
         synchronized(passiveGrabs) { passiveGrabs.removeAll { it.window == id } }
@@ -663,7 +703,8 @@ class XDocument(
     }
 
     /** Top-most mapped window under a point, for pointer events. */
-    fun windowAt(px: Int, py: Int): XWindow? = paintOrder().lastOrNull { it.contains(px, py) }
+    fun windowAt(px: Int, py: Int): XWindow? =
+        paintOrder().lastOrNull { it.contains(px, py) && it.inputShapeAllows(px, py) }
 
     // --- atoms -------------------------------------------------------------
 
@@ -694,4 +735,220 @@ class XDocument(
     /** Every mapped top-level window, i.e. what the shell shows as a taskbar entry. */
     fun topLevelWindows(): List<XWindow> =
         windows[rootId]?.children?.mapNotNull { windows[it] }?.filter { it.mapped } ?: emptyList()
+
+    /** Mapped windows painted above [id] (CreateRegionFromWindow's Clip kind). */
+    fun windowsAbove(id: Int): List<XWindow> =
+        paintOrder().dropWhile { it.id != id }.drop(1).filter { it.mapped }
+
+    // --- XFIXES (D1f): watches, cursor names/hiding, the server clock ----------
+
+    /** One SelectSelectionInput registration; events go to the selecting client. */
+    class SelectionWatch(val window: Int, var mask: Int, val connection: XConnection)
+
+    /** One SelectCursorInput registration. */
+    class CursorWatch(val window: Int, var mask: Int, val connection: XConnection)
+
+    private val selectionWatchers = HashMap<Int, MutableList<SelectionWatch>>() // atom -> watches
+    private val cursorWatchers = mutableListOf<CursorWatch>()
+    private val cursorNames = HashMap<Int, String>() // cursor id -> name (SetCursorName)
+    private val cursorHiddenWindows = HashSet<Int>() // HideCursor'd windows
+    private var cursorSerial = 1L
+
+    /**
+     * The X timestamp (CARD32 milliseconds). We keep no server-start epoch;
+     * truncated epoch millis preserve order and uniqueness, which is all the
+     * consumers here (XFIXES events, SYNC alarms) need.
+     */
+    fun timestamp(): Int = (System.currentTimeMillis() and 0xFFFFFFFFL).toInt()
+
+    fun setSelectionWatch(atom: Int, window: Int, mask: Int, connection: XConnection) {
+        synchronized(selectionWatchers) {
+            val list = selectionWatchers.getOrPut(atom) { mutableListOf() }
+            list.removeAll { it.window == window && it.connection === connection }
+            if (mask != 0) list += SelectionWatch(window, mask, connection)
+        }
+    }
+
+    fun setCursorWatch(window: Int, mask: Int, connection: XConnection) {
+        synchronized(cursorWatchers) {
+            cursorWatchers.removeAll { it.window == window && it.connection === connection }
+            if (mask != 0) cursorWatchers += CursorWatch(window, mask, connection)
+        }
+    }
+
+    fun dropWatchesOfWindow(windowId: Int) {
+        synchronized(selectionWatchers) {
+            selectionWatchers.values.forEach { list -> list.removeAll { it.window == windowId } }
+        }
+        synchronized(cursorWatchers) { cursorWatchers.removeAll { it.window == windowId } }
+        synchronized(cursorHiddenWindows) { cursorHiddenWindows.remove(windowId) }
+    }
+
+    fun dropWatchesOf(connection: XConnection) {
+        synchronized(selectionWatchers) {
+            selectionWatchers.values.forEach { list -> list.removeAll { it.connection === connection } }
+        }
+        synchronized(cursorWatchers) { cursorWatchers.removeAll { it.connection === connection } }
+    }
+
+    fun cursorHiddenAt(windowId: Int): Boolean =
+        synchronized(cursorHiddenWindows) { cursorHiddenWindows.contains(windowId) }
+
+    fun setCursorHiddenForWindow(windowId: Int, hidden: Boolean) {
+        synchronized(cursorHiddenWindows) {
+            if (hidden) cursorHiddenWindows += windowId else cursorHiddenWindows -= windowId
+        }
+    }
+
+    fun setCursorName(cursorId: Int, name: String) {
+        synchronized(cursorNames) {
+            cursorNames[cursorId] = name
+            cursorSerial++
+        }
+    }
+
+    fun cursorName(cursorId: Int): String? = synchronized(cursorNames) { cursorNames[cursorId] }
+
+    fun cursorIdByName(name: String): Int? =
+        synchronized(cursorNames) { cursorNames.entries.firstOrNull { it.value == name }?.key }
+
+    fun currentCursorSerial(): Long = synchronized(cursorNames) { cursorSerial }
+
+    /**
+     * XFixesSelectionNotify to everyone watching [atom] with the subtype's mask
+     * bit. Each event is written by the *selecting* connection (byte order and
+     * sequence numbers are per-connection facts); watches on the root window -
+     * GTK's clipboard idiom - work because the watch remembers its client, not
+     * the window's owner.
+     */
+    fun fireSelectionNotify(atom: Int, subtype: Int, ownerWindow: Int) {
+        val maskBit = XFixes.maskForSubtype(subtype)
+        if (maskBit == 0) return
+        val watches = synchronized(selectionWatchers) {
+            selectionWatchers[atom]?.filter { it.mask and maskBit != 0 }?.toList() ?: emptyList()
+        }
+        if (watches.isEmpty()) return
+        val now = timestamp()
+        watches.forEach { watch ->
+            watch.connection.deliverSelectionNotify(
+                window = watch.window,
+                subtype = subtype,
+                owner = ownerWindow,
+                selection = atom,
+                timestamp = now,
+                selectionTimestamp = now,
+            )
+        }
+    }
+
+    /** XFixesCursorNotify to the window's watchers when its displayed cursor changed. */
+    fun fireCursorNotify(windowId: Int) {
+        val watches = synchronized(cursorWatchers) {
+            cursorWatchers.filter {
+                it.window == windowId && it.mask and XFixes.MASK_DISPLAY_CURSOR != 0
+            }.toList()
+        }
+        if (watches.isEmpty()) return
+        val serial = synchronized(cursorNames) { ++cursorSerial }
+        val cursorId = windows[windowId]?.cursor ?: 0
+        val nameAtom = cursorName(cursorId)?.let { internAtom(it) } ?: 0
+        val now = timestamp()
+        watches.forEach { watch ->
+            watch.connection.deliverCursorNotify(
+                windowId, XFixes.SUBTYPE_DISPLAY_CURSOR, serial, now, nameAtom,
+            )
+        }
+    }
+
+    // --- SYNC (D1f): counters and alarms are server-wide resources --------------
+
+    private val syncCounters = HashMap<Int, XSync.Counter>()
+    private val syncAlarms = HashMap<Int, XSync.Alarm>()
+    private val syncAwaits = mutableListOf<PendingAwait>()
+
+    /** A held Await; its reply is delivered when a counter change satisfies every condition. */
+    class PendingAwait(
+        val connection: XConnection,
+        val conditions: List<XSync.Condition>,
+        val opcode: Int,
+        val sequence: Int,
+    )
+
+    fun syncCounter(id: Int): XSync.Counter? = synchronized(syncCounters) { syncCounters[id] }
+
+    fun putSyncCounter(counter: XSync.Counter) {
+        synchronized(syncCounters) { syncCounters[counter.id] = counter }
+    }
+
+    fun removeSyncCounter(id: Int): XSync.Counter? = synchronized(syncCounters) { syncCounters.remove(id) }
+
+    fun syncAlarm(id: Int): XSync.Alarm? = synchronized(syncAlarms) { syncAlarms[id] }
+
+    fun putSyncAlarm(alarm: XSync.Alarm) {
+        synchronized(syncAlarms) { syncAlarms[alarm.id] = alarm }
+    }
+
+    fun removeSyncAlarm(id: Int): XSync.Alarm? = synchronized(syncAlarms) { syncAlarms.remove(id) }
+
+    fun addPendingAwait(await: PendingAwait) {
+        synchronized(syncAwaits) { syncAwaits += await }
+    }
+
+    fun dropSyncOf(connection: XConnection) {
+        synchronized(syncCounters) { syncCounters.entries.removeAll { it.value.owner === connection } }
+        synchronized(syncAlarms) { syncAlarms.entries.removeAll { it.value.owner === connection } }
+        synchronized(syncAwaits) { syncAwaits.removeAll { it.connection === connection } }
+    }
+
+    /**
+     * Evaluates held Awaits and alarms against the counter change [oldValue] ->
+     * [counter].value, applies fired alarms' deltas, and returns what the
+     * changing connection must deliver. Transition conditions are edge-tested
+     * against the changed counter (level-tested against every other one);
+     * comparison conditions are level-tested everywhere - the spec's distinction.
+     * Alarm deltas apply after evaluation without re-entry, so a notify carries
+     * the pre-delta counter value (documented simplification of the spec's
+     * ordering; the delta itself is part of the alarm the client holds).
+     */
+    fun onCounterChanged(
+        counter: XSync.Counter,
+        oldValue: Long,
+    ): Pair<List<PendingAwait>, List<XSync.Alarm>> {
+        val satisfied = synchronized(syncAwaits) {
+            val done = syncAwaits.filter { await -> awaitSatisfied(await, counter, oldValue) }
+            syncAwaits.removeAll(done.toSet())
+            done
+        }
+        val transition = XSync.VALUE_POSITIVE_TRANSITION
+        val negative = XSync.VALUE_NEGATIVE_TRANSITION
+        val fired = synchronized(syncAlarms) {
+            syncAlarms.values.filter { alarm ->
+                alarm.counterId == counter.id &&
+                    XSync.holds(
+                        XSync.Condition(counter.id, alarm.valueType, alarm.value),
+                        oldValue,
+                        counter.value,
+                        crossing = alarm.valueType == transition || alarm.valueType == negative,
+                    )
+            }.toList()
+        }
+        fired.forEach { alarm ->
+            if (alarm.delta != 0L) counter.value += alarm.delta
+            alarm.lastSeen = counter.value
+        }
+        return satisfied to fired
+    }
+
+    private fun awaitSatisfied(await: PendingAwait, changed: XSync.Counter, oldValue: Long): Boolean =
+        await.conditions.all { condition ->
+            val current = synchronized(syncCounters) { syncCounters[condition.counterId] }
+                ?: return@all false
+            val transition = condition.valueType == XSync.VALUE_POSITIVE_TRANSITION ||
+                condition.valueType == XSync.VALUE_NEGATIVE_TRANSITION
+            if (transition && condition.counterId == changed.id) {
+                XSync.holds(condition, oldValue, changed.value, crossing = true)
+            } else {
+                XSync.holds(condition, current.value, current.value, crossing = false)
+            }
+        }
 }

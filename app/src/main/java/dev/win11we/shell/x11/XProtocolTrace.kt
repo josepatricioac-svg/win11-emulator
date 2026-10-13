@@ -135,6 +135,8 @@ class XProtocolTrace(private val capacity: Int = 48) {
                 XGenericEvent.MINOR_QUERY_VERSION -> "QueryVersion"; else -> "minor$minor"
             }
             XInput2.MAJOR_OPCODE -> "XI2." + XInput2.minorName(minor ?: -1)
+            XFixes.MAJOR_OPCODE -> "XFIXES." + XFixes.minorName(minor ?: -1)
+            XSync.MAJOR_OPCODE -> "SYNC." + XSync.minorName(minor ?: -1)
             X11.EXT_XTEST_OPCODE -> "XTEST." + when (minor) {
                 0 -> "GetVersion"; 1 -> "CompareCursor"; 2 -> "FakeInput"; 3 -> "GrabControl"
                 else -> "minor$minor"

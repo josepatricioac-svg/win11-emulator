@@ -56,6 +56,9 @@ class XConnection(
 
     /** RENDER pictures and glyph sets are per-connection resources, like GCs. */
     private val pictures = HashMap<Int, PictureState>()
+
+    /** XFIXES regions are per-connection resources too (D1f). */
+    private val regions = HashMap<Int, XRegion>()
     private val glyphSets = HashMap<Int, XRender.GlyphStore>()
 
     private class PictureState(
@@ -79,7 +82,14 @@ class XConnection(
         var foreground: Int = 0xFF000000.toInt(),
         var background: Int? = null,
         var font: Int = 0,
-    )
+    ) {
+        /**
+         * XFIXES SetGCClipRegion (D1f): the translated region rects. Stored and
+         * round-tripped through CreateRegionFromGC; core drawing does not apply
+         * GC clips - the same documented limit the core SetClipRectangles has.
+         */
+        var clipRegionRects: List<IntArray>? = null
+    }
 
     /**
      * GC values arrive in bit order of the value mask, so they must be consumed
@@ -147,7 +157,12 @@ class XConnection(
         values.backgroundPixel?.let { window.backgroundPixel = it }
         values.overrideRedirect?.let { window.overrideRedirect = it }
         values.eventMask?.let { window.eventMask = it }
-        values.cursor?.let { window.cursor = it }
+        values.cursor?.let {
+            if (window.cursor != it) {
+                window.cursor = it
+                document.fireCursorNotify(window.id)
+            }
+        }
         values.doNotPropagate?.let { window.doNotPropagateMask = it }
     }
 
@@ -181,6 +196,9 @@ class XConnection(
         pixmaps.clear()
         fonts.clear()
         colormaps.clear()
+        regions.clear()
+        document.dropWatchesOf(this)
+        document.dropSyncOf(this)
         return purged + document.destroyWindowsOwnedBy(this)
     }
 
@@ -1266,6 +1284,8 @@ class XConnection(
             X11.EXT_XTEST_OPCODE -> xtestRequest(opcode, data, reader, request)
             XRender.MAJOR_OPCODE -> renderRequest(opcode, data, reader, request)
             XInput2.MAJOR_OPCODE -> xi2Request(opcode, data, reader, request)
+            XFixes.MAJOR_OPCODE -> xfixesRequest(opcode, data, reader, request)
+            XSync.MAJOR_OPCODE -> xsyncRequest(opcode, data, reader, request)
             XBigRequests.MAJOR_OPCODE -> when (data) {
                 // The only request BIG-REQUESTS has: from here on this client may
                 // use the CARD32 length form (see onBytes).
@@ -1877,6 +1897,681 @@ class XConnection(
      * transforms) fall through to BadRequest WITH a trace entry, so the shared
      * log names exactly what a future client asked for that we lack.
      */
+
+    // --- XFIXES + SYNC (D1f) ---------------------------------------------------
+
+    /** INT64 wire pair (hi, lo) to Long. */
+    private fun combineInt64(hi: Int, lo: Int): Long =
+        (hi.toLong() shl 32) or (lo.toLong() and 0xFFFFFFFFL)
+
+    /** LISTofRECTANGLE trailing a request body (INT16 x, y; CARD16 width, height). */
+    private fun readRectangles(reader: XReader, request: ByteArray): List<IntArray> {
+        val from = reader.position
+        val count = (request.size - from) / 8
+        val r = XReader(request, littleEndian, from)
+        return List(count) {
+            intArrayOf(r.shortSigned(), r.shortSigned(), r.short(), r.short())
+        }
+    }
+
+    /** XFixesSelectionNotify (32 bytes): selection ownership changed. */
+    fun deliverSelectionNotify(
+        window: Int,
+        subtype: Int,
+        owner: Int,
+        selection: Int,
+        timestamp: Int,
+        selectionTimestamp: Int,
+    ) {
+        deliverEvent { writer ->
+            writer.byte(XFixes.EV_SELECTION_NOTIFY)
+            writer.byte(subtype)
+            writer.short(sequence)
+            writer.int(window)
+            writer.int(owner)
+            writer.int(selection)
+            writer.int(timestamp)
+            writer.int(selectionTimestamp)
+            writer.pad(8)
+        }
+    }
+
+    /** XFixesCursorNotify (32 bytes): the cursor displayed on [window] changed. */
+    fun deliverCursorNotify(window: Int, subtype: Int, serial: Long, timestamp: Int, nameAtom: Int) {
+        deliverEvent { writer ->
+            writer.byte(XFixes.EV_CURSOR_NOTIFY)
+            writer.byte(subtype)
+            writer.short(sequence)
+            writer.int(window)
+            writer.int((serial and 0xFFFFFFFFL).toInt())
+            writer.int(timestamp)
+            writer.int(nameAtom)
+            writer.pad(12)
+        }
+    }
+
+    /** SyncAlarmNotify (32 bytes, kind 0) - delivered to the alarm's own connection. */
+    fun deliverSyncAlarmNotify(alarmId: Int, counterValue: Long, alarmValue: Long, timestamp: Int) {
+        deliverEvent { writer ->
+            writer.byte(XSync.EV_ALARM_NOTIFY)
+            writer.byte(XSync.KIND_ALARM_NOTIFY)
+            writer.short(sequence)
+            writer.int(alarmId)
+            writer.int((counterValue shr 32).toInt())
+            writer.int((counterValue and 0xFFFFFFFFL).toInt())
+            writer.int((alarmValue shr 32).toInt())
+            writer.int((alarmValue and 0xFFFFFFFFL).toInt())
+            writer.int(timestamp)
+            writer.byte(XSync.ALARM_ACTIVE) // the state the alarm had when it triggered
+            writer.pad(3)
+        }
+    }
+
+    /**
+     * The reply of a HELD Await (XSync), stamped with the sequence number the
+     * request arrived with - the client matches replies by sequence, and the
+     * hold may have outlived thousands of later requests.
+     */
+    fun deliverAwaitReply(opcode: Int, awaitSequence: Int) {
+        val writer = XWriter(littleEndian)
+        writer.byte(1)
+        writer.byte(0)
+        writer.short(awaitSequence)
+        writer.int(0)
+        writer.pad(24)
+        deliver(writer.toByteArray().copyOf(32))
+    }
+
+    private fun xfixesRequest(major: Int, minor: Int, reader: XReader, request: ByteArray) {
+        when (minor) {
+            XFixes.MINOR_QUERY_VERSION -> {
+                val clientMajor = reader.int()
+                val clientMinor = reader.int()
+                val ansMajor = minOf(clientMajor, XFixes.VERSION_MAJOR)
+                val ansMinor = if (clientMajor > XFixes.VERSION_MAJOR) {
+                    XFixes.VERSION_MINOR
+                } else {
+                    minOf(clientMinor, XFixes.VERSION_MINOR)
+                }
+                reply(major) { writer ->
+                    writer.int(ansMajor)
+                    writer.int(ansMinor)
+                    writer.pad(16)
+                }
+            }
+            XFixes.MINOR_CHANGE_SAVE_SET -> {
+                // mode/target/map + pad, then the window. Save-sets are not modelled
+                // (the core ChangeSaveSet is an accepted no-op already); validate anyway.
+                reader.byte(); reader.byte(); reader.byte(); reader.byte()
+                val window = reader.int()
+                if (window != 0 && document.window(window) == null) {
+                    return error(X11.ERR_BAD_WINDOW, major, window, minor)
+                }
+            }
+            XFixes.MINOR_SELECT_SELECTION_INPUT -> {
+                val window = reader.int()
+                val selection = reader.int()
+                val eventMask = reader.int()
+                if (window != 0 && document.window(window) == null) {
+                    return error(X11.ERR_BAD_WINDOW, major, window, minor)
+                }
+                document.setSelectionWatch(selection, window, eventMask, this)
+            }
+            XFixes.MINOR_SELECT_CURSOR_INPUT -> {
+                val window = reader.int()
+                val eventMask = reader.int()
+                if (document.window(window) == null) {
+                    return error(X11.ERR_BAD_WINDOW, major, window, minor)
+                }
+                document.setCursorWatch(window, eventMask, this)
+            }
+            XFixes.MINOR_GET_CURSOR_IMAGE, XFixes.MINOR_GET_CURSOR_IMAGE_AND_NAME -> {
+                val withName = minor == XFixes.MINOR_GET_CURSOR_IMAGE_AND_NAME
+                val cursorId = document.effectiveCursorId(rootPointerX, rootPointerY)
+                val resource = if (cursorId != 0) document.cursor(cursorId) else null
+                val glyph = resource?.glyph ?: CursorGlyph.LEFT_PTR
+                val fg = 0xFF000000.toInt() or (resource?.foreground ?: 0)
+                val bg = 0xFF000000.toInt() or (resource?.background ?: 0xFFFFFF)
+                val image = XFixesCursorArt.image(glyph, fg, bg)
+                val serial = (document.currentCursorSerial() and 0xFFFFFFFFL).toInt()
+                val name = if (withName && cursorId != 0) document.cursorName(cursorId) ?: "" else ""
+                val nameBytes = name.toByteArray(Charsets.ISO_8859_1)
+                val nameAtom = if (name.isEmpty()) 0 else document.internAtom(name)
+                val namePad = X11.pad4(nameBytes.size) - nameBytes.size
+                val extra = (if (withName) nameBytes.size + namePad else 0) + image.pixels.size * 4
+                reply(major, extraLength = extra) { writer ->
+                    writer.short(rootPointerX)
+                    writer.short(rootPointerY)
+                    writer.short(image.width)
+                    writer.short(image.height)
+                    writer.short(image.xhot)
+                    writer.short(image.yhot)
+                    writer.int(serial)
+                    if (withName) {
+                        writer.int(nameAtom)
+                        writer.short(nameBytes.size)
+                        writer.short(0)
+                    } else {
+                        writer.pad(8)
+                    }
+                    if (withName) {
+                        writer.bytes(nameBytes)
+                        writer.pad(namePad)
+                    }
+                    image.pixels.forEach { writer.int(it) }
+                }
+            }
+            XFixes.MINOR_CREATE_REGION -> {
+                val id = reader.int()
+                if (regions.containsKey(id)) return error(X11.ERR_BAD_ID_CHOICE, major, id, minor)
+                regions[id] = XRegion(XRegionOps.normalize(readRectangles(reader, request)))
+            }
+            XFixes.MINOR_CREATE_REGION_FROM_BITMAP -> {
+                val id = reader.int()
+                val pixmap = reader.int()
+                if (regions.containsKey(id)) return error(X11.ERR_BAD_ID_CHOICE, major, id, minor)
+                if (!pixmaps.containsKey(pixmap)) return error(X11.ERR_BAD_PIXMAP, major, pixmap, minor)
+                val list = sink as? XDisplayList
+                val size = list?.sizeOf(pixmap)
+                if (list == null || size == null) {
+                    return error(X11.ERR_BAD_PIXMAP, major, pixmap, minor)
+                }
+                // "Bitmap" means depth 1 (xorg answers BadMatch for anything else).
+                if ((pixmaps[pixmap] ?: 0) != 1) {
+                    return error(X11.ERR_BAD_MATCH, major, pixmap, minor)
+                }
+                // Scan the RECORDED OPS, not a snapshot: the display list decodes a
+                // set depth-1 bit to opaque BLACK (pixelForDepth), and its snapshot
+                // initialises to opaque black too - indistinguishable. Ops carry the
+                // truth: for depth 1, Fill/Clear record argb != 0 / cleared, and
+                // Image decodes per-pixel. Lines/text into a bitmap are not span
+                // sources (X clients build bitmaps with PutImage/fills).
+                val w = size[0]
+                val h = size[1]
+                val set = Array(h) { BooleanArray(w) }
+                fun mark(x0: Int, y0: Int, x1: Int, y1: Int, value: Boolean) {
+                    for (yy in maxOf(0, y0) until minOf(h, y1)) {
+                        for (xx in maxOf(0, x0) until minOf(w, x1)) set[yy][xx] = value
+                    }
+                }
+                for (op in list.ops(pixmap)) {
+                    when (op) {
+                        is DrawOp.Fill ->
+                            mark(op.x, op.y, op.x + op.width, op.y + op.height, op.argb != 0)
+                        is DrawOp.Clear ->
+                            mark(op.x, op.y, op.x + op.width, op.y + op.height, value = false)
+                        is DrawOp.Image -> {
+                            for (row in 0 until op.height) {
+                                for (col in 0 until op.width) {
+                                    val idx = row * op.width + col
+                                    if (idx >= op.argb.size) break
+                                    val px = op.x + col
+                                    val py = op.y + row
+                                    if (px in 0 until w && py in 0 until h) {
+                                        set[py][px] = (op.argb[idx] ushr 24) != 0
+                                    }
+                                }
+                            }
+                        }
+                        else -> Unit
+                    }
+                }
+                val spans = mutableListOf<IntArray>()
+                for (y in 0 until h) {
+                    var x = 0
+                    while (x < w) {
+                        if (set[y][x]) {
+                            val start = x
+                            while (x < w && set[y][x]) x++
+                            spans += intArrayOf(start, y, x - start, 1)
+                        } else {
+                            x++
+                        }
+                    }
+                }
+                regions[id] = XRegion(XRegionOps.normalize(spans))
+            }
+            XFixes.MINOR_CREATE_REGION_FROM_WINDOW -> {
+                val id = reader.int()
+                val windowId = reader.int()
+                val kind = reader.byte()
+                if (regions.containsKey(id)) return error(X11.ERR_BAD_ID_CHOICE, major, id, minor)
+                val window = document.window(windowId)
+                    ?: return error(X11.ERR_BAD_WINDOW, major, windowId, minor)
+                val bounds = intArrayOf(window.x, window.y, window.width, window.height)
+                val rects = if (kind == XFixes.WINDOW_REGION_CLIP) {
+                    val above = document.windowsAbove(windowId)
+                        .map { intArrayOf(it.x, it.y, it.width, it.height) }
+                    XRegionOps.subtract(listOf(bounds), above)
+                } else {
+                    XRegionOps.normalize(listOf(bounds))
+                }
+                regions[id] = XRegion(rects)
+            }
+            XFixes.MINOR_CREATE_REGION_FROM_GC -> {
+                val id = reader.int()
+                val gcId = reader.int()
+                if (regions.containsKey(id)) return error(X11.ERR_BAD_ID_CHOICE, major, id, minor)
+                val gc = gcs[gcId] ?: return error(X11.ERR_BAD_GC, major, gcId, minor)
+                // An unset clip means "the whole plane" in X; a GC is drawable-less,
+                // so the screen extent is the honest representable stand-in.
+                val rects = gc.clipRegionRects
+                    ?: listOf(intArrayOf(0, 0, document.screen.widthPx, document.screen.heightPx))
+                regions[id] = XRegion(rects)
+            }
+            XFixes.MINOR_CREATE_REGION_FROM_PICTURE -> {
+                val id = reader.int()
+                val pictureId = reader.int()
+                if (regions.containsKey(id)) return error(X11.ERR_BAD_ID_CHOICE, major, id, minor)
+                val picture = pictures[pictureId]
+                    ?: return error(XRender.ERR_PICTURE, major, pictureId, minor)
+                val rects = picture.clipRects ?: run {
+                    val w = document.window(picture.drawable)
+                    val size = if (w != null) {
+                        intArrayOf(w.width, w.height)
+                    } else {
+                        (sink as? XDisplayList)?.sizeOf(picture.drawable) ?: intArrayOf(0, 0)
+                    }
+                    listOf(intArrayOf(0, 0, size[0], size[1]))
+                }
+                regions[id] = XRegion(rects)
+            }
+            XFixes.MINOR_DESTROY_REGION -> {
+                val id = reader.int()
+                regions.remove(id) ?: return error(XFixes.ERR_BAD_REGION, major, id, minor)
+            }
+            XFixes.MINOR_SET_REGION -> {
+                val id = reader.int()
+                val region = regions[id] ?: return error(XFixes.ERR_BAD_REGION, major, id, minor)
+                region.replace(XRegionOps.normalize(readRectangles(reader, request)))
+            }
+            XFixes.MINOR_COPY_REGION -> {
+                val sourceId = reader.int()
+                val destId = reader.int()
+                val source = regions[sourceId] ?: return error(XFixes.ERR_BAD_REGION, major, sourceId, minor)
+                val dest = regions[destId] ?: return error(XFixes.ERR_BAD_REGION, major, destId, minor)
+                dest.replace(source.rects)
+            }
+            XFixes.MINOR_UNION_REGION, XFixes.MINOR_INTERSECT_REGION, XFixes.MINOR_SUBTRACT_REGION -> {
+                val source1Id = reader.int()
+                val source2Id = reader.int()
+                val destId = reader.int()
+                val s1 = regions[source1Id] ?: return error(XFixes.ERR_BAD_REGION, major, source1Id, minor)
+                val s2 = regions[source2Id] ?: return error(XFixes.ERR_BAD_REGION, major, source2Id, minor)
+                val dest = regions[destId] ?: return error(XFixes.ERR_BAD_REGION, major, destId, minor)
+                dest.replace(
+                    when (minor) {
+                        XFixes.MINOR_UNION_REGION -> XRegionOps.union(s1.rects, s2.rects)
+                        XFixes.MINOR_INTERSECT_REGION -> XRegionOps.intersect(s1.rects, s2.rects)
+                        else -> XRegionOps.subtract(s1.rects, s2.rects)
+                    },
+                )
+            }
+            XFixes.MINOR_INVERT_REGION -> {
+                val regionId = reader.int()
+                val bounds = intArrayOf(
+                    reader.shortSigned(), reader.shortSigned(), reader.short(), reader.short(),
+                )
+                val destId = reader.int()
+                val region = regions[regionId] ?: return error(XFixes.ERR_BAD_REGION, major, regionId, minor)
+                val dest = regions[destId] ?: return error(XFixes.ERR_BAD_REGION, major, destId, minor)
+                dest.replace(XRegionOps.invert(region.rects, bounds))
+            }
+            XFixes.MINOR_TRANSLATE_REGION -> {
+                val id = reader.int()
+                val dx = reader.shortSigned()
+                val dy = reader.shortSigned()
+                val region = regions[id] ?: return error(XFixes.ERR_BAD_REGION, major, id, minor)
+                region.replace(XRegionOps.translate(region.rects, dx, dy))
+            }
+            XFixes.MINOR_REGION_EXTENTS -> {
+                val sourceId = reader.int()
+                val destId = reader.int()
+                val source = regions[sourceId] ?: return error(XFixes.ERR_BAD_REGION, major, sourceId, minor)
+                val dest = regions[destId] ?: return error(XFixes.ERR_BAD_REGION, major, destId, minor)
+                dest.replace(listOfNotNull(source.extents()))
+            }
+            XFixes.MINOR_FETCH_REGION -> {
+                val id = reader.int()
+                val region = regions[id] ?: return error(XFixes.ERR_BAD_REGION, major, id, minor)
+                val extents = region.extents()
+                reply(major, extraLength = region.rects.size * 8) { writer ->
+                    writer.short(extents?.get(0) ?: 0)
+                    writer.short(extents?.get(1) ?: 0)
+                    writer.short(extents?.get(2) ?: 0)
+                    writer.short(extents?.get(3) ?: 0)
+                    writer.pad(16)
+                    region.rects.forEach { r ->
+                        writer.short(r[0]); writer.short(r[1]); writer.short(r[2]); writer.short(r[3])
+                    }
+                }
+            }
+            XFixes.MINOR_SET_GC_CLIP_REGION -> {
+                val gcId = reader.int()
+                val regionId = reader.int()
+                val xOrigin = reader.shortSigned()
+                val yOrigin = reader.shortSigned()
+                val gc = gcs[gcId] ?: return error(X11.ERR_BAD_GC, major, gcId, minor)
+                val region = regions[regionId] ?: return error(XFixes.ERR_BAD_REGION, major, regionId, minor)
+                // Stored and round-tripped through CreateRegionFromGC. Core drawing
+                // does not apply GC clips - the same documented limit the core
+                // SetClipRectangles has ("accepted, not rendered").
+                gc.clipRegionRects = XRegionOps.translate(region.rects, xOrigin, yOrigin)
+            }
+            XFixes.MINOR_SET_WINDOW_SHAPE_REGION -> {
+                val windowId = reader.int()
+                val kind = reader.byte()
+                reader.byte() // pad1
+                reader.short() // pad2
+                val xOff = reader.shortSigned()
+                val yOff = reader.shortSigned()
+                val regionId = reader.int()
+                val window = document.window(windowId)
+                    ?: return error(X11.ERR_BAD_WINDOW, major, windowId, minor)
+                val region = if (regionId == 0) {
+                    null // None clears the shape
+                } else {
+                    regions[regionId] ?: return error(XFixes.ERR_BAD_REGION, major, regionId, minor)
+                }
+                val rects = region?.let {
+                    XRegionOps.translate(it.rects, window.x + xOff, window.y + yOff)
+                }
+                when (kind) {
+                    XFixes.SHAPE_BOUNDING -> window.boundingShape = rects
+                    XFixes.SHAPE_CLIP -> window.clipShape = rects
+                    XFixes.SHAPE_INPUT -> window.inputShape = rects
+                    else -> return error(X11.ERR_BAD_VALUE, major, kind, minor)
+                }
+            }
+            XFixes.MINOR_SET_PICTURE_CLIP_REGION -> {
+                val pictureId = reader.int()
+                val regionId = reader.int()
+                val xOrigin = reader.shortSigned()
+                val yOrigin = reader.shortSigned()
+                val picture = pictures[pictureId]
+                    ?: return error(XRender.ERR_PICTURE, major, pictureId, minor)
+                val region = regions[regionId] ?: return error(XFixes.ERR_BAD_REGION, major, regionId, minor)
+                // Same storage SetPictureClipRectangles uses - absolute dst-space
+                // rects - so the RENDER composite path enforces the clip for real.
+                picture.clipRects = XRegionOps.translate(region.rects, xOrigin, yOrigin)
+                picture.clipMask = 0
+            }
+            XFixes.MINOR_SET_CURSOR_NAME -> {
+                val cursorId = reader.int()
+                val nbytes = reader.short()
+                reader.short() // pad
+                if (document.cursor(cursorId) == null) {
+                    return error(X11.ERR_BAD_CURSOR, major, cursorId, minor)
+                }
+                val name = String(reader.bytes(nbytes), Charsets.ISO_8859_1)
+                document.setCursorName(cursorId, name)
+            }
+            XFixes.MINOR_GET_CURSOR_NAME -> {
+                val cursorId = reader.int()
+                if (document.cursor(cursorId) == null) {
+                    return error(X11.ERR_BAD_CURSOR, major, cursorId, minor)
+                }
+                val name = document.cursorName(cursorId) ?: ""
+                val bytes = name.toByteArray(Charsets.ISO_8859_1)
+                val atom = if (name.isEmpty()) 0 else document.internAtom(name)
+                val pad = X11.pad4(bytes.size) - bytes.size
+                reply(major, extraLength = bytes.size + pad) { writer ->
+                    writer.int(atom)
+                    writer.short(bytes.size)
+                    writer.short(0)
+                    writer.pad(16)
+                    writer.bytes(bytes)
+                    writer.pad(pad)
+                }
+            }
+            XFixes.MINOR_CHANGE_CURSOR -> {
+                val sourceId = reader.int()
+                val destId = reader.int()
+                val source = document.cursor(sourceId)
+                    ?: return error(X11.ERR_BAD_CURSOR, major, sourceId, minor)
+                if (document.cursor(destId) == null) {
+                    return error(X11.ERR_BAD_CURSOR, major, destId, minor)
+                }
+                document.addCursor(source.copy(id = destId))
+            }
+            XFixes.MINOR_CHANGE_CURSOR_BY_NAME -> {
+                val sourceId = reader.int()
+                val nbytes = reader.short()
+                reader.short() // pad
+                val source = document.cursor(sourceId)
+                    ?: return error(X11.ERR_BAD_CURSOR, major, sourceId, minor)
+                val name = String(reader.bytes(nbytes), Charsets.ISO_8859_1)
+                val destId = document.cursorIdByName(name)
+                    ?: return error(X11.ERR_BAD_NAME, major, sourceId, minor)
+                document.addCursor(source.copy(id = destId))
+            }
+            XFixes.MINOR_EXPAND_REGION -> {
+                val sourceId = reader.int()
+                val destId = reader.int()
+                val left = reader.short()
+                val right = reader.short()
+                val top = reader.short()
+                val bottom = reader.short()
+                val source = regions[sourceId] ?: return error(XFixes.ERR_BAD_REGION, major, sourceId, minor)
+                val dest = regions[destId] ?: return error(XFixes.ERR_BAD_REGION, major, destId, minor)
+                dest.replace(XRegionOps.expand(source.rects, left, right, top, bottom))
+            }
+            XFixes.MINOR_HIDE_CURSOR -> {
+                val windowId = reader.int()
+                if (document.window(windowId) == null) {
+                    return error(X11.ERR_BAD_WINDOW, major, windowId, minor)
+                }
+                document.setCursorHiddenForWindow(windowId, hidden = true)
+            }
+            XFixes.MINOR_SHOW_CURSOR -> {
+                val windowId = reader.int()
+                if (document.window(windowId) == null) {
+                    return error(X11.ERR_BAD_WINDOW, major, windowId, minor)
+                }
+                document.setCursorHiddenForWindow(windowId, hidden = false)
+            }
+            else -> {
+                // Pointer barriers and the v6 client-disconnect tail: refused and
+                // named in the trace rather than accepted-and-ignored - a Success
+                // answer would be a lie a client could act on. (The 5.0 version
+                // claim keeps well-behaved clients from ever sending these.)
+                trace.recordUnimplemented(major, minor)
+                error(X11.ERR_BAD_REQUEST, major, 0, minor)
+            }
+        }
+    }
+
+    private fun xsyncRequest(major: Int, minor: Int, reader: XReader, request: ByteArray) {
+        when (minor) {
+            XSync.MINOR_INITIALIZE -> {
+                val clientMajor = reader.byte()
+                val clientMinor = reader.byte()
+                reply(major) { writer ->
+                    writer.byte(minOf(clientMajor, XSync.VERSION_MAJOR))
+                    writer.byte(
+                        if (clientMajor > XSync.VERSION_MAJOR) XSync.VERSION_MINOR
+                        else minOf(clientMinor, XSync.VERSION_MINOR),
+                    )
+                    writer.pad(22)
+                }
+            }
+            XSync.MINOR_LIST_SYSTEM_COUNTERS -> {
+                // We expose no system counters; clients create their own.
+                reply(major) { writer ->
+                    writer.int(0)
+                    writer.pad(20)
+                }
+            }
+            XSync.MINOR_CREATE_COUNTER -> {
+                val id = reader.int()
+                val value = combineInt64(reader.int(), reader.int())
+                if (document.syncCounter(id) != null) {
+                    return error(X11.ERR_BAD_ID_CHOICE, major, id, minor)
+                }
+                document.putSyncCounter(XSync.Counter(id, value, this))
+            }
+            XSync.MINOR_SET_COUNTER -> {
+                val id = reader.int()
+                val value = combineInt64(reader.int(), reader.int())
+                val counter = document.syncCounter(id)
+                    ?: return error(XSync.ERR_BAD_COUNTER, major, id, minor)
+                val old = counter.value
+                counter.value = value
+                syncSideEffects(counter, old)
+            }
+            XSync.MINOR_CHANGE_COUNTER -> {
+                val id = reader.int()
+                val delta = combineInt64(reader.int(), reader.int())
+                val counter = document.syncCounter(id)
+                    ?: return error(XSync.ERR_BAD_COUNTER, major, id, minor)
+                val old = counter.value
+                counter.value += delta
+                syncSideEffects(counter, old)
+            }
+            XSync.MINOR_QUERY_COUNTER -> {
+                val id = reader.int()
+                val counter = document.syncCounter(id)
+                    ?: return error(XSync.ERR_BAD_COUNTER, major, id, minor)
+                reply(major) { writer ->
+                    writer.int((counter.value shr 32).toInt())
+                    writer.int((counter.value and 0xFFFFFFFFL).toInt())
+                    writer.pad(16)
+                }
+            }
+            XSync.MINOR_DESTROY_COUNTER -> {
+                val id = reader.int()
+                document.removeSyncCounter(id)
+                    ?: return error(XSync.ERR_BAD_COUNTER, major, id, minor)
+            }
+            XSync.MINOR_AWAIT -> {
+                val r = XReader(request, littleEndian, reader.position)
+                val conditions = mutableListOf<XSync.Condition>()
+                while (r.position + 28 <= request.size) {
+                    val counterId = r.int()
+                    val valueType = r.int()
+                    val waitValue = combineInt64(r.int(), r.int())
+                    val testType = r.int()
+                    r.int(); r.int() // event_threshold INT64 (no CounterNotify streaming)
+                    val counter = document.syncCounter(counterId)
+                        ?: return error(XSync.ERR_BAD_COUNTER, major, counterId, minor)
+                    // test_type Relative (1): the wait value is an offset from the
+                    // counter's value at Await time.
+                    val effective = if (testType == 1) waitValue + counter.value else waitValue
+                    conditions += XSync.Condition(counterId, valueType, effective)
+                }
+                val satisfiedNow = conditions.all { condition ->
+                    val counter = document.syncCounter(condition.counterId) ?: return@all false
+                    XSync.holds(condition, counter.value, counter.value, crossing = false)
+                }
+                if (conditions.isEmpty() || satisfiedNow) {
+                    reply(major) { writer -> writer.pad(24) }
+                } else {
+                    // Hold the reply until a counter change satisfies every condition -
+                    // the observable behaviour of a blocking Await for a client that
+                    // pipelined the request. The held reply keeps THIS sequence number.
+                    document.addPendingAwait(
+                        XDocument.PendingAwait(this, conditions, major, sequence),
+                    )
+                }
+            }
+            XSync.MINOR_CREATE_ALARM -> {
+                val id = reader.int()
+                val mask = reader.int()
+                if (document.syncAlarm(id) != null) {
+                    return error(X11.ERR_BAD_ID_CHOICE, major, id, minor)
+                }
+                val alarm = XSync.Alarm(id, this)
+                if (!readAlarmValues(alarm, reader, mask, major, minor)) return
+                document.putSyncAlarm(alarm)
+            }
+            XSync.MINOR_CHANGE_ALARM -> {
+                val id = reader.int()
+                val mask = reader.int()
+                val alarm = document.syncAlarm(id)
+                    ?: return error(XSync.ERR_BAD_ALARM, major, id, minor)
+                if (!readAlarmValues(alarm, reader, mask, major, minor)) return
+            }
+            XSync.MINOR_QUERY_ALARM -> {
+                val id = reader.int()
+                val alarm = document.syncAlarm(id)
+                    ?: return error(XSync.ERR_BAD_ALARM, major, id, minor)
+                reply(major, extraLength = 8) { writer ->
+                    writer.int(alarm.counterId)
+                    writer.int(alarm.valueType)
+                    writer.int((alarm.value shr 32).toInt())
+                    writer.int((alarm.value and 0xFFFFFFFFL).toInt())
+                    writer.int(0) // test_type: absolute readings only
+                    writer.int((alarm.delta shr 32).toInt())
+                    writer.int((alarm.delta and 0xFFFFFFFFL).toInt())
+                    writer.byte(if (alarm.events) 1 else 0)
+                    writer.byte(alarm.state)
+                    writer.pad(2)
+                }
+            }
+            XSync.MINOR_DESTROY_ALARM -> {
+                val id = reader.int()
+                document.removeSyncAlarm(id)
+                    ?: return error(XSync.ERR_BAD_ALARM, major, id, minor)
+            }
+            XSync.MINOR_SET_PRIORITY -> {
+                reader.int() // id (any XID)
+                reader.int() // priority - accepted, not modelled (one app per server)
+            }
+            XSync.MINOR_GET_PRIORITY -> {
+                reader.int()
+                reply(major) { writer ->
+                    writer.int(0)
+                    writer.pad(20)
+                }
+            }
+            else -> {
+                // Fences (SYNC 3.0, GPU sync objects) and beyond: we have no
+                // GL/DRI path they could mean anything on. Refused and named.
+                trace.recordUnimplemented(major, minor)
+                error(X11.ERR_BAD_REQUEST, major, 0, minor)
+            }
+        }
+    }
+
+    /** The CreateAlarm/ChangeAlarm value list, consumed in value-mask bit order. */
+    private fun readAlarmValues(
+        alarm: XSync.Alarm,
+        reader: XReader,
+        mask: Int,
+        major: Int,
+        minor: Int,
+    ): Boolean {
+        if (mask and XSync.CA_COUNTER != 0) {
+            val counterId = reader.int()
+            if (document.syncCounter(counterId) == null) {
+                error(XSync.ERR_BAD_COUNTER, major, counterId, minor)
+                return false
+            }
+            alarm.counterId = counterId
+        }
+        if (mask and XSync.CA_VALUE_TYPE != 0) alarm.valueType = reader.int()
+        if (mask and XSync.CA_VALUE != 0) alarm.value = combineInt64(reader.int(), reader.int())
+        if (mask and XSync.CA_EVENTS != 0) alarm.events = reader.int() != 0
+        if (mask and XSync.CA_DELTA != 0) alarm.delta = combineInt64(reader.int(), reader.int())
+        if (mask and XSync.CA_TIMEOUT != 0) alarm.timeout = reader.int()
+        if (mask and XSync.CA_TYPE != 0) alarm.alarmType = reader.int()
+        return true
+    }
+
+    /** Delivers held-Await replies and fired AlarmNotifies after a counter change. */
+    private fun syncSideEffects(counter: XSync.Counter, oldValue: Long) {
+        val (awaits, alarms) = document.onCounterChanged(counter, oldValue)
+        val now = document.timestamp()
+        awaits.forEach { await ->
+            await.connection.deliverAwaitReply(await.opcode, await.sequence)
+        }
+        alarms.forEach { alarm ->
+            if (alarm.events) {
+                alarm.owner.deliverSyncAlarmNotify(alarm.id, counter.value, alarm.value, now)
+            }
+        }
+    }
+
     private fun renderRequest(major: Int, minor: Int, reader: XReader, request: ByteArray) {
         when (minor) {
             XRender.MINOR_QUERY_VERSION -> {
@@ -3411,6 +4106,8 @@ class XConnection(
             XBigRequests.NAME to intArrayOf(XBigRequests.MAJOR_OPCODE, 0, 0),
             XGenericEvent.NAME to intArrayOf(XGenericEvent.MAJOR_OPCODE, 0, 0),
             XInput2.NAME to intArrayOf(XInput2.MAJOR_OPCODE, XInput2.FIRST_EVENT, XInput2.FIRST_ERROR),
+            XFixes.NAME to intArrayOf(XFixes.MAJOR_OPCODE, XFixes.FIRST_EVENT, XFixes.FIRST_ERROR),
+            XSync.NAME to intArrayOf(XSync.MAJOR_OPCODE, XSync.FIRST_EVENT, XSync.FIRST_ERROR),
         )
 
         private val EXTENSIONS_BY_UPPER = EXTENSIONS.keys.associateBy { it.uppercase() }
