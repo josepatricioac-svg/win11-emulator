@@ -92,6 +92,34 @@ object DesktopEngineReadiness {
  */
 object DesktopBrowserLauncher {
 
+    /**
+     * Launch lifecycle for the X Desktop window's loading indicator (Goal 2
+     * step 2): STARTING covers the gap between the proot spawn and the first
+     * guest X connection - up to a minute on a first run while fontconfig
+     * builds its cache - so the window says what is happening instead of
+     * looking dead. Compose state; written from launch (any thread) under a
+     * mutable snapshot, read by the X Desktop window.
+     */
+    enum class LaunchPhase { IDLE, STARTING, RUNNING, FAILED }
+
+    var launchPhase: LaunchPhase by mutableStateOf(LaunchPhase.IDLE)
+        private set
+
+    var launchMessage: String? by mutableStateOf(null)
+        private set
+
+    private fun setPhase(phase: LaunchPhase, message: String?) {
+        Snapshot.withMutableSnapshot {
+            launchPhase = phase
+            launchMessage = message
+        }
+    }
+
+    /** Called by the X Desktop window when a guest client has connected. */
+    fun noteClientConnected() {
+        if (launchPhase == LaunchPhase.STARTING) setPhase(LaunchPhase.RUNNING, null)
+    }
+
     fun launch(context: Context, engineId: String, url: String, rootfsOverride: String? = null): DesktopLaunchOutcome {
         if (engineId != FirefoxSession.ENGINE_ID) {
             return DesktopLaunchOutcome(
@@ -103,6 +131,7 @@ object DesktopBrowserLauncher {
             val appContext = context.applicationContext
             val xReady = XServer.ensureRunning()
             if (!xReady) {
+                setPhase(LaunchPhase.FAILED, "X server failed to start: ${XServer.lastError ?: "unknown error"}")
                 return DesktopLaunchOutcome(false, "X server failed to start: ${XServer.lastError ?: "unknown error"}")
             }
             val readiness = DesktopEngineReadiness.ready(engineId)
@@ -112,6 +141,7 @@ object DesktopBrowserLauncher {
                 // The launcher validates binaries/rootfs/prefix itself; this adds the
                 // firefox-specific pieces so the refusal names them precisely.
                 val missing = DesktopEngineReadiness.missing(engineId) ?: "runtime not ready"
+                setPhase(LaunchPhase.FAILED, missing)
                 return DesktopLaunchOutcome(false, "Firefox ESR is not launchable yet: $missing")
             }
             if (launcher.isRunning(FirefoxSession.SESSION_ID)) {
@@ -141,6 +171,12 @@ object DesktopBrowserLauncher {
                     )
                 }
             }
+            setPhase(
+                LaunchPhase.STARTING,
+                "Starting Firefox ESR on ${RuntimePaths.X_DISPLAY}\u2026\n" +
+                    "First run extracts caches and builds the fontconfig cache - up to a minute.\n" +
+                    "Output streams to Terminal \u25B8 log.",
+            )
             val result = launcher.start(request)
             if (result.success) {
                 ContainerService.start(appContext)
@@ -149,6 +185,7 @@ object DesktopBrowserLauncher {
                     "Firefox ESR starting on ${RuntimePaths.X_DISPLAY} - open Start \u25B8 X Desktop to see it.",
                 )
             } else {
+                setPhase(LaunchPhase.FAILED, "[${result.failure}] ${result.message}")
                 DesktopLaunchOutcome(false, "Firefox ESR refused to start [${result.failure}]: ${result.message}")
             }
         } catch (error: Throwable) {
@@ -159,7 +196,10 @@ object DesktopBrowserLauncher {
     /** Whether the desktop-browser session is alive (status lines, Task Manager later). */
     fun isRunning(): Boolean = RuntimeHolder.launcher?.isRunning(FirefoxSession.SESSION_ID) == true
 
-    fun stop(): String =
-        RuntimeHolder.launcher?.stop(FirefoxSession.SESSION_ID, reason = "desktop browser stopped by user")?.message
+    fun stop(): String {
+        setPhase(LaunchPhase.IDLE, null)
+        return RuntimeHolder.launcher
+            ?.stop(FirefoxSession.SESSION_ID, reason = "desktop browser stopped by user")?.message
             ?: "Not running."
+    }
 }

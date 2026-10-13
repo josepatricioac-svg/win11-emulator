@@ -144,12 +144,29 @@ object RuntimeHolder {
         val filesDir = appContext.filesDir
         val profile = RuntimePaths.browserProfileDir(filesDir)
         RuntimePaths.ensurePrefix(profile.absolutePath)
+        val rootfs = rootfsOverride?.let { File(it) } ?: rootfsDir ?: RuntimePaths.defaultRootfs(filesDir)
+        // First-load speed (Goal 2 step 2): enterprise policies + user.js + a
+        // deterministic profiles.ini, materialised idempotently before the
+        // session starts. A failure here must never block the launch - it
+        // degrades to a slower first run, named in the shared log
+        // (crash-safety rule 1).
+        runCatching {
+            val written = FirefoxPolicies.materialize(rootfs, profile)
+            if (written.isNotEmpty()) {
+                SharedLog.info("firefox: startup files written: " + written.joinToString { it.name })
+            }
+        }.onFailure { failure ->
+            SharedLog.info(
+                "firefox: startup files NOT written (${failure.javaClass.simpleName}: " +
+                    "${failure.message}) - first run stays slow",
+            )
+        }
         val resolvConf = RuntimePaths.ensureResolvConf(filesDir)
         val id = if (handoff) "${FirefoxSession.SESSION_ID}-handoff" else FirefoxSession.SESSION_ID
         val name = if (handoff) "${FirefoxSession.SESSION_NAME} - URL handoff" else FirefoxSession.SESSION_NAME
         return RuntimeRequest(
             container = Container.defaults(id, name, profile.absolutePath),
-            rootfsDir = rootfsOverride?.let { File(it) } ?: rootfsDir ?: RuntimePaths.defaultRootfs(filesDir),
+            rootfsDir = rootfs,
             xDisplay = RuntimePaths.X_DISPLAY,
             guestCommand = FirefoxSession.sessionCommand(url),
             guestPrefix = FirefoxSession.GUEST_PROFILE_DIR,

@@ -84,6 +84,29 @@ unlocks itself the moment the runtime is complete:
    as `RoadmapGatingTest` pins it.
 5. **Profile**: persistent at `<files>/browser/firefox-profile`, bound over
    `/root/.mozilla` — cookies, extensions and downloads survive app restarts.
+6. **First-load speed + quiet background (Goal 2 step 2)**: `FirefoxPolicies`
+   materialises three files idempotently at session build
+   (`RuntimeHolder.firefoxRequest`): `<rootfs>/opt/firefox-esr/distribution/
+   policies.json` — enforced, so the UI cannot re-enable them — turning off
+   telemetry, studies/normandy, app auto-update (ManualAppUpdateOnly), Pocket,
+   the whole safe-browsing family *including its remote lookups* (on a fresh
+   profile each of those waits on a network round trip before the first paint —
+   the biggest first-load stallers), first-run/welcome pages and the
+   default-browser check, while `NetworkPrediction` keeps DNS/link prefetch ON
+   for speed; the profile's `firefox/shell/user.js` seeding the same prefs for
+   the paths the policy engine does not cover; and `firefox/profiles.ini` so
+   `-P shell` resolves deterministically instead of racing first-run profile
+   creation. Every key is pinned by `FirefoxPoliciesTest` (a malformed
+   policies.json is silently ignored by Firefox, so the exact text is the
+   contract). A failed materialisation degrades to a slower first run, named
+   in the shared log — it never blocks the launch. DNS/SSL need no extra step:
+   the provisioned `ca-certificates` + the written-and-bound `resolv.conf` are
+   the DNS/SSL path. The X Desktop window shows the launch instead of looking
+   hung: `DesktopBrowserLauncher` publishes a `LaunchPhase`
+   (STARTING/RUNNING/FAILED) that the window renders as a spinner plus
+   "first run builds the fontconfig cache — up to a minute" until the first
+   guest X connection flips it to RUNNING; a refusal replaces it with its
+   named reason.
 
 Honest limits while gated (each named by the readiness message, nothing silent):
 

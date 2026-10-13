@@ -54,6 +54,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import dev.win11we.shell.runtime.DesktopBrowserLauncher
 import dev.win11we.shell.ui.terminal.SharedLog
 import dev.win11we.shell.x11.CursorGlyph
 import dev.win11we.shell.x11.DrawOp
@@ -601,6 +602,9 @@ class XDesktopState {
         if (signature != frame) {
             frame = signature
             clients = XServer.clientCount
+            // A guest connected: the launcher's STARTING phase is over (the
+            // loading indicator in the window yields to the client's pixels).
+            if (clients > 0) DesktopBrowserLauncher.noteClientConnected()
         }
     }
 
@@ -625,12 +629,16 @@ class XDesktopState {
             val px = XServer.pointerX
             val py = XServer.pointerY
             if (px in 0 until screen.widthPx && py in 0 until screen.heightPx) {
-                renderer.drawCursor(
-                    canvas,
-                    document.effectiveCursorGlyph(px, py),
-                    offsetX + px * scale,
-                    offsetY + py * scale,
-                )
+                val cursorGlyph = document.effectiveCursorGlyph(px, py)
+                // XFIXES HideCursor: CURSOR_HIDDEN (-1) means "draw no sprite".
+                if (cursorGlyph >= 0) {
+                    renderer.drawCursor(
+                        canvas,
+                        cursorGlyph,
+                        offsetX + px * scale,
+                        offsetY + py * scale,
+                    )
+                }
             }
         }
     }
@@ -843,9 +851,39 @@ fun XDesktopWindow(modifier: Modifier = Modifier) {
                 modifier = Modifier.align(Alignment.Center).padding(16.dp),
             )
         } else if (state.clients == 0) {
+            // Goal 2 step 2: a VISIBLE loading state while a desktop browser
+            // launches - the first run really takes up to a minute (fontconfig
+            // cache), and a silent black window reads as a hang. A failure
+            // replaces it with the named refusal instead of going quiet.
+            val phase = DesktopBrowserLauncher.launchPhase
+            val failure = if (phase == DesktopBrowserLauncher.LaunchPhase.FAILED) {
+                DesktopBrowserLauncher.launchMessage
+            } else {
+                null
+            }
+            if (phase == DesktopBrowserLauncher.LaunchPhase.STARTING) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    color = androidx.compose.ui.graphics.Color.White,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.align(Alignment.Center).padding(bottom = 72.dp),
+                )
+            }
             Text(
-                text = "X server running on ${XServer.DISPLAY}\nWaiting for clients - start a container to run Windows apps.\nTap the desktop, then use the soft keyboard to type into guest apps.",
-                color = androidx.compose.ui.graphics.Color(0xFFB8B8B8),
+                text = when {
+                    phase == DesktopBrowserLauncher.LaunchPhase.STARTING ->
+                        DesktopBrowserLauncher.launchMessage ?: "Starting desktop browser…"
+                    failure != null ->
+                        "Desktop browser failed to start:\n$failure\n\n" +
+                            "Diagnostics and Terminal ▸ log carry the details."
+                    else ->
+                        "X server running on ${XServer.DISPLAY}\nWaiting for clients - start a container to run Windows apps.\nTap the desktop, then use the soft keyboard to type into guest apps."
+                },
+                color = when {
+                    failure != null -> androidx.compose.ui.graphics.Color(0xFFFF9E9E)
+                    phase == DesktopBrowserLauncher.LaunchPhase.STARTING ->
+                        androidx.compose.ui.graphics.Color.White
+                    else -> androidx.compose.ui.graphics.Color(0xFFB8B8B8)
+                },
                 modifier = Modifier.align(Alignment.Center).padding(16.dp),
             )
         }
