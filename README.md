@@ -19,7 +19,7 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | R2 | `ContainerService` (foreground, Stop all), `proot -> box64 -> wine` launch with the explicit env, per-container status, logs into the shared buffer | done (inert until R1 binaries + R3 rootfs exist) |
 | R3 | Rootfs/Wine download: pinned SHA-256 (fail closed), resumable via `Range`, free-space check, progress UI, SAF import | done — **extraction runs in-app** (pure-Kotlin TAR reader + xz-java, verified against the real pinned ubuntu-base and Firefox archives); Firefox ESR artifact pinned from Mozilla |
 | R4 | Diagnostics self-test: `box64 --version`, `wine64 --version`, `wine64 cmd /c echo hello`, green/red/skipped with the failing command + log excerpt | done |
-| D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a–D1e done: spec-accurate protocol core, socket, renderer, input, soft-keyboard text injection, focus/grabs/cursors/fonts/colours, XTest, SubstructureRedirect WM, and **RENDER 0.4** — pictures, Composite with the 14 Porter-Duff ops, FillRectangles, the full CompositeGlyphs pipeline, both rasterisers — plus the one-tap **X self-test** (xdpyinfo/xwininfo probes, a **GTK3 display-open probe**, xeyes/xclock survivors) in Diagnostics, and **D1e**: the BIG-REQUESTS + Generic-Event transport and **XInput2 2.2** — the device list, selections, grabs and the key/button/motion/crossing/focus events GTK3 runs on. 204 x11 wire tests green on a JVM; guest launch waits on the R1 binaries; see `docs/X_SERVER.md`) |
+| D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a–D1e done: spec-accurate protocol core, socket, renderer, input, soft-keyboard text injection, focus/grabs/cursors/fonts/colours, XTest, SubstructureRedirect WM, and **RENDER 0.4** — pictures, Composite with the 14 Porter-Duff ops, FillRectangles, the full CompositeGlyphs pipeline, both rasterisers — plus the one-tap **X self-test** (xdpyinfo/xwininfo probes, a **GTK3 display-open probe**, xeyes/xclock survivors) in Diagnostics, and **D1e**: the BIG-REQUESTS + Generic-Event transport and **XInput2 2.2** — the device list, selections, grabs and the key/button/motion/crossing/focus events GTK3 runs on, and **D1f**: **XFIXES 5.0** (event-driven selection/cursor watches, real region algebra, picture-clip + input-shape wiring) plus **SYNC 3.1** (INT64 counters, held Awaits, alarms) - what GTK3's clipboard and resize sync watch for. 256 x11 wire tests green on a JVM; the R1 binaries are vendored, so the guest launch is a device-provisioning step; see `docs/X_SERVER.md`) |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | **partial** (P1 clipboard: the X selections ↔ Android text bridge is done and wire-tested — guest copies push out, Android-side changes reclaim PRIMARY/CLIPBOARD; rich targets and the remaining P1/P2 items are not started) |
 
 ## Visual language and animation
@@ -128,7 +128,24 @@ real multi-touch (pinch-zoom) is the named next step. The extension registry kee
 canonical names for `ListExtensions` and answers `QueryExtension`
 case-insensitively.
 
-**The server runs, renders, takes input and passes 204 wire tests (run for real on a
+**D1f added XFIXES 5.0 and SYNC 3.1 - the two extensions GTK3 keeps asking for
+after XI2.** XFIXES (opcode 133, event base 66) makes the clipboard event-driven:
+GDK3's `owner-change` tracking rides SelectionNotify watches that fire on every
+ownership path - including the shell's own Android-clipboard reclaims - plus
+cursor watches/names/images (GetCursorImage rasterises the built-in 16x16 glyph
+art), HideCursor honoured by the software cursor, and a real rectangle-set
+region algebra (union/intersect/subtract/invert/translate/expand, normalised)
+whose two visible wirings are the enforced RENDER picture clip
+(SetPictureClipRegion) and hit-testing (SetWindowShapeRegion's Input kind). The
+version claim is 5.0, not 6.0, so the pointer-barrier tail stays unreachable
+(refused and named in the trace anyway). SYNC (opcode 134) gives GDK3 and Wine
+their frame-sync surface: INT64 counters, a *held* Await answered by the
+satisfying counter change with the request's own sequence number, the spec's
+transition-vs-comparison semantics, relative waits, alarms with deltas and
+AlarmNotify events - fences refused and named, because there is no GL path they
+could mean anything on. 52 new wire tests pin every reply byte-for-byte.
+
+**The server runs, renders, takes input and passes 256 wire tests (run for real on a
 JVM with Kotlin 2.1.10); no guest has connected on a device yet.** The native binaries (R1)
 are vendored now, so the first real guest launch (Firefox ESR, then `explorer.exe
 /desktop`) is a provisioning step away - until then `ExplorerSmokeTest` scripts
@@ -137,8 +154,9 @@ per drawable, `XCanvasRenderer` composites the window stack into the **Start ▸
 Desktop** window, raw MotionEvents/key events are translated through `XInput`, and
 top-level maps/configures are redirected to `ShellWindowManager` (SubstructureRedirect)
 so the shell places guest windows. See `docs/X_SERVER.md` for the remaining limits
-(RENDER served at 0.4; no Composite/XShm/XKB/XIM, fixed font metrics, Latin-1 text
-injection).
+(RENDER served at 0.4; no Composite/XShm/XKB/XIM, fixed font metrics, Latin-1
+text injection; XFIXES/SYNC served with their documented limits - stored but
+unclipped window shapes, GC clips, no fences).
 
 ## What is deliberately not usable yet
 
@@ -367,7 +385,12 @@ evaluates readiness (R1 binaries → rootfs → Firefox installed → GTK3 stack
 Compose-state snapshot, and a ready engine launches through R2's `ContainerLauncher` as
 `proot → /bin/bash -c '<D-Bus prelude>; exec /opt/firefox-esr/firefox -P shell <url>'`
 with an explicit sandbox-off environment on `DISPLAY=:100` - no box64, persistent
-profile, foreground service, X Desktop window focused automatically. The prelude
+profile, foreground service, X Desktop window focused automatically. The first
+load is quieted and sped up by `FirefoxPolicies` (policies.json + user.js +
+profiles.ini, materialised idempotently: no telemetry/update/safe-browsing round
+trips, prefetch kept on) and made visible by the X Desktop loading indicator -
+spinner plus "first run builds the fontconfig cache" until the guest connects,
+the named refusal if it does not start. The prelude
 starts a private `dbus-daemon --session` at a fixed guest address, which is what lets
 a second URL reach the *running* instance instead of being refused as a double start. Until the runtime is vendored the card names the
 missing piece and selection falls back to an Android browser, exactly as
@@ -377,7 +400,7 @@ open decisions.
 
 ## UI tests
 
-`./gradlew testDebugUnitTest` runs the 565 pure-JVM tests (window geometry, snap zones,
+`./gradlew testDebugUnitTest` runs the 635 pure-JVM tests (window geometry, snap zones,
 Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing, argv
 splitting, the log buffer, the built-in commands, the terminal transcript/history, the
 container codec/store, guest<->host path mapping, the Wine environment builder, the
@@ -410,7 +433,17 @@ chip off the UI thread, which is what stopped the self-test being an ANR;
 and the P1 clipboard bridge: server-wide selection ownership,
 cross-client SelectionRequest routing, the ICCCM mask-0 SendEvent idiom, inline shell
 conversions with TARGETS, ownership lifecycle, and the end-to-end guest-copy push
-through a fake bridge).
+through a fake bridge; the D1f XFIXES suite (the 5.0 version pin, selection watches
+with all three subtypes including the cross-client root-window idiom and the shell
+reclaims, mask filtering, cursor watches/names/ChangeCursor, the 16x16
+GetCursorImage raster, the full region algebra through FetchRegion, FromBitmap's
+depth-1 BadMatch rule and ops-based scan, the picture-clip and input-shape
+wirings, and the named barrier refusal) and SYNC suite (INT64 counters, held
+Awaits answered with their own sequence number, transition vs comparison vs
+relative waits, alarms with deltas/events, the 40-byte QueryAlarm reply, the
+named fence refusal, and connection-death cleanup); and the Firefox first-load
+file set (the exact policies/user.js/profiles.ini keys, JSON balance, idempotent
+materialise, install-gated policies).
 
 Compose tests that actually **compose** the taskbar (Robolectric) are opt-in because they
 need a couple of GB of RAM:
@@ -485,6 +518,7 @@ app/src/main/java/dev/win11we/shell/
   runtime/ProcessLauncher.kt   start/stream/destroy seam (real ProcessBuilder + fakes in tests)
   runtime/ContainerLauncher.kt validate -> build command+env -> start -> track status/logs (R2)
   runtime/FirefoxSession.kt  Firefox ESR desktop-browser session: guest command, env, binds, install checks
+  runtime/FirefoxPolicies.kt first-load file set: policies.json + user.js + profiles.ini
   runtime/RootfsProvisioner.kt apt-inside-proot provisioning of the browser's GTK3/X11/font/CA stack
   runtime/download/TarExtractor.kt pure-Kotlin TAR reader (gzip + xz) - the on-device extraction engine
   runtime/DesktopBrowserLauncher.kt readiness worker (named missing step) + the gated launch path
@@ -498,6 +532,8 @@ app/src/main/java/dev/win11we/shell/
   x11/XDisplayList.kt        per-drawable DrawOp store + pure-Kotlin rasteriser for GetImage (D1b/D1c)
   x11/XColors.kt             rgb.txt named-colour table + rgb:/#hex parsing (D1c)
   x11/XSelections.kt         selection ownership model, clipboard-bridge seam, target codec (P1)
+  x11/XFixes.kt              XFIXES 5.0: watches, region algebra, cursor art (D1f)
+  x11/XSync.kt               SYNC 3.1: counters, conditions, alarms (D1f)
   x11/XIme.kt                IME commit extraction for the soft-keyboard path (D1c)
   x11/ShellWindowManager.kt  SubstructureRedirect WM: cascaded placement of guest windows
   x11/XKeyboard.kt           true evdev+8 keycode map, US ASCII table, Latin-1 range (D1c)
@@ -509,9 +545,9 @@ app/src/main/java/dev/win11we/shell/
   runtime/SelfTestRunner.kt    the R4 self-test: 3 steps, verdicts, reasons, report/log excerpt
 ```
 
-Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 565 tests, measured by
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 635 tests, measured by
 annotation count; the pure-JVM subset is additionally compiled and executed off-device
-against JDK 17 + Kotlin 2.1.10 with minimal Android stubs, so 427 of them are run for
+against JDK 17 + Kotlin 2.1.10 with minimal Android stubs, so 620 of them are run for
 real outside Gradle too): snap zones,
 maximize/restore, halves snapping, edge/corner resize with minimums, on-screen clamping,
 z-order/focus, taskbar toggle open-minimize-restore, Explorer listing/filtering/sorting,
