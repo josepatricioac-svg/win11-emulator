@@ -121,7 +121,9 @@ object FluentBackdrop {
             val px = cx + (r * petal.spread * Math.cos(rad)).toFloat()
             val py = cy + (r * petal.spread * Math.sin(rad)).toFloat()
             val pr = r * 0.46f
-            paint.shader = RadialGradient(px, py, pr, petal.tint, null, Shader.TileMode.CLAMP)
+            paint.shader = RadialGradient(
+                px, py, pr, intArrayOf(petal.tint, 0x00000000), null, Shader.TileMode.CLAMP,
+            )
             canvas.drawCircle(px, py, pr, paint)
         }
         paint.shader = RadialGradient(cx, cy, r * 0.16f, spec.core, null, Shader.TileMode.CLAMP)
@@ -198,9 +200,11 @@ private fun DrawScope.drawBackdrop(backdrop: BackdropSet, sample: BackdropSample
     val srcTop = (pos.y * scaleY).toInt().coerceIn(0, image.height - 1)
     val srcRight = ((pos.x + area.width) * scaleX).toInt().coerceIn(srcLeft + 1, image.width)
     val srcBottom = ((pos.y + area.height) * scaleY).toInt().coerceIn(srcTop + 1, image.height)
+    // Positional: the IntRect overload's parameter names differ across Compose
+    // versions, positions never do.
     drawImage(
-        image = image,
-        sourceRect = IntRect(srcLeft, srcTop, srcRight, srcBottom),
-        destinationRect = IntRect(0, 0, size.width.toInt(), size.height.toInt()),
+        image,
+        IntRect(srcLeft, srcTop, srcRight, srcBottom),
+        IntRect(0, 0, size.width.toInt(), size.height.toInt()),
     )
 }
