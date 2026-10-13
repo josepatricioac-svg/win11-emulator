@@ -15,7 +15,7 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 | N0 | Gradle project + Compose shell screen (wallpaper + taskbar), CI debug APK | done |
 | N1 | Native taskbar (Start menu, tray, clock) + window manager (drag/resize/snap/z-order) | done |
 | N2 | Apps: Explorer, Notepad, Settings, Browser, Task Manager, Terminal, Container Manager | **done** |
-| R1 | proot/box64 exec from `nativeLibraryDir`, inventory/permissions, SHA-256 pins, `--version` probes, proot command builder, Diagnostics window | done — **proot + loader + libtalloc vendored & pinned** (arm64, NDK r27c, provenance in `docs/NATIVE_RUNTIME.md`); box64 pending one `build-native` CI run (only x86/x64 Wine needs it) |
+| R1 | proot/box64 exec from `nativeLibraryDir`, inventory/permissions, SHA-256 pins, `--version` probes, proot command builder, Diagnostics window | done — **all four binaries vendored & pinned**: proot + loader + libtalloc (arm64, NDK r27c) and box64 `v0.4.4` (built + auto-committed by the `build-native` workflow, 2026-10-12); provenance in `docs/NATIVE_RUNTIME.md` |
 | R2 | `ContainerService` (foreground, Stop all), `proot -> box64 -> wine` launch with the explicit env, per-container status, logs into the shared buffer | done (inert until R1 binaries + R3 rootfs exist) |
 | R3 | Rootfs/Wine download: pinned SHA-256 (fail closed), resumable via `Range`, free-space check, progress UI, SAF import | done — **extraction runs in-app** (pure-Kotlin TAR reader + xz-java, verified against the real pinned ubuntu-base and Firefox archives); Firefox ESR artifact pinned from Mozilla |
 | R4 | Diagnostics self-test: `box64 --version`, `wine64 --version`, `wine64 cmd /c echo hello`, green/red/skipped with the failing command + log excerpt | done |
@@ -129,9 +129,10 @@ canonical names for `ListExtensions` and answers `QueryExtension`
 case-insensitively.
 
 **The server runs, renders, takes input and passes 204 wire tests (run for real on a
-JVM with Kotlin 2.1.10); nothing guest-side has connected on a device yet.** The native binaries (R1)
-are not vendored, so `explorer.exe /desktop` cannot be started - `ExplorerSmokeTest`
-scripts its exact wire sequence instead. `XDisplayList` records every drawing request
+JVM with Kotlin 2.1.10); no guest has connected on a device yet.** The native binaries (R1)
+are vendored now, so the first real guest launch (Firefox ESR, then `explorer.exe
+/desktop`) is a provisioning step away - until then `ExplorerSmokeTest` scripts
+explorer's exact wire sequence. `XDisplayList` records every drawing request
 per drawable, `XCanvasRenderer` composites the window stack into the **Start ▸ X
 Desktop** window, raw MotionEvents/key events are translated through `XInput`, and
 top-level maps/configures are redirected to `ShellWindowManager` (SubstructureRedirect)
@@ -152,16 +153,16 @@ fails if that ever changes silently:
 | Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Firefox ESR is **fully plumbed**: pinned R3 artifact, readiness checks that name the missing piece, proot launch plan through R2's launcher on the shell's X server, a private D-Bus session so a second URL reaches the *running* instance, and a Provision **doctor** that names the first blocking prerequisite before apt ever runs. Until the runtime exists, selecting it falls back to an Android browser; Edge/Chromium stay listed with their gating steps | **R1 binaries** + R3 rootfs/GUI libs (Firefox ESR), **R1/R2/R3 + D2** (Edge) |
 | Terminal `wine`/`box64`/`proot`/`cmd` | Answer "not available yet" and name the step | R1 + R2 |
 | Task Manager container rows | Absent (no processes to show) | R2 |
-| Diagnostics wine64 self-test | Command lines are built and shown, not executed; the `proot --version` probe now has a real vendored proot to run | box64 + wine provisioning |
+| Diagnostics wine64 self-test | Command lines are built and shown, not executed; the `proot --version` and `box64 --version` probes have real vendored binaries to run | wine provisioning (payload + prefix) |
 
-The native payload is **partially vendored**: `libproot.so` + `libproot-loader.so`
+The native payload is **fully vendored**: `libproot.so` + `libproot-loader.so`
 (termux/proot `v5.1.107.96`, GPL-2.0, owner-approved for the browser milestone, exec'd
-only as a separate process) and `libtalloc.so` (LGPL-3.0+, SONAME-respelled) are committed
-and SHA-256-pinned; **`libbox64.so` is the remaining piece** and only x86/x64 Wine guests
-need it — one `build-native` (`workflow_dispatch`) run produces it **and commits the
-binary + its SHA-256 pin to `main` automatically** (the dev sandbox OOMs on box64's
-`gtkclass.c`; CI builds it with `-DANDROID=ON` and `-j2`). Provenance and the exact build
-recipe: `docs/NATIVE_RUNTIME.md`.
+only as a separate process), `libtalloc.so` (LGPL-3.0+, SONAME-respelled) and
+`libbox64.so` (box64 `v0.4.4`, MIT — built by the `build-native` workflow with
+`-DANDROID=ON` and `-j2` because the dev sandbox OOMs on box64's `gtkclass.c`, and
+auto-committed with its SHA-256 pin on 2026-10-12; only x86/x64 Wine guests exec it).
+All four are pinned in `checksums.txt` (fail closed). Provenance and the exact build
+recipes: `docs/NATIVE_RUNTIME.md`.
 
 ## Performance
 
@@ -276,8 +277,8 @@ and `jniLibs.useLegacyPackaging = true` keeps them extracted.
 
 Every shipped binary must be pinned by SHA-256 in `app/src/main/assets/native/checksums.txt`;
 a required binary that is unpinned or mismatched is **refused** (`CHECKSUM_NOT_PINNED` /
-`CHECKSUM_MISMATCH`) rather than exec'd — the three vendored files (proot, its loader,
-libtalloc) are pinned. `prepare()` is per-launch now: `ContainerLauncher.requiredFor()`
+`CHECKSUM_MISMATCH`) rather than exec'd — all four vendored files (proot, its loader,
+libtalloc, box64) are pinned. `prepare()` is per-launch now: `ContainerLauncher.requiredFor()`
 demands box64 only for x86/x64 guests, so the native-arm64 Firefox session is not held
 hostage by it. `.github/workflows/build-native.yml` (`workflow_dispatch` only, so it can
 never affect `build-apk`) builds box64 from a pinned ref and **commits `libbox64.so` plus

@@ -38,10 +38,10 @@ and the log excerpt.
 | `libproot.so` | [termux/proot](https://github.com/termux/proot) tag `v5.1.107.96` (commit `a179d3e8a4e045aaa1fb8cc3284f23509d96d353`) | **GPL-2.0** | **VENDORED + pinned** (owner approved: the desktop-browser request requires it; exec'd as a separate process, never linked into app code) |
 | `libproot-loader.so` | same build (`src/loader/loader`) | **GPL-2.0** | **VENDORED + pinned** |
 | `libtalloc.so` | Termux `libtalloc_2.5.0_aarch64.deb` (talloc 2.5.0, samba.org) | LGPL-3.0+ | **VENDORED + pinned** — proot's only dynamic dependency; SONAME respelled `libtalloc.so.2` → `libtalloc.so` (same byte length, NUL-padded) so AGP packages it and `-l:` linking records that exact name as DT_NEEDED. Found at runtime via `LD_LIBRARY_PATH=nativeLibraryDir`, which every launch/probe environment now sets. |
-| `libbox64.so` | [box64](https://github.com/ptitSeb/box64) (rename of the `box64` executable) | MIT | **NOT vendored yet** — only x86/x64 Wine payloads need it; the arm64 browser path does not (`ContainerLauncher.requiredFor()` excludes it for native guests). One `workflow_dispatch` run of `.github/workflows/build-native.yml` (default ref `v0.4.4`) builds it **and commits the binary + its SHA-256 pin to `main` automatically** — see "Running build-native" below. |
+| `libbox64.so` | [box64](https://github.com/ptitSeb/box64) (rename of the `box64` executable), tag `v0.4.4` | MIT | **VENDORED + pinned** — built by the `build-native` `workflow_dispatch` run and auto-committed on 2026-10-12 (`fe5e346`, binary + pin in one commit). Verified in-tree: ELF64 LSB, `DYN` (PIE), Machine **AArch64**, 19,078,712 bytes, sha256 `bec2a61f2c2bee8607d41e6d5b992580ccb9cad878cc6e0a255f539957823710` = the pin. Only x86/x64 Wine payloads exec it; the arm64 browser path does not (`ContainerLauncher.requiredFor()` excludes it for native guests). |
 | `libproot-loader32.so` | proot's 32-bit loader | **GPL-2.0** | **not built, deliberately**: it needs an arm32 compile target and the rootfs is arm64-only. The role is optional; 32-bit guests are unsupported until someone needs WoW64. |
 
-All three vendored files are pinned in `app/src/main/assets/native/checksums.txt`
+All four vendored files are pinned in `app/src/main/assets/native/checksums.txt`
 (fail closed: unpinned/mismatched required binaries are refused, never exec'd), and the
 APK build does not depend on them otherwise — CI stays green either way.
 
@@ -211,6 +211,12 @@ writing first — so both jobs now capture the header to a file, `cat` it into t
 (so a real architecture mismatch is diagnosable), and only then `grep`. Rule for every
 CI script here: **never pipe an LLVM/binutils tool into `grep -q` under `pipefail`.**
 
+**The re-run after that fix succeeded.** box64 `v0.4.4` built, passed the (now
+file-based) AArch64 guard and was auto-committed to `main` as `fe5e346` — binary and
+pin in one commit, exactly as designed. The current `main` CI debug APK was verified
+(2026-10-13) to carry `lib/arm64-v8a/libbox64.so` at 19,078,712 bytes, sha256
+`bec2a61f2c2bee8607d41e6d5b992580ccb9cad878cc6e0a255f539957823710`, matching the pin, alongside the three proot-set binaries at theirs.
+
 Reading that log needed one more trick: the Actions log host answers a 302 to a signed
 Azure blob URL, and following it *with* the GitHub `Authorization` header still
 attached returns `401 Server failed to authenticate the request`. Fetch the redirect
@@ -218,9 +224,9 @@ target with no auth header and the log downloads fine.
 
 ### After the files are in place
 
-For **box64** the workflow does steps 1–2 itself (copy + pin + provenance comment in
-`checksums.txt`); `docs/THIRD_PARTY.md` already carries its entry. What is left is
-manual verification on a device:
+The files are in place: the workflow did steps 1–2 itself (copy + pin + provenance
+comment in `checksums.txt`, commit `fe5e346`) and `docs/THIRD_PARTY.md` carries the
+box64 entry. What remains is the manual verification on a device:
 
 1. `./gradlew assembleDebug` → install → Start ▸ All apps ▸ **Diagnostics** ▸
    *Re-check binaries*, then *Run --version probes*.
@@ -245,8 +251,8 @@ R2 then reuses `ProotCommand.build()` and `WineEnvironment.build()` (with
 | Piece | State |
 | --- | --- |
 | Exec-from-`nativeLibraryDir` model, packaging settings | done |
-| SHA-256 pinning of shipped binaries (fail closed) | done; the three vendored files are pinned in `checksums.txt` |
-| `build-native.yml` (box64 build + auto-vendor, default `v0.4.4`) | fixed (`-DANDROID=ON`, `-j2`, strip + arch guard) and now **auto-commits** `libbox64.so` + its pin; the proot job reproduces the vendored termux/proot build (both verified end-to-end against NDK r27c); needs one dispatch run to produce the binary |
+| SHA-256 pinning of shipped binaries (fail closed) | done; all four vendored files are pinned in `checksums.txt` |
+| `build-native.yml` (box64 build + auto-vendor, default `v0.4.4`) | fixed (`-DANDROID=ON`, `-j2`, strip + arch guard) and now **auto-commits** `libbox64.so` + its pin; the proot job reproduces the vendored termux/proot build (both verified end-to-end against NDK r27c); **the 2026-10-12 dispatch run produced and auto-committed the binary + pin** (`fe5e346`) |
 | Inventory / permissions / `PrepareResult` | done; `prepare(required)` is now per-launch: box64 is only required for x86/x64 guests (`ContainerLauncher.requiredFor`) |
 | `ProcessRunner` seam + `--version` probes with explicit env | done; probe/self-test environments now carry `LD_LIBRARY_PATH` + `PROOT_LOADER*` (libtalloc resolution) |
 | proot command line incl. fixed prefix bind + extra drives | done; `guestPrefix` parameter added for non-Wine sessions (Firefox binds `/root/.mozilla`) |
@@ -257,4 +263,4 @@ R2 then reuses `ProotCommand.build()` and `WineEnvironment.build()` (with
 | R3 download (pinned SHA-256, resume, space check, SAF import) | done; **extraction no longer needs proot** - the in-app `TarExtractor` (gzip + xz via org.tukaani) was verified against the real pinned ubuntu-base and Firefox archives (2615 files / 207 symlinks / 0 skipped; launcher + libxul intact) |
 | Rootfs provisioning (GTK3/X11/fonts/CA-certs via apt inside proot) | `RootfsProvisioner` (proot `-0`, `APT::Sandbox::User=root`, dpkg `--force-unsafe-io`/`--force-confold`) + **Provision doctor** that names the first blocking prerequisite **and really execs proot** (`/bin/true`, `id`, `apt-get --version` in the same jail) so an argument/ptrace/fake-root problem is caught in seconds, with the exact command line to rerun; needs a device to run |
 | R4 self-test (3 steps, verdicts, failing command + excerpt) | done, execution needs box64 + wine provisioning for the wine rows |
-| The binaries themselves | **proot + loader + talloc vendored & pinned** (recipe above); **box64 pending one dispatch run** of `build-native.yml`, which commits the binary + pin automatically; loader32 deliberately not built |
+| The binaries themselves | **all four vendored & pinned**: proot + loader + talloc (recipe above); box64 `v0.4.4` built + auto-committed by `build-native.yml` on 2026-10-12 (`fe5e346`, AArch64 ELF verified in-tree); loader32 deliberately not built |
