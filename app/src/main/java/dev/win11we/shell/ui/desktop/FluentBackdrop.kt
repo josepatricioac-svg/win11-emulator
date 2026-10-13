@@ -1,6 +1,7 @@
 package dev.win11we.shell.ui.desktop
 
 import android.graphics.Bitmap
+import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.LinearGradient
 import android.graphics.RadialGradient
@@ -12,11 +13,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.ImageShader
 import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
@@ -98,7 +99,7 @@ object FluentBackdrop {
         val canvas = android.graphics.Canvas(bitmap)
         val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
         paint.colorFilter = ColorMatrixColorFilter(
-            android.graphics.ColorMatrix().apply { setSaturation(saturation) },
+            ColorMatrix().apply { setSaturation(saturation) },
         )
         val w = width.toFloat()
         val h = height.toFloat()
