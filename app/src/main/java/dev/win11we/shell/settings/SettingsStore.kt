@@ -33,6 +33,7 @@ object SettingsKeys {
     const val SHOW_CONTAINERS_PIN = "shell.showContainersPin"
     const val BOX64_PRESET = "container.box64Preset"
     const val ROOTFS_LOCATION = "container.rootfsLocation"
+    const val BOOT_TO_DESKTOP_SESSION = "shell.bootToDesktopSession"
 
     val ALL = listOf(
         THEME_MODE,
@@ -44,10 +45,11 @@ object SettingsKeys {
         SHOW_CONTAINERS_PIN,
         BOX64_PRESET,
         ROOTFS_LOCATION,
+        BOOT_TO_DESKTOP_SESSION,
     )
 
     /** Keys whose value is a boolean, everything else is a string. */
-    val BOOLEAN_KEYS = setOf(WINDOW_ANIMATIONS, SHOW_BROWSER_PIN, SHOW_CONTAINERS_PIN)
+    val BOOLEAN_KEYS = setOf(WINDOW_ANIMATIONS, SHOW_BROWSER_PIN, SHOW_CONTAINERS_PIN, BOOT_TO_DESKTOP_SESSION)
 }
 
 /** Box64 presets, offered per container in P2; stored now so the UI is final. */
@@ -116,6 +118,18 @@ class SettingsStore(private val prefs: ShellPreferences) {
     var rootfsLocation: String
         get() = values[SettingsKeys.ROOTFS_LOCATION].orEmpty()
         set(value) = write(SettingsKeys.ROOTFS_LOCATION, value)
+
+    /**
+     * Boot straight into the emulation session: when true (the default), the
+     * shell starts the embedded X server and opens the X Desktop window
+     * maximized as soon as the desktop is measured - "start the emulator, the
+     * desktop is inside it". The Win11 shell stays fully reachable: closing or
+     * minimizing that window reveals it, and turning this off restores the
+     * shell-first boot (the X Desktop then opens from Start ▸ All apps).
+     */
+    var bootToDesktopSession: Boolean
+        get() = booleanValue(SettingsKeys.BOOT_TO_DESKTOP_SESSION, true)
+        set(value) = write(SettingsKeys.BOOT_TO_DESKTOP_SESSION, value.toString())
 
     /** The pinned browser when it is still installed, otherwise null. */
     fun preferredBrowserOrNull(installed: Collection<String>): String? =

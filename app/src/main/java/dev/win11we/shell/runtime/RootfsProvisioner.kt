@@ -99,7 +99,8 @@ object RootfsProvisioner {
     }
 
     /**
-     * apt/dpkg options every in-proot apt run needs:
+     * apt/dpkg options every in-proot apt run needs (shared with
+     * [WineProvisioner], which installs the Wine payload under the same rules):
      * - `APT::Sandbox::User=root`: apt drops to its `_apt` user for fetching;
      *   under proot's fake root every jail file appears root-owned, so `_apt`
      *   (uid 100) can write nowhere and fetches fail. There is no real privilege
@@ -110,7 +111,7 @@ object RootfsProvisioner {
      * - `--force-confold`: never prompt about config files; noninteractive cannot
      *   catch every debconf path.
      */
-    private const val APT_OPTIONS = "-o APT::Sandbox::User=root " +
+    const val APT_OPTIONS = "-o APT::Sandbox::User=root " +
         "-o Dpkg::Options::=--force-unsafe-io " +
         "-o Dpkg::Options::=--force-confold"
 

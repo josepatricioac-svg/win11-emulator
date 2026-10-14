@@ -224,3 +224,23 @@ Honest limits while gated (each named by the readiness message, nothing silent):
 3. Rootfs flavour for the browser path: the Ubuntu 22.04 rootfs from R3 is enough for
    Firefox ESR once the GTK3/dbus-glib stack is provisioned (same dependency step Wine
    needs, R4/P2); Chromium may want a newer mesa/libGL than the rootfs ships.
+
+## Hardened launch plan (2026-10-14 pass)
+
+The crash/white-screen class of failures this document used to leave open now has
+named fixes, all implemented and unit-tested (details + rationale per flag:
+`docs/WINE_RUNTIME.md` §4):
+
+- **Firefox ESR (native arm64)**: `/dev/shm` bind (Android's `/dev` has none),
+  `PROOT_NO_SECCOMP=1` (proot's seccomp filter misbehaves on Android kernels),
+  software-rendering prefs + `LIBGL_ALWAYS_SOFTWARE`/`GALLIUM_DRIVER=llvmpipe`
+  (the embedded display has no GLX/DRI — GPU probing is how a first paint turns
+  white), sandbox-off env and E10S-off as before, resolv.conf DNS as before.
+- **Chromium/Electron under Wine** (the BYO-installer engines, Edge step 4):
+  `runtime/WineBrowserLaunch.kt` carries the hardened argv
+  (`--no-sandbox --disable-setuid-sandbox --disable-gpu --disable-gpu-compositing
+  --disable-dev-shm-usage --disable-features=Vulkan --no-first-run
+  --no-default-browser-check`), the `CHROME_DEVEL_SANDBOX` env additions and a
+  complete `RuntimeRequest` factory bound to the container's isolated prefix and
+  `DISPLAY=:100`. Installing the browser .exe itself still has no UI — the
+  catalogue rows stay honestly gated.

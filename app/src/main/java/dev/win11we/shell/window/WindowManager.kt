@@ -229,6 +229,10 @@ fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager
                     runtime = LauncherRuntime(launcher, appContext),
                     onStartRuntime = { ContainerService.start(appContext) },
                     onStopRuntime = { ContainerService.stopAll(appContext) },
+                    // Phase 2B: the Prefix Manager verbs (wineboot/repair/payload
+                    // install) on guarded workers - the same rootfs resolution as
+                    // everything else, so the UI never judges a different tree.
+                    prefixOps = dev.win11we.shell.runtime.WinePrefixOps(appContext, store.rootfsLocation),
                 )
             }
             "diagnostics" -> DiagnosticsState(

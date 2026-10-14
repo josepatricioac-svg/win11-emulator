@@ -122,14 +122,24 @@ object FirefoxSession {
     fun sessionCommand(url: String? = null, withDesktop: Boolean = true): List<String> =
         listOf("/bin/bash", "-c", dbusBootstrapScript(guestCommand(url), withDesktop))
 
-    /** Bind mounts for one session: persistent profile, X socket dir and guest DNS. */
-    fun binds(profileDir: File, xSocketUnixDir: File, resolvConf: File): List<Bind> = listOf(
+    /**
+     * Bind mounts for one session: persistent profile, X socket dir, guest DNS
+     * and (when the shell provides one) /dev/shm. Android's /dev has NO shm
+     * entry, and Chromium/Gecko shared-memory paths plus Wine's esync all ask
+     * for it - [dev.win11we.shell.runtime.RuntimePaths.ensureShmDir] creates a
+     * 1777 host dir that every session binds here, so the guest always sees a
+     * conventional /dev/shm.
+     */
+    fun binds(profileDir: File, xSocketUnixDir: File, resolvConf: File, shmDir: File? = null): List<Bind> = listOf(
         Bind(profileDir.absolutePath, GUEST_PROFILE_DIR),
         Bind(xSocketUnixDir.absolutePath, GUEST_X11_DIR),
         // Android has no /etc/resolv.conf for the jail: the shell writes one
         // (public resolvers, see RootfsProvisioner) and binds it over the guest's.
         Bind(resolvConf.absolutePath, "/etc/resolv.conf"),
-    )
+    ) + listOfNotNull(shmDir?.let { Bind(it.absolutePath, GUEST_SHM_DIR) })
+
+    /** The guest's POSIX shared-memory dir; bound from the app-provided host dir. */
+    const val GUEST_SHM_DIR = "/dev/shm"
 
     /** True when the verified tarball has been unpacked into place. */
     fun isInstalled(rootfsDir: File): Boolean = File(rootfsDir, "opt/firefox-esr/firefox").isFile
@@ -181,6 +191,19 @@ object FirefoxEnvironment {
         put("MOZ_DISABLE_RDD_SANDBOX", "1")
         put("MOZ_DISABLE_NPAPI_SANDBOX", "1")
         put("MOZ_DISABLE_SOCKET_SANDBOX", "1")
+        // The embedded X server is a SOFTWARE renderer with no GLX/DRI/Vulkan
+        // (docs/X_SERVER.md - advertising GL without a device would be a lie).
+        // Gecko probing for GL inside the jail is how a first paint can end up
+        // white or stalled; these keep every rasteriser in userspace, which is
+        // the honest - and only - path here. The matching Firefox prefs
+        // (layers.acceleration.disabled & co.) live in FirefoxPolicies.userJs.
+        put("LIBGL_ALWAYS_SOFTWARE", "1")
+        put("GALLIUM_DRIVER", "llvmpipe")
+        // proot's own seccomp syscall filter misbehaves on several Android
+        // kernels; its documented kill switch is plain ptrace. Provisioning and
+        // the doctor already run with it - guest sessions must too, or children
+        // die in ways that read as "the browser is broken" (Phase-2A seccomp fix).
+        put("PROOT_NO_SECCOMP", "1")
         guestAudioSocket?.let { put("PULSE_SERVER", "unix:$it") }
     }.toSortedMap()
 }

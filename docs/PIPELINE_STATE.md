@@ -84,3 +84,46 @@ Calendar, Mail, Weather, Edge, Recycle Bin, Task Manager, context menus
 shell; it is a design reference (React/DOM code is not reusable in Compose).
 The repo's existing "restyle steps 1–2" (Fluent tokens, Inter, motion curves,
 mica/acrylic backdrop) are the beginning of that adoption.
+
+## Snapshot 2026-10-14 — single-window lifecycle + Prefix Manager pass (this repo, uncommitted → committed on main)
+
+Verified against this working tree with the off-Gradle harness (kotlinc 2.1.10,
+android.jar 35, desktop Compose 1.8.2 jars, stubs): **681 tests green** (the
+624-test subset of the 644 baseline that the harness compiles — the excluded
+suites are the Compose-UI/Robolectric ones, same rule as before — plus 57 new).
+
+**Phase 1 (embed the X server / one window):**
+- The X server was already in-process (D1a–D1g); what was missing was the
+  lifecycle contract: `runtime/SessionLifecycle.kt` (pure, seam-tested) +
+  `MainActivity.onDestroy` teardown in the fixed order wineserver -k → stopAll
+  → `XServer.stop()` (which previously had NO callers at all).
+- Boot-to-session: Settings ▸ Containers ▸ *Boot into X Desktop session*
+  (default ON) — DesktopScreen ensures the display and opens the X Desktop
+  window maximized; one Activity, desktop inside.
+- `XDesktopState.onSurfaceSize` now keeps the X screen locked to the surface
+  (`XServer.resizeScreen` + root ConfigureNotify broadcast — previously the
+  screen size froze at first start and letterboxed forever).
+- `PROOT_NO_SECCOMP=1` added to FirefoxEnvironment + WineEnvironment (was only
+  in the provision/doctor envs).
+
+**Phase 2A (browser):** `/dev/shm` provider (`RuntimePaths.ensureShmDir`, mode
+1777 best-effort) bound into every session; Firefox software-render prefs +
+`LIBGL_ALWAYS_SOFTWARE`/`GALLIUM_DRIVER` (white-screen guard — the display has
+no GLX, by design); `runtime/WineBrowserLaunch.kt` = hardened Chromium/
+Electron-under-Wine launch plans + a complete `RuntimeRequest` factory (pure,
+tested; UI wiring waits on the BYO-installer step, as documented).
+
+**Phase 2B (Wine):** `runtime/WineProvisioner.kt` (pinned debs via dpkg + apt -f,
+apt fallback, disk-verified verdict) and `runtime/WinePrefixManager.kt`
+(create/list/validate/repair/delete; wineboot --init + wineserver -w; registry
+header + #arch validation; stale .update-lock cleanup; graceful kill before
+destroy) + `runtime/WinePrefixOps.kt` (guarded workers) + Container Manager UI
+(Install Wine payload / Initialize prefix / Repair + state chips). Deliberate
+pin updates: ContainerLauncherTest (refusal now names *Initialize prefix*),
+FirefoxPoliciesTest, FirefoxSessionTest, ContainerTest.
+
+**Not done / not claimed:** no device certification yet (playbook in
+docs/WINE_RUNTIME.md §6); no UI for installing arbitrary Windows apps into a
+prefix; `win32` prefixes stay unavailable on arm64 (named, not silently);
+RoadmapGatingTest untouched (desktop-engine catalogue stays statically gated —
+readiness is the dynamic half, as before).

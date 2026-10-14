@@ -83,6 +83,17 @@ object FirefoxPolicies {
         "browser.newtabpage.activity-stream.feeds.section.topstories" to "false",
         "browser.newtabpage.activity-stream.feeds.snippets" to "false",
         "browser.pagethumbnails.capturing_disabled" to "true",
+        // --- software rendering guards (Phase-2A white-screen fix) -----------
+        // The embedded X server has no GLX/DRI/Vulkan - it is a software
+        // renderer by design (docs/X_SERVER.md). Firefox probing for GPU
+        // acceleration inside the jail is a known white-window/stalled-paint
+        // source on proot stacks, so hardware compositing and WebRender are
+        // pinned OFF and the basic software path is pinned ON. These match the
+        // LIBGL_ALWAYS_SOFTWARE/GALLIUM_DRIVER env in FirefoxEnvironment.
+        "layers.acceleration.disabled" to "true",
+        "gfx.webrender.all" to "false",
+        "gfx.webrender.software" to "false",
+        "media.ffmpeg.vaapi.enabled" to "false",
         "network.dns.disablePrefetch" to "false",
         "network.prefetch-next" to "true",
     ).joinToString(separator = "\n", postfix = "\n") { (key, value) ->

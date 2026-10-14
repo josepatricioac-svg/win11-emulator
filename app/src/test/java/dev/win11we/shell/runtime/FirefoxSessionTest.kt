@@ -106,6 +106,19 @@ class FirefoxSessionTest {
     }
 
     @Test
+    fun `binds carry dev-shm when the shell provides one - and stay three without it`() {
+        val profile = File(tmp.root, "p")
+        val xDir = File(tmp.root, "x")
+        val resolv = File(tmp.root, "r")
+        val shm = File(tmp.root, "shm")
+        val withShm = FirefoxSession.binds(profile, xDir, resolv, shm)
+        assertEquals(4, withShm.size)
+        assertTrue(withShm.map { it.argument }.contains("${shm.absolutePath}:${FirefoxSession.GUEST_SHM_DIR}"))
+        // Backwards compatible: no shm dir -> the historical three binds.
+        assertEquals(3, FirefoxSession.binds(profile, xDir, resolv).size)
+    }
+
+    @Test
     fun `the environment is firefox-specific explicit and sorted - no wine variables`() {
         val env = launcher.buildEnvironment(request(null, File(tmp.root, "p"), File(tmp.root, "x")))
         assertEquals(RuntimePaths.X_DISPLAY, env["DISPLAY"])
@@ -115,6 +128,12 @@ class FirefoxSessionTest {
         assertEquals("1", env["MOZ_DISABLE_GMP_SANDBOX"])
         assertEquals("1", env["MOZ_DISABLE_RDD_SANDBOX"])
         assertEquals("1", env["MOZ_FORCE_DISABLE_E10S"]) // proot ptrace cost: one process
+        // The embedded X server is a software renderer: no GL may be probed.
+        assertEquals("1", env["LIBGL_ALWAYS_SOFTWARE"])
+        assertEquals("llvmpipe", env["GALLIUM_DRIVER"])
+        // proot's seccomp filter misbehaves on Android kernels - the documented
+        // kill switch must be set for guest sessions too (Phase-2A seccomp fix).
+        assertEquals("1", env["PROOT_NO_SECCOMP"])
         assertTrue(env.getValue("PATH").endsWith("/opt/firefox-esr"))
         assertNull("no Wine environment for this session", env["WINEPREFIX"])
         assertNull(env["WINEDEBUG"])
@@ -225,6 +244,13 @@ class FirefoxSessionTest {
         assertEquals(File(files, "tmp/.X11-unix"), RuntimePaths.xSocket(files).parentFile)
         assertEquals(File(files, "browser/firefox-profile"), RuntimePaths.browserProfileDir(files))
         assertEquals(File(files, "tmp/resolv.conf"), RuntimePaths.resolvConf(files))
+        assertEquals(File(files, "downloads"), RuntimePaths.downloadDir(files))
+        // /dev/shm provider: Android's /dev has no shm entry, so every session
+        // binds this host dir at the guest's /dev/shm (Chromium/Gecko/esync).
+        assertEquals(File(files, "tmp/shm"), RuntimePaths.shmDir(files))
+        val shm = RuntimePaths.ensureShmDir(files)
+        assertTrue(shm.isDirectory)
+        assertTrue(shm.canWrite())
         // The socket path must stay under the unix-socket length limit (~108 bytes);
         // app data dirs are deep, so this is a real constraint worth pinning.
         assertTrue(RuntimePaths.xSocket(files).absolutePath.length < 100)

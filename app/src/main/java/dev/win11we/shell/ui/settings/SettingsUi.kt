@@ -30,6 +30,7 @@ val SettingsCatalogue: List<SettingsEntry> = listOf(
     SettingsEntry("space", "Free space", SettingsSection.STORAGE, "disk storage space"),
     SettingsEntry("preset", "Box64 preset", SettingsSection.CONTAINERS, "office dotnet electron general"),
     SettingsEntry("runtime", "Runtime status", SettingsSection.CONTAINERS, "proot box64 wine not installed"),
+    SettingsEntry("session", "Boot into X Desktop session", SettingsSection.CONTAINERS, "emulation boot single surface x11 start"),
     SettingsEntry("selftest", "Self-test", SettingsSection.DIAGNOSTICS, "wine64 box64 version log"),
     SettingsEntry("version", "Version", SettingsSection.ABOUT, "build version sdk"),
 )

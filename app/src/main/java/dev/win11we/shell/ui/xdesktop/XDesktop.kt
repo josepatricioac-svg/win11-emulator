@@ -601,20 +601,44 @@ class XDesktopState {
     private var offsetY = 0f
 
     fun onSurfaceSize(widthPx: Int, heightPx: Int) {
-        if (started || startError != null || widthPx <= 0 || heightPx <= 0) return
-        // Pass-through session model: the shell does NOT claim
-        // SubstructureRedirect (the claim is exclusive - holding it would lock
-        // a guest WM like openbox out, and openbox is what frames/decorates the
-        // desktop the user sees in this surface).
-        // Per-client protocol reports land in the shell log, which the Terminal and
-        // Diagnostics screens both read. This is what makes a silent guest crash
-        // diagnosable: the report names every extension the client queried and
-        // every request we could not implement.
-        XServer.protocolReporter = { line -> SharedLog.info(line) }
-        if (XServer.start(widthPx, heightPx)) {
-            started = true
-        } else {
-            startError = XServer.lastError
+        if (widthPx <= 0 || heightPx <= 0) return
+        if (!started && startError == null) {
+            // Pass-through session model: the shell does NOT claim
+            // SubstructureRedirect (the claim is exclusive - holding it would lock
+            // a guest WM like openbox out, and openbox is what frames/decorates the
+            // desktop the user sees in this surface).
+            // Per-client protocol reports land in the shell log, which the Terminal and
+            // Diagnostics screens both read. This is what makes a silent guest crash
+            // diagnosable: the report names every extension the client queried and
+            // every request we could not implement.
+            XServer.protocolReporter = { line -> SharedLog.info(line) }
+            if (XServer.start(widthPx, heightPx)) {
+                started = true
+            } else {
+                startError = XServer.lastError
+                return
+            }
+        }
+        if (!started) {
+            // Recovery: the first bind may have failed (or this window predates
+            // the boot), but the server can come up later - the browser launcher
+            // and the boot flow both call ensureRunning. Adopt it.
+            if (XServer.running) {
+                started = true
+                startError = null
+            } else {
+                return
+            }
+        }
+        // Keep the X screen locked to the surface: the server may already have
+        // been running (boot-to-session, or a browser launch that called
+        // ensureRunning at the 1280x800 default), and this window may be
+        // resized or rotated at any time. resizeScreen keeps clients alive and
+        // notifies them (root ConfigureNotify) - no letterboxing drift, one
+        // desktop, one surface.
+        val screen = XServer.document.screen
+        if (screen.widthPx != widthPx || screen.heightPx != heightPx) {
+            XServer.resizeScreen(widthPx, heightPx)
         }
     }
 

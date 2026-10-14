@@ -250,8 +250,18 @@ object XServer {
 
     /** Resize the root (the native surface changed); windows and clients stay alive. */
     fun resizeScreen(widthPx: Int, heightPx: Int) {
+        val before = document.screen
         document.setScreenSize(widthPx, heightPx)
         applyWindowManager()
+        if (before.widthPx != widthPx || before.heightPx != heightPx) {
+            contentRevision++
+            // Tell every client the root reconfigured. There is no RANDR here
+            // (honestly absent - see docs/X_SERVER.md), and a root
+            // ConfigureNotify is what a guest WM/GTK falls back to for screen
+            // geometry changes; without it openbox keeps the old workarea after
+            // a rotation or a window resize.
+            broadcaster { it.sendEvent(document.rootId, X11.EV_CONFIGURE_NOTIFY) }
+        }
     }
 
     /**

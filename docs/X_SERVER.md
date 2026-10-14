@@ -569,3 +569,44 @@ Anything that speaks core X11 to the abstract socket `@/tmp/.X11-unix/X100` — 
 (unmanaged, or framed once the session's window manager is up; D1g pass-through).
 Tap the surface to focus it, then type with the soft keyboard; the pointer shows the
 client-chosen cursor shape.
+
+## Lifecycle: one window, one process (this pass)
+
+The server has never been a separate app - it is the in-process `XServer` object,
+and this section pins the *contract* around it (implemented in
+`runtime/SessionLifecycle.kt`, wired in `MainActivity`/`DesktopScreen`):
+
+- **Boot**: with Settings ▸ Containers ▸ *Boot into X Desktop session* on (the
+  default), the shell calls `SessionLifecycle.boot` → `XServer.ensureRunning()`
+  and opens the X Desktop window **maximized**: the emulator starts, the desktop
+  is inside it, and there is exactly one window (the single `MainActivity`).
+  Every other entry point that needs the display (the X Desktop surface itself,
+  `DesktopBrowserLauncher`) calls the same idempotent ensure - guests can never
+  race a server that is not listening yet.
+- **Resize**: `XDesktopState.onSurfaceSize` now keeps the X screen locked to the
+  surface: rotation or a window resize calls `XServer.resizeScreen`, which
+  re-lays the root, keeps clients alive and broadcasts a root `ConfigureNotify`
+  to every connection - the no-RANDR substitute a guest WM (openbox) needs to
+  re-place its windows. Previously the screen size was frozen at first start and
+  the renderer letterboxed forever after.
+- **Stop** (`MainActivity.onDestroy`; rotation does not destroy the Activity -
+  the manifest declares the configChanges): the order is fixed and unit-tested:
+  1. bounded graceful `wineserver -k` for every RUNNING Wine session (the
+     registry flush that keeps prefixes un-corrupted - see `docs/WINE_RUNTIME.md`),
+  2. `ContainerLauncher.stopAll` - destroying the proot children takes the whole
+     guest tree with them (`--kill-on-exit`),
+  3. `XServer.stop()` last, so no client can reconnect into a half-torn-down
+     display; `stop()` releases grabs/selections/redirects and closes the socket.
+  Every step is guarded: one failing step never strands the ones after it, and
+  the report (`guests stopped: yes, X server stopped: yes, wineserver kills: n/m`)
+  goes to logcat + the shared log.
+- **"Stop all"** (notification / Container Manager) stops guests only and keeps
+  the display alive - the emulator window is still open in that case. If the
+  process itself is killed, the in-process server dies with it and Android reaps
+  the guest processes via the app cgroup (plus `--kill-on-exit`), so there is no
+  orphan path.
+- **IPC**: unchanged and internal - the private abstract unix socket
+  `@/tmp/.X11-unix/X100` (`DISPLAY=:100`, chosen over `:0` to avoid colliding
+  with the conventional root display; proot passes the abstract namespace
+  through untouched). Input flows Compose → `XInput` → connections in-process;
+  the clipboard bridge ties PRIMARY/CLIPBOARD to Android's clipboard.

@@ -76,7 +76,12 @@ object DesktopEngineReadiness {
         return mapOf(
             FirefoxSession.ENGINE_ID to firefox,
             "desktop:edge-arm64" to EngineReadiness(false, "Not built yet: needs the Edge arm64 payload (licence accept) and D2 per-window surfaces"),
-            "desktop:firefox-wine" to EngineReadiness(false, "Needs libbox64.so (one build-native dispatch run commits + pins it automatically) and a Wine payload/prefix (R4/P2)"),
+            "desktop:firefox-wine" to EngineReadiness(
+                false,
+                "Bring-your-own Windows Firefox inside a container prefix: install the Wine " +
+                    "payload, Initialize prefix, then run firefox.exe through WineBrowserLaunch's " +
+                    "hardened plan (box64 is vendored; no UI wiring yet)",
+            ),
             "desktop:chromium-arm64" to EngineReadiness(false, "Not built yet: no pinned Chromium arm64 artifact in the R3 manifest"),
         )
     }

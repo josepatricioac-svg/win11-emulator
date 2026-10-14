@@ -6,7 +6,43 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 
 - `arm64-v8a` only, `minSdk 28`, `targetSdk 34`
 - The app owns the X server, the processes (foreground service) and the downloads.
+- **One window, one process, one lifecycle**: the X desktop renders inside the single
+  `MainActivity` (boot goes straight into it - Settings ▸ Containers ▸ *Boot into X
+  Desktop session*), the X server is an in-process module (`x11/`, private abstract
+  unix socket, `DISPLAY=:100`), and app teardown stops guests (graceful
+  `wineserver -k` first) and then the display - no orphan processes, no second window.
 - No Microsoft assets: fonts, icons, artwork and the wallpaper are original or open-licensed.
+
+## Architecture (one window, inside out)
+
+```
+┌────────────────────────── ONE Android window: MainActivity ──────────────────────────┐
+│  Compose shell (Win11-style): wallpaper · taskbar · Start · shell windows            │
+│  ┌──────────────────── X Desktop window (maximized at boot) ───────────────────┐     │
+│  │  Compose canvas surface ── renders ──►  x11/ EMBEDDED X SERVER (in-process) │     │
+│  │  touch / mouse / keyboard / IME ────►  XInput ─► XConnection dispatch       │     │
+│  │  Android clipboard ◄─── XClipboardBridge ───► X selections (PRIMARY/CLIP)   │     │
+│  └───────────────▲─────────────────────────────────────────────────────────────┘    │
+│                  │ abstract unix socket /tmp/.X11-unix/X100  (DISPLAY=:100)          │
+│  SessionLifecycle│boot: X up before guests · shutdown: wineserver -k → guests → X    │
+└──────────────────┼───────────────────────────────────────────────────────────────────┘
+                   │ (proot does not isolate the abstract namespace - no bind needed)
+        ┌──────────┴───────────────────────────────┐
+        │ proot jail: Ubuntu 22.04 arm64 rootfs    │  child processes of THIS app,
+        │  ├ openbox (guest WM, pass-through D1g)  │  killed by proot --kill-on-exit
+        │  ├ Firefox ESR (native arm64)            │  and by the Android cgroup
+        │  │   /dev/shm bind · seccomp off · SW GL │
+        │  └ box64 → wine64 (arm64 Wine 9)         │
+        │      WINEPREFIX=/root/.wine  ◄── bind: <files>/containers/<id>/prefix
+        │      (one ISOLATED prefix per container; WinePrefixManager:
+        │       create/list/validate/repair/delete · WineProvisioner: payload)
+        └──────────────────────────────────────────┘
+```
+
+There is no external X server app and no second Activity - the server, the renderer,
+the input translation and the clipboard bridge all live in this process (`x11/`,
+`ui/xdesktop/`), and the guests are children of it. Lifecycle contract and stop
+ordering: `runtime/SessionLifecycle.kt`; Wine prefix contract: `docs/WINE_RUNTIME.md`.
 
 ## Roadmap
 
@@ -186,10 +222,10 @@ fails if that ever changes silently:
 
 | Thing | State today | Unlocked by |
 | --- | --- | --- |
-| Container Manager (Wine) | Real UI, real persisted containers; `libbox64.so` is now vendored + pinned, so Start validates binaries, rootfs and then the prefix — and refuses with the whole chain named (no Wine payload → no `wineboot` → no prefix) instead of the old "created on first launch" promise nothing kept | Goal 2 step 2: Wine payload decision + `wineboot` |
-| Wine prefix, `wineboot`, installing apps | Not created, and nothing pretends otherwise: `ContainerLauncher.validate` refuses with `PREFIX_MISSING`, names `wineboot`, quotes whether the rootfs even has a Wine payload (`WinePayload`), and treats an empty prefix directory as un-initialised rather than launching into it | Goal 2 step 2 (R4) |
-| Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Firefox ESR is **fully plumbed**: pinned R3 artifact, readiness checks that name the missing piece, proot launch plan through R2's launcher on the shell's X server, a private D-Bus session so a second URL reaches the *running* instance, and a Provision **doctor** that names the first blocking prerequisite before apt ever runs. Until the runtime exists, selecting it falls back to an Android browser; Edge/Chromium stay listed with their gating steps | **R1 binaries** + R3 rootfs/GUI libs (Firefox ESR), **R1/R2/R3 + D2** (Edge) |
-| Terminal `wine`/`box64`/`proot`/`cmd` | Answer "not available yet" and name the step | R1 + R2 |
+| Container Manager (Wine) | Real UI, real persisted containers, and the **Prefix Manager**: *Install Wine payload* provisions the rootfs from the pinned Wine 9.0 debs (apt-resolved deps, disk-verified), *Initialize prefix* runs `wineboot --init && wineserver -w` for exactly one container's isolated prefix, *Repair* clears stale locks and re-runs wineboot. Start still validates binaries → rootfs → prefix and refuses with the whole chain named | device provisioning (rootfs download + payload install) |
+| Wine prefix, `wineboot`, installing apps | Prefixes are created/validated/repaired by `WinePrefixManager` (registry-header + `#arch` validation, `.update-lock` cleanup, graceful `wineserver -k` on app exit via `SessionLifecycle`); a prefix that was never initialised is still refused at launch. What has NO UI yet: installing arbitrary Windows apps into a prefix (`Start` runs `wine64 cmd`; the hardened browser-exe plan lives in `WineBrowserLaunch.request`, unwired) | a BYO-installer flow (PIPELINE_PLAN step 4) |
+| Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Firefox ESR is **fully plumbed and hardened**: pinned R3 artifact, readiness checks that name the missing piece, proot launch plan through R2's launcher on the shell's X server, a private D-Bus session so a second URL reaches the *running* instance, a Provision **doctor**, and the Phase-2A fixes: `/dev/shm` bind (1777), `PROOT_NO_SECCOMP=1`, sandbox-off env, software-rendering prefs (the no-GLX white-screen guard), resolv.conf DNS. Chromium/Electron **under Wine** get the same class of fixes as a pure launch plan (`WineBrowserLaunch`: `--no-sandbox --disable-gpu --disable-dev-shm-usage --disable-setuid-sandbox …` on `:100`). Until the runtime is provisioned on-device, selecting a desktop engine falls back to an Android browser; Edge/Chromium stay listed with their gating steps | device provisioning (Firefox ESR), **R1/R2/R3 + D2 + BYO installer** (Edge/Chromium) |
+| Terminal `wine`/`box64`/`proot`/`cmd` | Answer "not available yet" and name the step | R2 pty executor |
 | Task Manager container rows | Absent (no processes to show) | R2 |
 | Diagnostics wine64 self-test | Command lines are built and shown, not executed; the `proot --version` and `box64 --version` probes have real vendored binaries to run | wine provisioning (payload + prefix) |
 
@@ -346,23 +382,87 @@ tuning, with the container's `extraEnv` applied last so a user can override anyt
 `GuestPaths` converts host↔Windows paths (longest mapping wins) for the P1 "open with"
 plumbing.
 
-**What a container cannot do yet, stated plainly:** Start validates, in order, the
-pinned binary set (proot + box64 both vendored now), the extracted rootfs, and the
-prefix — and the prefix is where the chain stops. A prefix is *populated* by running
-`wineboot` inside the rootfs; `wineboot` needs a Wine payload; no payload is
-provisioned (the browser's Provision list installs GTK3/X11/fonts, not Wine). The
-refusal therefore names all four links, quotes the first missing Wine path it looked
-for, and points at Diagnostics ▸ Run self-test, whose three R4 rows
-(`box64 --version`, `wine64 --version`, `wine64 cmd /c echo hello`) show exactly how
-far the chain gets — the first is green on device now, the other two wait on Goal 2
-step 2. An empty prefix directory is refused as "never initialised" rather than being
-handed to wine mid-launch. `RuntimePaths.ensurePrefix` only mkdirs (the Firefox
-profile is its one caller) and its KDoc says so.
+**What a container still cannot do, stated plainly:** Start validates, in order, the
+pinned binary set (proot + box64 both vendored), the extracted rootfs, and the
+prefix. The prefix is no longer a dead end - the **Prefix Manager** builds it (see
+below) - but every link still has to exist on the device: no rootfs download, no
+Wine payload install and no `wineboot` run means Start refuses with the whole chain
+named, quotes the first missing Wine path it looked for, and points at Diagnostics ▸
+Run self-test, whose three R4 rows (`box64 --version`, `wine64 --version`,
+`wine64 cmd /c echo hello`) show exactly how far the chain gets. An empty prefix
+directory is refused as "never initialised" rather than being handed to wine
+mid-launch. There is no UI yet for installing arbitrary Windows apps into a prefix
+(Start runs `wine64 cmd`; the hardened browser-exe launch plan lives in
+`WineBrowserLaunch.request`, unwired until the BYO-installer step).
 
 Start/Stop/Restart go through a `ContainerRuntime` interface; today's
 `NotInstalledRuntime` answers with exactly which step is missing (R1 binaries, R2
 service, R3 rootfs) instead of failing silently, and the container is marked
 "Not ready" with that message.
+
+## Wine prefixes (the Prefix Manager)
+
+`runtime/WinePrefixManager.kt` is the create/list/validate/repair/delete module the
+Container Manager's buttons drive (`runtime/WinePrefixOps.kt` runs it on guarded
+workers; the logic itself is pure and unit-tested):
+
+- **Isolation is structural**: every container owns `<files>/containers/<id>/prefix`,
+  and every launch binds exactly ONE prefix at the fixed guest path `/root/.wine`
+  with `WINEPREFIX` pointing at that bind. Two containers cannot see each other's
+  prefix, and the host's `~/.wine` is never involved. The environment is fully
+  explicit (`WINEARCH` from the container arch, `WINEDLLOVERRIDES=mscoree,mshtml=`
+  so Gecko/Mono are never auto-downloaded, `DISPLAY=:100` - the embedded server).
+- **Create** = `wineboot --init && wineserver -w` inside the usual proot jail
+  (wineboot initialises; `wineserver -w` waits for the server that wineboot started
+  to exit - the registry files only land on disk when wineserver flushes). Success
+  means the **verdict is READY**, not merely "exit 0".
+- **Validate** = the four honest states MISSING / UNINITIALISED / CORRUPT / READY:
+  registry files must exist, be readable and start with a Wine header
+  (`# WINE REGISTRY Version…` or `REGEDIT4`), `drive_c/` must exist, and the
+  `#arch=` line must match the container (a win32 registry in a win64 container is
+  CORRUPT, not a surprise at launch). A stale `.update-lock` is reported and is
+  what Repair clears.
+- **Corruption model**: wineserver flushes the registry when it exits GRACEFULLY;
+  a SIGKILLed one (process death, `--kill-on-exit`) can leave the lock and
+  half-written `.reg` files. So: `SessionLifecycle.shutdown` runs a bounded
+  `wineserver -k` per running Wine session BEFORE anything is destroyed,
+  **Repair** = kill + clear lock/permissions + re-run wineboot (which tops the
+  registry up), and **Delete** = stop the container first, then remove the tree.
+- **Payload**: `runtime/WineProvisioner.kt` installs Wine into the rootfs - the two
+  pinned R3 debs via `dpkg -i` + `apt-get -f` when downloaded (fail-closed core,
+  distro-resolved deps), else the same versions from `ports.ubuntu.com` via apt.
+  Exit 0 without `/usr/bin/wine64` on disk is a FAILURE, not a pass.
+- `WINEARCH=win32` is deliberately not offered: arm64 Ubuntu ships no 32-bit Wine
+  loader, so every prefix here is win64 (32-bit *apps* run inside it via WoW64 +
+  box64), and the validator flags a win32 registry as a mismatch instead of
+  pretending. Full contract + device playbook: `docs/WINE_RUNTIME.md`.
+
+## Session lifecycle (one window, one process)
+
+`runtime/SessionLifecycle.kt` is the single contract tying the embedded X server to
+the emulator - the X server is NOT a separate app and NOT a separate window, so its
+whole lifetime belongs to this process:
+
+- **Start**: emulator boot ensures the display exists BEFORE any guest is spawned
+  (`XServer.ensureRunning` - idempotent; called by the boot-to-session flow, the
+  X Desktop surface and the browser launcher alike). With *Boot into X Desktop
+  session* on (the default; Settings ▸ Containers), the shell opens the X Desktop
+  window maximized at startup: the user sees ONE window with the desktop inside it.
+- **Resize**: the X screen follows the surface (rotation, window resize) through
+  `XServer.resizeScreen`, which keeps clients alive and broadcasts a root
+  ConfigureNotify - the no-RANDR substitute a guest WM re-lays-out on.
+- **Stop** (`MainActivity.onDestroy` - rotation does NOT destroy this Activity, the
+  manifest declares the configChanges): (1) bounded graceful `wineserver -k` per
+  running Wine session so the prefix registry is flushed, (2) `stopAll` destroys
+  every guest (proot's `--kill-on-exit` takes the whole guest tree down - no
+  orphans), (3) only then the X server socket closes, so no client can reconnect
+  into a half-torn-down display. Every step is guarded; a failure is reported in
+  the summary, never thrown, and never strands the steps after it. The notification's
+  **Stop all** keeps the shell's display alive (the emulator is still open) and
+  stops guests only; if the process itself is killed, Android reaps the whole cgroup.
+- **Input/clipboard sync**: touch/mouse/keyboard/IME flow Compose → `XInput` →
+  connections in-process (no sockets through the UI, no second focus), and the
+  P1 clipboard bridge ties Android's clipboard to PRIMARY/CLIPBOARD.
 
 ## Terminal
 
@@ -545,6 +645,11 @@ app/src/main/java/dev/win11we/shell/
   ui/diagnostics/…             Diagnostics window (binaries, probes, log excerpt)
   runtime/ProcessLauncher.kt   start/stream/destroy seam (real ProcessBuilder + fakes in tests)
   runtime/ContainerLauncher.kt validate -> build command+env -> start -> track status/logs (R2)
+  runtime/SessionLifecycle.kt  the ONE lifecycle contract: boot X before guests; stop order on exit
+  runtime/WinePrefixManager.kt Prefix Manager: create/list/validate/repair/delete isolated prefixes
+  runtime/WineProvisioner.kt   installs the pinned Wine debs (or apt fallback) into the rootfs
+  runtime/WinePrefixOps.kt     PrefixOps seam implementation: the manager on guarded workers
+  runtime/WineBrowserLaunch.kt hardened Chromium/Electron/Firefox-under-Wine launch plans (flags, env, request)
   runtime/FirefoxSession.kt  Firefox ESR desktop-browser session: guest command, env, binds, install checks
   runtime/FirefoxPolicies.kt first-load file set: policies.json + user.js + profiles.ini
   runtime/RootfsProvisioner.kt apt-inside-proot provisioning of the browser's GTK3/X11/font/CA stack

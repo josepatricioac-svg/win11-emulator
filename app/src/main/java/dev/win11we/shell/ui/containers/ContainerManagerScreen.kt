@@ -109,6 +109,10 @@ fun ContainerManagerScreen(
                     onOpenPrefix = { onOpenPath(container.prefixPath) },
                     onSave = { updated, what -> state.save(container, updated, what) },
                     logExcerpt = { lines -> state.logExcerpt(container, lines) },
+                    prefixReport = state.reportFor(container),
+                    prefixBusy = state.isBusy(container),
+                    onInitializePrefix = { state.initializePrefix(container) },
+                    onRepairPrefix = { state.repairPrefix(container) },
                 )
                 Spacer(Modifier.height(8.dp))
             }
@@ -171,33 +175,58 @@ fun ContainerManagerScreen(
 
 @Composable
 private fun Header(state: ContainerManagerState) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text("Containers", color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Containers", color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = when {
+                        !state.runtime.ready ->
+                            "Runtime not ready: " + state.runtimeStatus.ifBlank {
+                                "no libbox64.so / libproot.so in this APK (R1), rootfs in R3. See Diagnostics."
+                            }
+                        state.winePayloadInstalled == false ->
+                            "Runtime binaries ready - but the rootfs has NO Wine payload yet: install it " +
+                                "below, then Initialize prefix per container (wineboot inside the rootfs)."
+                        else ->
+                            "Runtime binaries ready. Start validates each container; every container keeps " +
+                                "its OWN isolated Wine prefix - build it with Initialize prefix, fix a dirty " +
+                                "one with Repair."
+                    },
+                    color = if (state.runtime.ready) OkGreen else TextTertiary,
+                    fontSize = 11.5.sp,
+                )
+            }
             Text(
-                text = if (state.runtime.ready) {
-                    "Runtime binaries ready - Start still validates each container: a Wine prefix " +
-                        "needs wineboot + a Wine payload (Goal 2 step 2), which nothing builds yet."
-                } else {
-                    "Runtime not ready: " + state.runtimeStatus.ifBlank {
-                        "no libbox64.so / libproot.so in this APK (R1), rootfs in R3. See Diagnostics."
-                    }
-                },
-                color = if (state.runtime.ready) OkGreen else TextTertiary,
-                fontSize = 11.5.sp,
+                text = "New",
+                color = Color(0xFF0B1220),
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clip(ChipShape)
+                    .background(AccentBlue)
+                    .clickable(onClickLabel = "New container") { state.creating = true }
+                    .padding(horizontal = 18.dp, vertical = 9.dp),
             )
         }
-        Text(
-            text = "New",
-            color = Color(0xFF0B1220),
-            fontSize = 12.5.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier
-                .clip(ChipShape)
-                .background(AccentBlue)
-                .clickable(onClickLabel = "New container") { state.creating = true }
-                .padding(horizontal = 18.dp, vertical = 9.dp),
-        )
+        // Phase 2B: the Wine payload install lives here - the honest first step
+        // of the chain (no payload -> no wineboot -> no prefix -> Start refuses).
+        if (state.runtime.ready && state.winePayloadInstalled == false) {
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ActionButton(
+                    if (state.prefixBusy) "Installing…" else "Install Wine payload",
+                    onClick = { state.installWinePayload() },
+                    enabled = !state.prefixBusy,
+                )
+            }
+            Text(
+                text = "Installs the pinned Wine 9.0 debs from Runtime download (or apt from " +
+                    "ports.ubuntu.com when they are not downloaded). Output streams to Terminal ▸ log.",
+                color = TextTertiary,
+                fontSize = 10.5.sp,
+            )
+        }
     }
 }
 
@@ -217,7 +246,7 @@ private fun EmptyCard(onCreate: () -> Unit) {
         Text("No containers yet", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         Text(
             text = "A container is a Wine prefix plus its Box64 preset, drive mappings and environment. " +
-                "Create one now; it becomes usable when R2/R3 land.",
+                "Create one now - install the Wine payload and run Initialize prefix to make it usable.",
             color = TextTertiary,
             fontSize = 12.sp,
         )
@@ -242,6 +271,10 @@ private fun ContainerCard(
     onOpenPrefix: () -> Unit,
     onSave: (Container, String) -> Unit,
     logExcerpt: (Int) -> String,
+    prefixReport: dev.win11we.shell.runtime.PrefixReport?,
+    prefixBusy: Boolean,
+    onInitializePrefix: () -> Unit,
+    onRepairPrefix: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -375,11 +408,37 @@ private fun ContainerCard(
                 }
                 Spacer(Modifier.height(12.dp))
 
-                Label("Prefix")
+                Label("Wine prefix (isolated - this container only)")
                 Text(container.prefixPath, color = TextSecondary, fontSize = 11.sp)
+                prefixReport?.let { report ->
+                    // The Prefix Manager verdict: file inspection only, refreshed
+                    // on a worker - never disk I/O during composition.
+                    val stateColor = when (report.state) {
+                        dev.win11we.shell.runtime.PrefixState.READY -> OkGreen
+                        dev.win11we.shell.runtime.PrefixState.CORRUPT -> ErrorRed
+                        else -> Color(0xFFFFC44D)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "${report.state.label} · ${report.detail}",
+                        color = stateColor,
+                        fontSize = 11.sp,
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     ActionButton("Open in Explorer", onOpenPrefix)
                     ActionButton("Size: ${formatKb(store.prefixSizeKb(container.id))}", onClick = {}, enabled = false)
+                    ActionButton(
+                        label = if (prefixBusy) "Working…" else "Initialize prefix",
+                        onClick = onInitializePrefix,
+                        enabled = !prefixBusy,
+                    )
+                    ActionButton(
+                        label = "Repair",
+                        onClick = onRepairPrefix,
+                        enabled = !prefixBusy,
+                    )
                 }
                 Spacer(Modifier.height(12.dp))
 

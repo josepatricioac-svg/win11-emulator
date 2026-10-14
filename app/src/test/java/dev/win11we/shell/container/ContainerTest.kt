@@ -258,10 +258,14 @@ class WineEnvironmentTest {
         listOf(
             "DISPLAY", "WINEPREFIX", "WINEARCH", "WINEDEBUG", "WINEDLLOVERRIDES", "HOME", "USER", "PATH",
             "LD_LIBRARY_PATH", "LANG", "LC_ALL", "TMPDIR", "XDG_RUNTIME_DIR", "PULSE_SERVER",
-            "PROOT_ROOTFS", "PROOT_LOADER", "PROOT_LOADER_32",
+            "PROOT_ROOTFS", "PROOT_LOADER", "PROOT_LOADER_32", "PROOT_NO_SECCOMP",
         ).forEach { key -> assertTrue("$key must be set explicitly", env.containsKey(key)) }
         assertEquals(":100", env["DISPLAY"])
         assertEquals("/root/.wine", env["WINEPREFIX"])
+        // proot's seccomp filter misbehaves on Android kernels; every guest runs
+        // with the documented kill switch (plain ptrace) - the provisioning and
+        // doctor environments already did, sessions must too.
+        assertEquals("1", env["PROOT_NO_SECCOMP"])
         assertEquals("/data/rootfs", env["PROOT_ROOTFS"])
         assertEquals("/data/app/lib/arm64/libproot-loader.so", env["PROOT_LOADER"])
         assertTrue(env["PATH"]!!.contains("/opt/wine/bin"))
@@ -310,6 +314,18 @@ class WineEnvironmentTest {
             WineEnvironment.wineCommand(container, "cmd", "/c", "echo hello"),
         )
         assertEquals("wine64", WineArch.WOW64.wineLoader)
+    }
+
+    @Test
+    fun `WINEARCH is explicit per arch - win64 on this arm64 stack, never inherited`() {
+        // arm64 Ubuntu ships no 32-bit Wine loader, so every prefix here is win64;
+        // 32-bit WINDOWS apps run inside it via WoW64 + box64. WinePrefixManager
+        // flags a prefix whose registry says #arch=win32 as a mismatch instead of
+        // launching into it.
+        assertEquals("win64", WineArch.WOW64.wineArch)
+        assertEquals("win64", WineArch.WIN64.wineArch)
+        assertEquals("win64", build()["WINEARCH"])
+        assertEquals("win64", WineEnvironment.build(container.copy(arch = WineArch.WIN64), ":100", "/rootfs", "/lib")["WINEARCH"])
     }
 }
 
@@ -441,5 +457,161 @@ class ContainerServiceLifecycleTest {
         manager.start(office)
         assertTrue(manager.message!!.contains("IllegalStateException"))
         assertEquals(ContainerStatus.ERROR, manager.store.byId(office.id)?.status)
+    }
+}
+
+/**
+ * Phase 2B: the Container Manager's Prefix Manager verbs. The fake answers
+ * synchronously, so the busy/idle transitions and the message contract are
+ * pinned exactly; the async report refresh is awaited with a bounded loop.
+ */
+class ContainerManagerPrefixOpsTest {
+
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    /** Answers every verb synchronously and records what was asked for. */
+    private class FakePrefixOps(
+        private val installed: Boolean = true,
+        private val success: Boolean = true,
+    ) : dev.win11we.shell.ui.containers.PrefixOps {
+        val initializeCalls = mutableListOf<Container>()
+        val repairCalls = mutableListOf<Container>()
+        var installCalls = 0
+        override fun report(container: Container) = dev.win11we.shell.runtime.PrefixReport(
+            container.id,
+            File(container.prefixPath),
+            if (installed) dev.win11we.shell.runtime.PrefixState.READY else dev.win11we.shell.runtime.PrefixState.MISSING,
+            "fake",
+        )
+
+        override fun wineInstalled() = installed
+        override fun initialize(container: Container, onDone: dev.win11we.shell.ui.containers.PrefixCallback) {
+            initializeCalls += container
+            onDone.result(success, if (success) "Prefix ready." else "wineboot failed (exit 1)")
+        }
+
+        override fun repair(container: Container, onDone: dev.win11we.shell.ui.containers.PrefixCallback) {
+            repairCalls += container
+            onDone.result(success, "Repair done.")
+        }
+
+        override fun installWine(onDone: dev.win11we.shell.ui.containers.PrefixCallback) {
+            installCalls++
+            onDone.result(success, "Wine payload installed.")
+        }
+    }
+
+    private class IdleRuntime : ContainerRuntime {
+        override val ready = true
+        override fun start(container: Container) = ContainerActionResult.ok("started")
+        override fun stop(container: Container) = ContainerActionResult.ok("stopped")
+        override fun restart(container: Container) = ContainerActionResult.ok("restarted")
+        override fun statusOf(container: Container) = ContainerStatus.STOPPED
+        override fun logExcerpt(container: Container, lines: Int) = ""
+    }
+
+    private fun state(
+        ops: dev.win11we.shell.ui.containers.PrefixOps?,
+        starts: MutableList<Int> = mutableListOf(),
+        stops: MutableList<Int> = mutableListOf(),
+    ): ContainerManagerState = ContainerManagerState(
+        store = ContainerStore(tmp.root),
+        runtime = IdleRuntime(),
+        onStartRuntime = { starts.add(1) },
+        onStopRuntime = { stops.add(1) },
+        prefixOps = ops,
+    )
+
+    private fun awaitReports(manager: ContainerManagerState, count: Int) {
+        var waited = 0
+        while (manager.prefixReports.size < count && waited < 2000) {
+            Thread.sleep(10)
+            waited += 10
+        }
+    }
+
+    @Test
+    fun `without prefixOps the verbs refuse honestly instead of pretending`() {
+        val manager = state(null)
+        assertTrue(manager.create("Office"))
+        val office = manager.containers.first()
+        manager.initializePrefix(office)
+        assertTrue(manager.message!!.contains("not wired"))
+        manager.installWinePayload()
+        assertTrue(manager.message!!.contains("not wired"))
+    }
+
+    @Test
+    fun `initialize routes to the ops and reports the verdict`() {
+        val ops = FakePrefixOps()
+        val manager = state(ops)
+        assertTrue(manager.create("Office"))
+        val office = manager.containers.first()
+        manager.initializePrefix(office)
+        assertEquals(listOf(office.id), ops.initializeCalls.map { it.id })
+        assertEquals("Prefix ready.", manager.message)
+        assertNull("busy must clear", manager.prefixBusyId)
+        assertFalse(manager.prefixBusy)
+    }
+
+    @Test
+    fun `a failed wineboot is surfaced as Failed and clears the busy state`() {
+        val ops = FakePrefixOps(success = false)
+        val manager = state(ops)
+        assertTrue(manager.create("Office"))
+        manager.repairPrefix(manager.containers.first())
+        assertEquals(listOf("office"), ops.repairCalls.map { it.id })
+        assertTrue(manager.message!!.startsWith("Failed:"))
+        assertFalse(manager.prefixBusy)
+    }
+
+    @Test
+    fun `installWine holds the foreground service only for the duration of the install`() {
+        val ops = FakePrefixOps()
+        val starts = mutableListOf<Int>()
+        val stops = mutableListOf<Int>()
+        val manager = state(ops, starts, stops)
+        manager.installWinePayload()
+        assertEquals(1, ops.installCalls)
+        assertEquals("the install must run under the service", 1, starts.size)
+        assertEquals("and the service is released when nothing runs", 1, stops.size)
+        assertEquals("Wine payload installed.", manager.message)
+    }
+
+    @Test
+    fun `reports refresh off-thread and land in the snapshot map`() {
+        val manager = state(FakePrefixOps())
+        assertTrue(manager.create("Office"))
+        assertTrue(manager.create("Games"))
+        awaitReports(manager, 2)
+        assertEquals(2, manager.prefixReports.size)
+        assertEquals(
+            dev.win11we.shell.runtime.PrefixState.READY,
+            manager.reportFor(manager.containers.first())?.state,
+        )
+    }
+
+    @Test
+    fun `deleting a running container stops it before the files go`() {
+        val runtime = object : ContainerRuntime {
+            var stopped: Container? = null
+            override val ready = true
+            override fun start(container: Container) = ContainerActionResult.ok("started")
+            override fun stop(container: Container): ContainerActionResult {
+                stopped = container
+                return ContainerActionResult.ok("stopped")
+            }
+
+            override fun restart(container: Container) = ContainerActionResult.ok("restarted")
+            override fun statusOf(container: Container) =
+                if (stopped == null) ContainerStatus.RUNNING else ContainerStatus.STOPPED
+            override fun logExcerpt(container: Container, lines: Int) = ""
+        }
+        val manager = ContainerManagerState(store = ContainerStore(tmp.root), runtime = runtime, prefixOps = FakePrefixOps())
+        assertTrue(manager.create("Office"))
+        val office = manager.containers.first()
+        assertTrue(manager.delete(office))
+        assertEquals(office.id, runtime.stopped?.id)
     }
 }

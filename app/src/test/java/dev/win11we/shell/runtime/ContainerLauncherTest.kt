@@ -141,12 +141,16 @@ class ContainerLauncherTest {
     @Test
     fun `a missing prefix names the whole chain instead of promising a first-launch fix`() {
         // The old message said the prefix "is created on first launch" - nothing
-        // creates it, so the user retried forever. The refusal must name every link:
-        // no Wine payload -> no wineboot -> no prefix -> Goal 2 step 2.
+        // created it, so the user retried forever. The refusal must name every link:
+        // no Wine payload -> no wineboot -> no prefix. Since the Prefix Manager
+        // landed, it must ALSO name the action that builds one (Initialize prefix
+        // runs wineboot; Install Wine payload provisions the rootfs) instead of
+        // pointing at a roadmap step.
         val broken = container.copy(prefixPath = File(tmp.root, "no-prefix").absolutePath)
         val result = launcher().start(request().copy(container = broken))
         assertTrue(result.message, result.message.contains("wineboot"))
-        assertTrue(result.message, result.message.contains("Goal 2 step 2"))
+        assertTrue("the refusal must name the action that builds a prefix",
+            result.message.contains("Initialize prefix"))
         assertTrue(result.message, result.message.contains("no Wine payload"))
         assertTrue("must negate the old lie, not repeat it",
             result.message.contains("NOT created on first launch"))

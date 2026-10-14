@@ -285,6 +285,13 @@ private fun StoragePage() {
 private fun ContainersPage(store: SettingsStore) {
     PageTitle("Containers")
     SettingsCard {
+        ToggleRow(
+            title = "Boot into X Desktop session",
+            subtitle = "Start the emulator straight into the embedded X desktop (one window, maximized). " +
+                "Off: the Win11 shell comes up first and the session opens from Start ▸ X Desktop.",
+            checked = store.bootToDesktopSession,
+            onCheckedChange = { store.bootToDesktopSession = it },
+        )
         RadioRow(
             title = "Box64 preset",
             subtitle = "Default profile for new containers; per-container override arrives in P2",
@@ -292,7 +299,11 @@ private fun ContainersPage(store: SettingsStore) {
             selectedIndex = Box64Preset.entries.indexOf(store.box64Preset),
             onSelect = { store.box64Preset = Box64Preset.entries[it] },
         )
-        SettingsRow(title = "Runtime", subtitle = "proot / box64 / wine: not installed yet (R1, R3)")
+        SettingsRow(
+            title = "Runtime",
+            subtitle = "proot + box64: shipped in the APK · rootfs/Firefox/Wine debs: Runtime download · " +
+                "Wine payload + prefixes: Container Manager",
+        )
     }
     Hint(Box64Preset.entries.first { it == store.box64Preset }.description)
 }

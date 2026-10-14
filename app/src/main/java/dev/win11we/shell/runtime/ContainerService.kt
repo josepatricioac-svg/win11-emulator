@@ -68,16 +68,50 @@ object RuntimePaths {
     /** The Firefox ESR session's persistent profile host directory (D1/R3). */
     fun browserProfileDir(filesDir: File) = File(filesDir, "browser/firefox-profile")
 
+    /** Where R3's downloader keeps the pinned artifacts (rootfs, debs, Firefox). */
+    fun downloadDir(filesDir: File) = File(filesDir, "downloads")
+
+    /**
+     * The host directory every guest session binds at `/dev/shm`.
+     *
+     * Android's own `/dev` has NO `shm` entry (bionic has no SysV/POSIX shm
+     * mount), and the guest tree binds `/dev` from the host - so without this,
+     * Chromium-family browsers (shared-memory transport), Gecko and Wine's
+     * esync all fail or crash in ways that read as "the browser is broken".
+     * One directory under the app's private files dir, world-rwx + sticky
+     * (mode 1777, exactly what a real /dev/shm carries), bound into every jail.
+     */
+    fun shmDir(filesDir: File) = File(xSocketDir(filesDir), "shm")
+
+    /**
+     * Creates [shmDir] with /dev/shm conventions: 1777 (sticky + world rwx).
+     * The sticky bit needs [android.system.Os.chmod] (java.io.File cannot
+     * express it); both steps are best-effort - the app uid owns the directory
+     * either way, and guests run as the same uid under proot's fake root.
+     */
+    fun ensureShmDir(filesDir: File): File {
+        val dir = shmDir(filesDir)
+        dir.mkdirs()
+        runCatching {
+            dir.setReadable(true, false)
+            dir.setWritable(true, false)
+            dir.setExecutable(true, false)
+        }
+        runCatching { android.system.Os.chmod(dir.absolutePath, 0b1_111_111_111) } // 01777
+        return dir
+    }
+
     /** True when the rootfs archive has been unpacked (bin/ and usr/ exist). */
     fun rootfsExtracted(rootfsDir: File): Boolean =
         rootfsDir.isDirectory && File(rootfsDir, "bin").isDirectory && File(rootfsDir, "usr").isDirectory
 
     /**
-     * mkdirs only - it makes a directory, NOT a Wine prefix. The only caller is the
-     * Firefox session's profile directory (which is all it needs). A real prefix is
-     * populated by `wineboot` inside the rootfs (Goal 2 step 2 / R4); until that
-     * exists, [ContainerLauncher.validate] refuses wine containers with that reason
-     * instead of letting `mkdirs` imply a prefix was created.
+     * mkdirs only - it makes a directory, NOT a Wine prefix. Callers are the
+     * Firefox session's profile directory and [WinePrefixManager.create] (which
+     * then runs the real `wineboot --init`). A directory alone is never treated
+     * as a prefix: [ContainerLauncher.validate] refuses an un-initialised one
+     * with that exact reason, and [WinePrefixManager.inspect] reports it as
+     * UNINITIALISED rather than usable.
      */
     fun ensurePrefix(prefixPath: String): File = File(prefixPath).also { it.mkdirs() }
 }
@@ -111,13 +145,19 @@ object RuntimeHolder {
         val appContext = context.applicationContext
         val filesDir = appContext.filesDir
         val resolvConf = runCatching { RuntimePaths.ensureResolvConf(filesDir) }.getOrNull()
+        // Every guest gets the conventional /dev/shm (Android's /dev has none):
+        // Chromium/Electron transports, Gecko shm and Wine esync need it.
+        val shmDir = runCatching { RuntimePaths.ensureShmDir(filesDir) }.getOrNull()
         return RuntimeRequest(
             container = container,
             rootfsDir = rootfsDir ?: RuntimePaths.defaultRootfs(filesDir),
             xDisplay = RuntimePaths.X_DISPLAY,
             audioSocket = RuntimePaths.pulseSocket(filesDir).absolutePath,
             guestCommand = guestCommand,
-            binds = listOfNotNull(resolvConf?.let { Bind(it.absolutePath, "/etc/resolv.conf") }),
+            binds = listOfNotNull(
+                resolvConf?.let { Bind(it.absolutePath, "/etc/resolv.conf") },
+                shmDir?.let { Bind(it.absolutePath, "/dev/shm") },
+            ),
         )
     }
 
@@ -162,6 +202,7 @@ object RuntimeHolder {
             )
         }
         val resolvConf = RuntimePaths.ensureResolvConf(filesDir)
+        val shmDir = runCatching { RuntimePaths.ensureShmDir(filesDir) }.getOrNull()
         val id = if (handoff) "${FirefoxSession.SESSION_ID}-handoff" else FirefoxSession.SESSION_ID
         val name = if (handoff) "${FirefoxSession.SESSION_NAME} - URL handoff" else FirefoxSession.SESSION_NAME
         return RuntimeRequest(
@@ -170,7 +211,7 @@ object RuntimeHolder {
             xDisplay = RuntimePaths.X_DISPLAY,
             guestCommand = FirefoxSession.sessionCommand(url, withDesktop = !handoff),
             guestPrefix = FirefoxSession.GUEST_PROFILE_DIR,
-            binds = FirefoxSession.binds(profile, RuntimePaths.xSocketUnixDir(filesDir), resolvConf),
+            binds = FirefoxSession.binds(profile, RuntimePaths.xSocketUnixDir(filesDir), resolvConf, shmDir),
             environment = FirefoxEnvironment.build(RuntimePaths.X_DISPLAY),
         )
     }

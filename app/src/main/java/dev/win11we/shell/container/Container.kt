@@ -61,7 +61,20 @@ enum class WineArch(val label: String, val wineLoader: String) {
     /** 64-bit prefix that also runs 32-bit Windows apps - what Office needs. */
     WOW64("WoW64 (32 + 64 bit)", "wine64"),
     WIN64("64-bit only", "wine64"),
+    ;
+
+    /**
+     * The `WINEARCH` value a prefix of this architecture is created with.
+     * Both entries are `win64` ON PURPOSE: this is an arm64-only stack and
+     * Ubuntu arm64 ships no 32-bit Wine loader, so a `win32` prefix cannot be
+     * created here - [WinePrefixManager.inspect] treats a prefix whose registry
+     * says `#arch=win32` as a mismatch instead of silently launching into it.
+     * 32-bit WINDOWS APPS still run, inside a win64 prefix, through WoW64 +
+     * box64 - which is what the WOW64 entry means.
+     */
+    val wineArch: String get() = "win64"
 }
+
 
 /**
  * Host path -> guest (Windows) path using the container's drive mappings.
@@ -154,7 +167,7 @@ object WineEnvironment {
 
         // --- Wine -------------------------------------------------------------------
         env["WINEPREFIX"] = "/root/.wine"               // guest path; the prefix is bind-mounted there
-        env["WINEARCH"] = "win64" // both prefixes are 64-bit; WoW64 adds the 32-bit side
+        env["WINEARCH"] = container.arch.wineArch       // explicit per arch (win64 on this arm64 stack; see WineArch)
         env["WINEDEBUG"] = container.wineDebug
         env["WINEDLLOVERRIDES"] = "mscoree,mshtml="     // never auto-install Gecko/Mono
         env["WINE_ESYNC_PULSE"] = "1"
@@ -168,6 +181,12 @@ object WineEnvironment {
         env["PROOT_ROOTFS"] = prootRootfs
         env["PROOT_LOADER"] = "$nativeLibraryDir/libproot-loader.so"
         env["PROOT_LOADER_32"] = "$nativeLibraryDir/libproot-loader32.so"
+        // proot's seccomp-based syscall filter misbehaves on several Android
+        // kernels (the documented kill switch is plain ptrace) - provisioning
+        // and the doctor already run with it; guest sessions must too, or
+        // wine/browser children die in ways that read as "emulation broken".
+        env["PROOT_NO_SECCOMP"] = "1"
+
 
         // --- paths inside the guest ---------------------------------------------------
         env["HOME"] = "/root"

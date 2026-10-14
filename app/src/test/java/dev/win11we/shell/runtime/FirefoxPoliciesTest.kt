@@ -80,6 +80,12 @@ class FirefoxPoliciesTest {
         assertTrue(js.contains("user_pref(\"app.update.auto\", false);"))
         assertTrue(js.contains("user_pref(\"extensions.pocket.enabled\", false);"))
         assertTrue(js.contains("user_pref(\"browser.aboutwelcome.enabled\", false);"))
+        // Software-rendering guards: the embedded X server has no GLX/DRI/Vulkan
+        // (docs/X_SERVER.md), so every GPU path is pinned off - the white-screen fix.
+        assertTrue(js.contains("user_pref(\"layers.acceleration.disabled\", true);"))
+        assertTrue(js.contains("user_pref(\"gfx.webrender.all\", false);"))
+        assertTrue(js.contains("user_pref(\"gfx.webrender.software\", false);"))
+        assertTrue(js.contains("user_pref(\"media.ffmpeg.vaapi.enabled\", false);"))
         // Kept ON for first-load speed:
         assertTrue(js.contains("user_pref(\"network.dns.disablePrefetch\", false);"))
         assertTrue(js.contains("user_pref(\"network.prefetch-next\", true);"))

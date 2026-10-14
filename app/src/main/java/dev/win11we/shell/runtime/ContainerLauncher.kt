@@ -63,6 +63,7 @@ class ContainerLauncher(
     val statuses = mutableStateMapOf<String, ContainerStatus>()
     private val handles = HashMap<String, ProcessHandle>()
     private val commands = HashMap<String, List<String>>()
+    private val requests = HashMap<String, RuntimeRequest>()
 
     fun statusOf(id: String): ContainerStatus = statuses[id] ?: ContainerStatus.STOPPED
 
@@ -70,7 +71,19 @@ class ContainerLauncher(
 
     fun commandOf(id: String): List<String>? = commands[id]
 
+    /** The request a session was started with; kept after exit for diagnostics. */
+    fun requestOf(id: String): RuntimeRequest? = requests[id]
+
     fun runningIds(): Set<String> = handles.keys.toSet()
+
+    /**
+     * The RUNNING Wine sessions (guest command goes through box64/wine), for
+     * the shutdown path's graceful `wineserver -k` sweep. The Firefox ESR
+     * session is a native bash exec and is deliberately not included - it has
+     * no wineserver.
+     */
+    fun runningWineRequests(): List<RuntimeRequest> =
+        handles.keys.mapNotNull { requests[it] }.filter { needsBox64(it.guestCommand) }
 
     /** Validates everything *before* spawning, so failures name the missing piece. */
     fun validate(request: RuntimeRequest): LaunchResult {
@@ -107,8 +120,10 @@ class ContainerLauncher(
             return LaunchResult.fail(
                 LaunchFailure.PREFIX_MISSING,
                 "Wine prefix not found at ${prefix.absolutePath}: $cause. A prefix is built by " +
-                    "wineboot inside the rootfs (Goal 2 step 2 / R4) - it is NOT created on first " +
-                    "launch, and nothing creates it yet. Diagnostics ▸ Run self-test shows exactly " +
+                    "wineboot inside the rootfs - it is NOT created on first launch. Container " +
+                    "Manager ▸ Initialize prefix runs wineboot for exactly this container (isolated " +
+                    "prefix, own WINEPREFIX/WINEARCH) once a Wine payload is installed there " +
+                    "(Install Wine payload). Diagnostics ▸ Run self-test shows exactly " +
                     "where the chain stops (box64 --version, wine64 --version, wine64 cmd).",
             )
         }
@@ -119,7 +134,9 @@ class ContainerLauncher(
             return LaunchResult.fail(
                 LaunchFailure.PREFIX_MISSING,
                 "Wine prefix at ${prefix.absolutePath} exists but was never initialised " +
-                    "(no system.reg/user.reg/drive_c) - wineboot has not run for it (Goal 2 step 2 / R4).",
+                    "(no system.reg/user.reg/drive_c) - wineboot has not run for it. Use " +
+                    "Container Manager ▸ Initialize prefix (it runs wineboot --init and waits " +
+                    "for wineserver to flush the registry), or Repair if a previous run died.",
             )
         }
         return LaunchResult.ok("Validated")
@@ -149,6 +166,7 @@ class ContainerLauncher(
 
         handles[request.container.id] = handle
         commands[request.container.id] = command
+        requests[request.container.id] = request
         statuses[request.container.id] = ContainerStatus.RUNNING
         if (streamThreads) stream(request.container.id, handle)
         return LaunchResult.ok("${request.container.name} started (pid stream attached)")
@@ -220,6 +238,12 @@ class ContainerLauncher(
     fun stop(id: String, reason: String = "stopped by user"): LaunchResult {
         val handle = handles.remove(id) ?: return LaunchResult.ok("Not running.")
         commands.remove(id)
+        // NOTE: this is the FAST path - destroy() SIGKILLs proot, whose
+        // --kill-on-exit takes the whole guest tree (incl. wineserver) down.
+        // A wineserver killed like that can leave a stale `.update-lock` and
+        // lose the last registry writes; WinePrefixManager.repair clears the
+        // lock, and the graceful `wineserver -k` runs where waiting is allowed:
+        // SessionLifecycle.shutdown (app exit) - see its KDoc for the order.
         handle.destroy()
         statuses[id] = ContainerStatus.STOPPED
         log.add(TerminalLine(LineKind.SYSTEM, "$id $reason"))
