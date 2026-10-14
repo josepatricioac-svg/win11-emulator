@@ -284,17 +284,18 @@ object XServer {
     }
 
     /**
-     * Makes sure a display exists even when no X Desktop window is open yet,
-     * at a default screen size. Guest launches (the Firefox ESR desktop-browser
-     * session) call this before spawning; an X Desktop window opened later
-     * resizes the screen, keeping clients alive.
+     * Makes sure a display exists even before any surface has measured, at a
+     * default screen size. Guest launches (the Firefox ESR desktop-browser
+     * session) call this before spawning; the desktop layer reconciles the
+     * screen to its real pixel size afterwards, keeping clients alive.
      *
-     * The server runs PASS-THROUGH: the shell does not claim
-     * SubstructureRedirect - the claim is exclusive, and a shell WM here would
-     * lock every guest window manager out. The desktop session brings its own
-     * WM (openbox for the browser session, `explorer.exe /desktop` for Wine
-     * later); without one, clients map undecorated and still work.
-     * [attachWindowManager] stays for tests and a future per-window mode.
+     * WM model (D2): the shell attaches [dev.win11we.shell.window.GuestWindowBridge]
+     * as the window manager - it claims SubstructureRedirect and every guest
+     * top-level opens as a regular, resizable shell window ("apps open as
+     * apps"). The bridge is attached/detached by the desktop composition; with
+     * no bridge attached the server runs PASS-THROUGH (the D1g model: a guest
+     * session brings its own WM, e.g. a future `explorer.exe /desktop`), and
+     * clients without any WM map undecorated and still work.
      */
     fun ensureRunning(widthPx: Int = 1280, heightPx: Int = 800): Boolean =
         if (running) true else start(widthPx, heightPx)

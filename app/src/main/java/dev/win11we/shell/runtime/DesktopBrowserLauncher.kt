@@ -187,7 +187,7 @@ object DesktopBrowserLauncher {
                 ContainerService.start(appContext)
                 DesktopLaunchOutcome(
                     true,
-                    "Firefox ESR starting on ${RuntimePaths.X_DISPLAY} - its window appears directly on the desktop.",
+                    "Firefox ESR starting on ${RuntimePaths.X_DISPLAY} - it opens as its own window on the desktop.",
                 )
             } else {
                 setPhase(LaunchPhase.FAILED, "[${result.failure}] ${result.message}")

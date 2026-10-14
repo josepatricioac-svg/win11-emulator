@@ -209,7 +209,13 @@ object RuntimeHolder {
             container = Container.defaults(id, name, profile.absolutePath),
             rootfsDir = rootfs,
             xDisplay = RuntimePaths.X_DISPLAY,
-            guestCommand = FirefoxSession.sessionCommand(url, withDesktop = !handoff),
+            // D2: the SHELL is the window manager (GuestWindowBridge claims
+            // SubstructureRedirect and turns every guest top-level into a shell
+            // window), so the browser session must NOT start openbox - two WMs
+            // cannot share the claim, and per-window hosting is the product
+            // model now ("apps open as apps"). The prelude stays available for
+            // a future full-desktop Wine session (explorer.exe /desktop).
+            guestCommand = FirefoxSession.sessionCommand(url, withDesktop = false),
             guestPrefix = FirefoxSession.GUEST_PROFILE_DIR,
             binds = FirefoxSession.binds(profile, RuntimePaths.xSocketUnixDir(filesDir), resolvConf, shmDir),
             environment = FirefoxEnvironment.build(RuntimePaths.X_DISPLAY),

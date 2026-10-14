@@ -96,6 +96,17 @@ private fun WindowBody(
     onCloseWindow: (Int) -> Unit,
     onFailure: (String) -> Unit,
 ) {
+    // D2: a window hosting a guest X top-level renders that window's subtree
+    // and routes input straight into the embedded X server - the guest app IS
+    // a shell window (drag/resize/minimize/close from the shell frame).
+    (window.payload as? dev.win11we.shell.window.GuestWindowPayload)?.let { guest ->
+        dev.win11we.shell.ui.xdesktop.XWindowSurface(
+            xid = guest.xid,
+            bridge = dev.win11we.shell.window.LocalGuestBridge.current,
+            onUserInteraction = { manager.focus(window) },
+        )
+        return
+    }
     when (window.app.id) {
         "explorer" -> {
             val state = window.explorerState()

@@ -39,6 +39,23 @@ class WindowManagerTest {
     }
 
     @Test
+    fun `openWithPayload sets the payload and honours the initial size (guest windows, D2)`() {
+        val manager = WindowManager()
+        val spec = AppSpec("guest:42", "Guest app", R.drawable.ic_desktop, pinned = false)
+        val payload = Any()
+        val window = manager.openWithPayload(spec, desktop, payload, DpSize(300.dp, 200.dp))
+        assertTrue(window.payload === payload)
+        assertEquals(DpSize(300.dp, 200.dp), window.size)
+        assertEquals(window.id, manager.focusedId)
+        assertEquals(1, manager.windows.size)
+        assertTrue(window.zIndex > 0)
+        // The catalogue path keeps using the payload factory and its own sizing.
+        val plain = manager.open(notepad, desktop)
+        assertNull(plain.payload)
+        assertTrue(plain.size.width > 300.dp)
+    }
+
+    @Test
     fun `toggle opens then minimizes then restores`() {
         val manager = WindowManager()
         manager.toggle(notepad, desktop)

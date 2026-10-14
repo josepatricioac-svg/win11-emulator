@@ -84,8 +84,8 @@ unlocks itself the moment the runtime is complete:
    reason (`BINARIES_NOT_READY`, `ROOTFS_MISSING`, …).
 4. **UI**: a ready engine turns the Open button into a desktop launch — the URL from
    the address bar goes to the guest, the result is toasted and shown in the window,
-   and the browser's window appears directly on the desktop (the desktop layer IS
-   the X screen - no viewer window). An
+   and the browser's window opens as a regular, resizable SHELL window (D2:
+   the shell is the guest WM - no viewer window, no desktop takeover). An
    unready choice keeps the old fallback (Android Firefox / system default), exactly
    as `RoadmapGatingTest` pins it.
 5. **Profile**: persistent at `<files>/browser/firefox-profile`, bound over

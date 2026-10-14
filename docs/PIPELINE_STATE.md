@@ -221,3 +221,43 @@ Harness: 684 tests green. Docs: README provision paragraph + WINE_RUNTIME §2.
 versionName 0.1.0-d1h.4. Device re-check: Firefox setup (or Install Wine
 payload) right after a force-kill mid-provision must log "lock recovery:
 killed stale ... (pid N)" and then complete instead of dying on the lock.
+
+## Snapshot 2026-10-14 (5) — D2a: guest apps are shell apps (owner directive)
+
+Owner report + directive: the browser "says running but nothing is visible"
+(first-run font-cache gap had no honest status between client-connect and
+first-map, amplified by the pass-through desktop model), and the wanted model
+is termux-x11-like: "firefox actually opens as an app on a floating window
+with resize options like everything else."
+
+Implemented (D2a, all in this tree; 705 off-Gradle tests green):
+- `window/GuestWindows.kt`: `GuestWindowBridge` implements `XWindowManager`,
+  attached by DesktopScreen (SubstructureRedirect claim). MapRequest → real
+  shell window (`openWithPayload`, GuestWindowPayload, live WM_NAME caption,
+  px/dp size clamp); client ConfigureRequest → shell window size; surface
+  geometry reports → `wmMapWindow`/`wmConfigureWindow` keeping the X rect ==
+  the on-screen rect (the popup-alignment invariant); per-frame `sync()`
+  reconciles both sides (guest gone → close shell window; shell closed →
+  WM_DELETE then Destroy after ~2 s; never-mapped orphans destroyed).
+- `ui/xdesktop/XWindowSurface.kt`: per-window render (`drawWindow` +
+  `XDocument.subtreePaintOrder`), input at absolute coords, per-window hidden
+  IME field, local software cursor.
+- Desktop layer (`XDesktopSurface`) is now the POPUP layer + wallpaper +
+  status pill: `draw(popupOnly=true)` composites only override-redirect
+  top-levels (GTK menus/dropdowns) with no root background; new pill state
+  "Session running - N client(s) connected, no window mapped yet" kills the
+  visible-silence class of confusion.
+- Browser sessions no longer start openbox (`withDesktop=false`): one WM per
+  display, and the shell is it. The prelude remains for a future
+  explorer.exe/desktop Wine session (bridge detached) - documented.
+- New pure XDocument helpers: subtreePaintOrder, topLevelOf, popupTopLevels,
+  windowTitle (XGuestWindowTest); bridge lifecycle (GuestWindowBridgeTest);
+  openWithPayload (WindowManagerTest).
+- Docs: README (diagram/bullets/browser story/roadmap D2 row/Layout),
+  X_SERVER.md §D2 + device section, WINE_RUNTIME playbook, BROWSER_ENGINES.
+
+versionName 0.1.0-d2a.1. Device checks that matter most: Firefox maps into a
+shell window within the font-cache window; resize re-lays-out GTK; dropdowns
+appear aligned; close terminates the session window (WM_DELETE path); the
+RUNNING-unmapped pill shows during the first-run cache build; xeyes/xclock
+self-test rows now visibly open (and auto-close) as shell windows.

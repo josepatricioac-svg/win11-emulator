@@ -98,8 +98,23 @@ class WindowManager(
      * Apps that are not ported yet still open a window that says so, instead of
      * silently ignoring the click.
      */
-    fun open(app: AppSpec, desktop: DpSize): WindowState {
-        val size = DpSize(
+    fun open(app: AppSpec, desktop: DpSize): WindowState = create(app, desktop, payloadFactory(app), null)
+
+    /**
+     * Opens a window with an EXPLICIT payload and initial size - guest X
+     * windows (D2) bring both from the guest's own MapRequest (see
+     * [GuestWindowBridge]) instead of the app catalogue. Same cascade, focus
+     * and z-order treatment as [open].
+     */
+    fun openWithPayload(
+        app: AppSpec,
+        desktop: DpSize,
+        payload: Any?,
+        initialSize: DpSize? = null,
+    ): WindowState = create(app, desktop, payload, initialSize)
+
+    private fun create(app: AppSpec, desktop: DpSize, payload: Any?, initialSize: DpSize?): WindowState {
+        val size = initialSize ?: DpSize(
             width = (desktop.width * 0.62f).coerceIn(420.dp, 980.dp),
             height = (desktop.height * 0.66f).coerceIn(320.dp, 760.dp),
         )
@@ -113,7 +128,7 @@ class WindowManager(
             ),
             initialSize = size,
         )
-        window.payload = payloadFactory(app)
+        window.payload = payload
         window.zIndex = nextZ++
         windows.add(window)
         focusedId = window.id

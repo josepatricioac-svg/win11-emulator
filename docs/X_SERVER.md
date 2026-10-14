@@ -563,14 +563,14 @@ even repaint to "Testing..." while it blocked. The same is true of the
 `--version` probes and the R4 self-test. Any throwable becomes a shared-log line
 instead of taking the process down (crash-safety rules 1 and 2).
 
-There is nothing to open: the shell's desktop layer IS the X screen. The server boots
-with the desktop at `:100` and the layer keeps the root locked to the surface size.
-While no guest window is mapped the Win11 wallpaper shows; anything that speaks core
-X11 to the abstract socket `@/tmp/.X11-unix/X100` — e.g. `xclock` from a proot rootfs
-with `DISPLAY=:100` — takes the desktop over the moment it maps (unmanaged, or framed
-once the session's window manager is up; D1g pass-through). Tap the desktop to focus
-it, then type with the soft keyboard; the pointer shows the client-chosen cursor
-shape.
+There is nothing to open. The server boots with the desktop at `:100`, the desktop
+layer keeps the root locked to the surface size, and the shell's `GuestWindowBridge`
+is the WM (D2): anything that speaks core X11 to the abstract socket
+`@/tmp/.X11-unix/X100` — e.g. `xclock` from a proot rootfs with `DISPLAY=:100` —
+opens as its own shell window the moment it maps (drag/resize/minimize/close from the
+shell frame). Tap the window body to focus it, then type with the soft keyboard; the
+pointer shows the client-chosen cursor shape. Override-redirect popups (menus,
+tooltips) render on the desktop's popup layer at absolute coordinates.
 
 ## Lifecycle: one window, one process (this pass)
 
@@ -579,14 +579,12 @@ and this section pins the *contract* around it (implemented in
 `runtime/SessionLifecycle.kt`, wired in `MainActivity`/`DesktopScreen`):
 
 - **Boot**: `DesktopScreen` calls `SessionLifecycle.boot` →
-  `XServer.ensureRunning()` as soon as the shell composes, and its desktop layer
-  (`ui/xdesktop/XDesktopSurface`) renders that display full-bleed under the shell
-  windows: transparent while no guest window is mapped, the guest's desktop the
-  moment one maps. There is exactly one window (the single `MainActivity`) and
-  NO viewer app - the former "X Desktop" window was deleted. Every other entry
-  point that needs the display (the surface itself, `DesktopBrowserLauncher`)
-  calls the same idempotent ensure - guests can never race a server that is not
-  listening yet.
+  `XServer.ensureRunning()` as soon as the shell composes, and attaches the
+  `GuestWindowBridge` as the in-process WM (D2 - see below). There is exactly
+  one window (the single `MainActivity`) and NO viewer app - the former
+  "X Desktop" window was deleted. Every other entry point that needs the
+  display (the desktop surface, `DesktopBrowserLauncher`) calls the same
+  idempotent ensure - guests can never race a server that is not listening yet.
 - **Resize**: `XDesktopState.onSurfaceSize` now keeps the X screen locked to the
   surface: rotation or a window resize calls `XServer.resizeScreen`, which
   re-lays the root, keeps clients alive and broadcasts a root `ConfigureNotify`
@@ -614,3 +612,62 @@ and this section pins the *contract* around it (implemented in
   with the conventional root display; proot passes the abstract namespace
   through untouched). Input flows Compose → `XInput` → connections in-process;
   the clipboard bridge ties PRIMARY/CLIPBOARD to Android's clipboard.
+
+
+## D2 (this pass): the shell is the WM - guest apps are shell apps
+
+Owner directive: "firefox actually opens as an app, in a floating window with resize
+options like everything else" (the termux-x11 model). Implemented as the roadmap's
+D2 "per-window surfaces", reusing the D1b WM machinery that D1g had retired to the
+test bench (`attachWindowManager`, `wmMapWindow`, `wmConfigureWindow`,
+`requestWindowClose`):
+
+- **`window/GuestWindows.kt` - `GuestWindowBridge`** implements `XWindowManager`
+  and is attached by `DesktopScreen` (detached on dispose). The claim is exclusive,
+  so browser sessions no longer start openbox (`FirefoxSession.sessionCommand` is
+  invoked with `withDesktop = false`; the prelude stays for a future
+  `explorer.exe /desktop` session, which will run with the bridge detached).
+- **MapRequest → shell window**: `mapRequested` opens a regular `WindowState`
+  (AppSpec `guest:<xid>`, live `WM_NAME` caption, cascade placement, size = the
+  client's requested px ÷ density, clamped to 240×160dp…95% of the desktop) with
+  a `GuestWindowPayload`. The X window itself is mapped only when the window body
+  reports its real pixel rect (`surfaceGeometry` → `wmMapWindow`), so GTK's first
+  ConfigureNotify already carries the final size - no paint-at-the-wrong-size
+  flash, which is what D1's `wmMapWindow` KDoc warns about.
+- **The invariant that makes popups work**: a hosted X window's absolute geometry
+  always equals its shell window's on-screen rect (every `onGloballyPositioned`
+  pushes move/resize back through `wmConfigureWindow`). Override-redirect windows
+  (GTK menus/dropdowns/tooltips) bypass the WM by X design (`redirectMap` returns
+  false for them) and are composited by the desktop layer's POPUP-ONLY pass
+  (`XCanvasRenderer.draw(popupOnly = true)`: no root background, no managed
+  subtrees) at absolute coordinates - which is exactly where the guest placed
+  them relative to its parent window.
+- **Per-window rendering/input** (`ui/xdesktop/XWindowSurface.kt`):
+  `XCanvasRenderer.drawWindow` replays one subtree in local coordinates through
+  `XDocument.subtreePaintOrder` (new, with the viewability rule); touch/mouse/
+  keyboard/IME route at 1:1 through the window's desktop-relative origin, with
+  per-window hidden IME fields (each guest window has its own keyboard focus);
+  the software cursor draws only while the server-side pointer is inside that
+  window.
+- **Two-way reconcile** (`sync()`, one call per frame from the desktop loop):
+  guest unmapped/destroyed → its shell window closes; shell window closed →
+  `WM_DELETE_WINDOW`, escalated to `DestroyWindow` after ~2 s of silence (no
+  zombie guests, no unclosable windows); closed-before-ever-mapped → destroyed
+  immediately (no zombies); a surface that never reports geometry is given up on
+  after ~10 s. All of it unit-tested against the real `XDocument`/`WindowManager`
+  (`GuestWindowBridgeTest`).
+- **New document helpers** (pure, wire-independent, tested in
+  `XGuestWindowTest`): `subtreePaintOrder`, `topLevelOf`, `popupTopLevels`,
+  `windowTitle` (WM_NAME, UTF-8 tolerant).
+- **Honest status while nothing is mapped**: the desktop pill now distinguishes
+  STARTING (spinner), RUNNING-but-unmapped ("N client(s) connected, no window
+  mapped yet - first run builds the font cache") and FAILED (named refusal), so
+  "says running but nothing is visible" is a sentence with an explanation
+  attached instead of a mystery.
+
+Known limits (device pass will tell, as always): GTK client-side decorations may
+double up with the shell frame (cosmetic); a maximized/snapped shell window
+ignores client-initiated resizes until it returns to NORMAL (by design - the
+user's geometry wins); guest windows do not get their own taskbar pin (they show
+in Task Manager and Alt-tab-equivalent window lists; a pin per guest app is a
+follow-up).

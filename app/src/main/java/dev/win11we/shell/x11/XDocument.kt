@@ -742,6 +742,65 @@ class XDocument(
     }
 
     /**
+     * The subtree rooted at [id] in paint order (the root of the subtree
+     * included, children back-to-front), honouring the same viewability rule
+     * as [paintOrder]: an unmapped ancestor hides its whole subtree. This is
+     * what a per-window surface renders (D2): one shell window shows exactly
+     * one guest top-level and its children.
+     */
+    fun subtreePaintOrder(id: Int): List<XWindow> {
+        val out = mutableListOf<XWindow>()
+        fun walk(wid: Int) {
+            val window = windows[wid] ?: return
+            if (!window.mapped) return
+            out.add(window)
+            window.children.forEach(::walk)
+        }
+        walk(id)
+        return out
+    }
+
+    /** The top-level ancestor of [window] (the child of the root; [window] itself for top levels). */
+    fun topLevelOf(window: XWindow): XWindow {
+        var current = window
+        var guard = 0
+        while (current.parent != null && current.parent != rootId && guard++ < 64) {
+            current = windows[current.parent] ?: return current
+        }
+        return if (current.id == rootId) window else current
+    }
+
+    /**
+     * Mapped override-redirect top-level windows: the POPUP layer. With the
+     * shell acting as the WM (D2), normal top-levels are redirected into shell
+     * windows and rendered there; override-redirect windows (menus, dropdowns,
+     * tooltips) bypass the WM by design (see XConnection.redirectMap) and are
+     * composited by the desktop surface at their absolute screen positions -
+     * which is why the shell keeps each managed X window's absolute geometry
+     * equal to its shell window's on-screen rectangle.
+     */
+    fun popupTopLevels(): List<XWindow> {
+        val root = windows[rootId] ?: return emptyList()
+        return root.children.mapNotNull { windows[it] }
+            .filter { it.mapped && it.overrideRedirect }
+    }
+
+    /**
+     * The window's current `WM_NAME` as text (UTF-8 tolerant - modern clients
+     * set UTF8_STRING, old ones STRING), or null when unset/blank. What the
+     * shell window caption of a guest window shows (D2).
+     */
+    fun windowTitle(id: Int): String? {
+        val atom = atomId("WM_NAME") ?: return null
+        val data = property(id, atom)?.data ?: return null
+        return runCatching { String(data, Charsets.UTF_8) }
+            .getOrNull()
+            ?.trimEnd('\u0000')
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    /**
      * The window's origin in ROOT coordinates. X child windows are
      * PARENT-RELATIVE - the model a guest window manager depends on: openbox
      * reparents every client into a frame at (border, border+title), and

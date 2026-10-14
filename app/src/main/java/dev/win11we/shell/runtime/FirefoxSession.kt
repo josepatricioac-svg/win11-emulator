@@ -90,14 +90,15 @@ object FirefoxSession {
     }
 
     /**
-     * The desktop-session prelude: start openbox as the guest window manager
-     * (the shell's X server runs pass-through - it does NOT claim
-     * SubstructureRedirect, so the session brings its own WM and the whole
-     * desktop, frames and all, renders inside the shell's desktop surface), and give
-     * it up to ~5 s to announce itself through _NET_SUPPORTING_WM_CHECK before
-     * Firefox maps its first window. Without openbox provisioned the session
-     * still runs: windows map undecorated, and readiness names the missing
-     * piece rather than the launch failing.
+     * The full-desktop-session prelude: start openbox as the guest window
+     * manager and give it up to ~5 s to announce itself through
+     * _NET_SUPPORTING_WM_CHECK before Firefox maps its first window.
+     *
+     * NOT used by the browser sessions anymore (D2): the shell itself is the WM
+     * now - `GuestWindowBridge` claims SubstructureRedirect and turns every
+     * guest top-level into a shell window - and two claimants cannot share the
+     * claim. The prelude stays for the future full-desktop Wine session
+     * (`explorer.exe /desktop`), which will run with the bridge detached.
      */
     fun desktopPrelude(): String = buildString {
         appendLine("if command -v openbox >/dev/null 2>&1; then")

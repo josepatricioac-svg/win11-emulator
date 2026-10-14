@@ -50,7 +50,9 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInteropFilter
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -59,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.win11we.shell.runtime.DesktopBrowserLauncher
 import dev.win11we.shell.ui.terminal.SharedLog
+import dev.win11we.shell.window.GuestWindowBridge
 import dev.win11we.shell.x11.CursorGlyph
 import dev.win11we.shell.x11.DrawOp
 import dev.win11we.shell.x11.BlendSpec
@@ -97,9 +100,21 @@ class XCanvasRenderer {
     private val path = Path()
     private val fontMetrics = Paint.FontMetrics()
 
-    fun draw(dst: Canvas, document: XDocument, lists: XDisplayList) {
+    /**
+     * Composites the window stack. With [popupOnly] (D2: the shell is the WM),
+     * managed top-levels are skipped - they render inside their own shell
+     * windows - and only override-redirect popups (menus, dropdowns, tooltips)
+     * plus their children are drawn, WITHOUT the root background, so the shell
+     * wallpaper and windows show through between popups.
+     */
+    fun draw(dst: Canvas, document: XDocument, lists: XDisplayList, popupOnly: Boolean = false) {
         caches.keys.retainAll { id -> document.window(id) != null || lists.sizeOf(id) != null }
+        val popupRoots = if (popupOnly) document.popupTopLevels().map { it.id }.toSet() else emptySet()
         for (window in document.paintOrder()) {
+            if (popupOnly) {
+                if (window.id == document.rootId) continue
+                if (document.topLevelOf(window).id !in popupRoots) continue
+            }
             // InputOnly windows (depth 0) never render - GTK3 uses them as
             // invisible input surfaces, and painting their "background" would
             // punch black holes into the desktop.
@@ -126,6 +141,45 @@ class XCanvasRenderer {
             dst.drawBitmap(cache.bitmap, origin[0].toFloat(), origin[1].toFloat(), null)
             dst.restore()
         }
+    }
+
+    /**
+     * Renders exactly ONE top-level window's subtree in LOCAL coordinates
+     * (D2 per-window surfaces): the window's absolute origin becomes (0,0),
+     * children keep their parent-relative placement through absoluteOrigin
+     * minus that base, and everything is clipped to the window's rect. Same
+     * bitmap caches as [draw] - a window rendered here must not be rendered
+     * twice by the desktop popup layer (the popupOnly filter guarantees it).
+     */
+    fun drawWindow(dst: Canvas, document: XDocument, lists: XDisplayList, xid: Int) {
+        val target = document.window(xid) ?: return
+        if (!target.mapped) return
+        val base = document.absoluteOrigin(target)
+        caches.keys.retainAll { id -> document.window(id) != null || lists.sizeOf(id) != null }
+        dst.save()
+        dst.clipRect(0f, 0f, target.width.toFloat(), target.height.toFloat())
+        for (window in document.subtreePaintOrder(xid)) {
+            if (window.depth == 0) continue
+            val cache = bitmapFor(window.id, window.width, window.height, window.backgroundPixel, document, lists) ?: continue
+            val origin = document.absoluteOrigin(window)
+            dst.save()
+            // Subtree clipping: a child renders inside every ancestor WITHIN
+            // the subtree (the subtree root's own clip is the outer clipRect).
+            var ancestor = window.parent?.let { document.window(it) }
+            while (ancestor != null && ancestor.id != xid) {
+                val ao = document.absoluteOrigin(ancestor)
+                dst.clipRect(
+                    (ao[0] - base[0]).toFloat(),
+                    (ao[1] - base[1]).toFloat(),
+                    (ao[0] - base[0] + ancestor.width).toFloat(),
+                    (ao[1] - base[1] + ancestor.height).toFloat(),
+                )
+                ancestor = ancestor.parent?.let { document.window(it) }
+            }
+            dst.drawBitmap(cache.bitmap, (origin[0] - base[0]).toFloat(), (origin[1] - base[1]).toFloat(), null)
+            dst.restore()
+        }
+        dst.restore()
     }
 
     /**
@@ -664,7 +718,15 @@ class XDesktopState {
         if (signature != frame) {
             frame = signature
             clients = XServer.clientCount
-            guestWindows = document.paintOrder().count { it.id != document.rootId }
+            // With the shell acting as the WM (D2), managed top-levels live in
+            // their own shell windows: the desktop layer's visibility gate then
+            // counts ONLY the override-redirect popup layer. Without a shell WM
+            // (pass-through sessions), every mapped non-root window counts.
+            guestWindows = if (document.windowManager != null) {
+                document.popupTopLevels().size
+            } else {
+                document.paintOrder().count { it.id != document.rootId }
+            }
             // A guest connected: the launcher's STARTING phase is over (the
             // session pill yields to the client's pixels).
             if (clients > 0) DesktopBrowserLauncher.noteClientConnected()
@@ -676,6 +738,17 @@ class XDesktopState {
         val document = XServer.document
         val screen = document.screen
         if (screen.widthPx <= 0 || screen.heightPx <= 0 || widthPx <= 0 || heightPx <= 0) return
+        if (document.windowManager != null) {
+            // D2 popup-layer mode: the shell is the WM, managed guest windows
+            // render inside their shell windows, and this layer draws ONLY the
+            // override-redirect popups at absolute screen coordinates - 1:1,
+            // no letterbox, no root background (the wallpaper shows through).
+            scale = 1f
+            offsetX = 0f
+            offsetY = 0f
+            renderer.draw(canvas, document, XServer.displayList, popupOnly = true)
+            return
+        }
         scale = minOf(widthPx.toFloat() / screen.widthPx, heightPx.toFloat() / screen.heightPx)
         offsetX = (widthPx - screen.widthPx * scale) / 2f
         offsetY = (heightPx - screen.heightPx * scale) / 2f
@@ -688,7 +761,9 @@ class XDesktopState {
         canvas.restore()
         // The software cursor is drawn unscaled so it stays usable at any zoom,
         // at the server-side pointer position (which client warps move too).
-        if (XServer.clientCount > 0) {
+        // In popup-layer mode (D2) each shell-hosted window draws the cursor
+        // itself when the pointer is inside it, so the desktop skips it.
+        if (XServer.clientCount > 0 && document.windowManager == null) {
             val px = XServer.pointerX
             val py = XServer.pointerY
             if (px in 0 until screen.widthPx && py in 0 until screen.heightPx) {
@@ -873,6 +948,12 @@ class XDesktopState {
 fun XDesktopSurface(
     state: XDesktopState,
     modifier: Modifier = Modifier,
+    /**
+     * The shell-side WM bridge (D2). This surface reports the desktop's origin
+     * in root px to it, so guest windows hosted in shell windows can convert
+     * their own positions into X screen coordinates.
+     */
+    bridge: GuestWindowBridge? = null,
     /** Desktop click that is not on a shell window: the shell closes its Start menu. */
     onDesktopTap: () -> Unit = {},
 ) {
@@ -880,7 +961,12 @@ fun XDesktopSurface(
     LaunchedEffect(state.started) {
         if (!state.started) return@LaunchedEffect
         while (isActive) {
-            withFrameNanos { state.onPoll() }
+            // One loop drives the redraw poll AND the guest-window reconcile
+            // (D2): both are cheap per frame and must not drift apart.
+            withFrameNanos {
+                state.onPoll()
+                bridge?.sync()
+            }
         }
     }
     DisposableEffect(keyboardController, state) {
@@ -891,6 +977,16 @@ fun XDesktopSurface(
         modifier = modifier
             .fillMaxSize()
             .onSizeChanged { state.onSurfaceSize(it.width, it.height) }
+            .onGloballyPositioned { coords ->
+                // This surface fills the desktop box exactly, so its root
+                // position IS the desktop origin the bridge subtracts from
+                // every hosted window's positionInRoot.
+                if (bridge != null) {
+                    val origin = coords.positionInRoot()
+                    bridge.desktopOriginX = origin.x
+                    bridge.desktopOriginY = origin.y
+                }
+            }
             .drawBehind {
                 // Reading frame/cursorTick subscribes this draw to the server
                 // poll and the pointer (Compose state read in the draw phase -
@@ -961,7 +1057,16 @@ fun XDesktopSurface(
             } else {
                 null
             }
-            if (phase == DesktopBrowserLauncher.LaunchPhase.STARTING || failure != null) {
+            // "Says running but nothing is visible" must never happen again:
+            // while a session is alive but has not mapped a window yet (first
+            // run builds the fontconfig cache - up to a minute), the desktop
+            // SAYS so, with the connected-client count and where the evidence
+            // lives. Once the bridge hosts a window (or a popup maps), the pill
+            // steps aside.
+            val waiting = phase == DesktopBrowserLauncher.LaunchPhase.RUNNING &&
+                (bridge?.hostedCount ?: 0) == 0 &&
+                state.clients > 0
+            if (phase == DesktopBrowserLauncher.LaunchPhase.STARTING || failure != null || waiting) {
                 androidx.compose.foundation.layout.Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
@@ -973,7 +1078,7 @@ fun XDesktopSurface(
                         )
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                 ) {
-                    if (phase == DesktopBrowserLauncher.LaunchPhase.STARTING) {
+                    if (phase == DesktopBrowserLauncher.LaunchPhase.STARTING || waiting) {
                         androidx.compose.material3.CircularProgressIndicator(
                             color = androidx.compose.ui.graphics.Color.White,
                             strokeWidth = 2.dp,
@@ -986,8 +1091,12 @@ fun XDesktopSurface(
                             phase == DesktopBrowserLauncher.LaunchPhase.STARTING ->
                                 DesktopBrowserLauncher.launchMessage?.lineSequence()?.firstOrNull()
                                     ?: "Starting desktop session\u2026"
-                            else ->
+                            failure != null ->
                                 "Desktop session failed to start: $failure"
+                            else ->
+                                "Session running - ${state.clients} client(s) connected, no window mapped yet. " +
+                                    "A first run builds the font cache (up to ~1 min); Terminal \u25B8 log and the " +
+                                    "protocol trace show what the guest is doing."
                         },
                         color = if (failure != null) {
                             androidx.compose.ui.graphics.Color(0xFFFF9E9E)
