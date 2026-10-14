@@ -72,13 +72,6 @@ val ShellApps: List<AppSpec> = listOf(
     AppSpec("taskmgr", "Task Manager", R.drawable.ic_app_taskmgr),
     AppSpec("containers", "Container Manager", R.drawable.ic_app_container),
     AppSpec(
-        id = "xdesktop",
-        label = "X Desktop",
-        iconRes = R.drawable.ic_app_xdesktop,
-        pinned = false,
-        title = { "X Desktop (${dev.win11we.shell.x11.XServer.DISPLAY})" },
-    ),
-    AppSpec(
         id = "diagnostics",
         label = "Diagnostics",
         iconRes = R.drawable.ic_app_diagnostics,

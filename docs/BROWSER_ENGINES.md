@@ -79,7 +79,8 @@ unlocks itself the moment the runtime is complete:
    reason (`BINARIES_NOT_READY`, `ROOTFS_MISSING`, …).
 4. **UI**: a ready engine turns the Open button into a desktop launch — the URL from
    the address bar goes to the guest, the result is toasted and shown in the window,
-   and the X Desktop window opens/focuses so the browser is actually visible. An
+   and the browser's window appears directly on the desktop (the desktop layer IS
+   the X screen - no viewer window). An
    unready choice keeps the old fallback (Android Firefox / system default), exactly
    as `RoadmapGatingTest` pins it.
 5. **Profile**: persistent at `<files>/browser/firefox-profile`, bound over
@@ -101,7 +102,7 @@ unlocks itself the moment the runtime is complete:
    contract). A failed materialisation degrades to a slower first run, named
    in the shared log — it never blocks the launch. DNS/SSL need no extra step:
    the provisioned `ca-certificates` + the written-and-bound `resolv.conf` are
-   the DNS/SSL path. The X Desktop window shows the launch instead of looking
+   the DNS/SSL path. The desktop's session pill shows the launch instead of looking
    hung: `DesktopBrowserLauncher` publishes a `LaunchPhase`
    (STARTING/RUNNING/FAILED) that the window renders as a spinner plus
    "first run builds the fontconfig cache — up to a minute" until the first
@@ -114,7 +115,7 @@ unlocks itself the moment the runtime is complete:
    `_NET_SUPPORTING_WM_CHECK` announcement (bounded: a dead WM must never hang
    the launch). Openbox frames, places and focuses Firefox like the real EWMH
    WM it is (`_NET_WM_SYNC_REQUEST` rides the D1f SYNC counters), and the whole
-   desktop renders inside the single X Desktop surface. URL handoffs skip the
+   desktop renders inside the single desktop surface. URL handoffs skip the
    WM start - the session's openbox is already up. Two more first-load fixes
    ride along: `MOZ_FORCE_DISABLE_E10S=1` collapses Firefox to one process
    (proot ptraces every fork; the multi-process model was most of the stall,

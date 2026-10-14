@@ -93,7 +93,7 @@ object FirefoxSession {
      * The desktop-session prelude: start openbox as the guest window manager
      * (the shell's X server runs pass-through - it does NOT claim
      * SubstructureRedirect, so the session brings its own WM and the whole
-     * desktop, frames and all, renders inside the X Desktop surface), and give
+     * desktop, frames and all, renders inside the shell's desktop surface), and give
      * it up to ~5 s to announce itself through _NET_SUPPORTING_WM_CHECK before
      * Firefox maps its first window. Without openbox provisioned the session
      * still runs: windows map undecorated, and readiness names the missing

@@ -116,15 +116,6 @@ private fun WindowBody(
                         store.browserPackage = engineId.removePrefix("android:")
                     }
                 },
-                onRequestXDesktop = {
-                    // A launched desktop engine is only visible on the X surface:
-                    // focus the running X Desktop window or open one.
-                    val spec = ShellApps.firstOrNull { it.id == "xdesktop" }
-                    if (spec != null) {
-                        val running = manager.windows.firstOrNull { it.app.id == "xdesktop" && !it.closing }
-                        if (running != null) manager.focus(running) else manager.open(spec, desktopSize)
-                    }
-                },
             )
         }
         "settings" -> {
@@ -170,7 +161,6 @@ private fun WindowBody(
                 )
             }
         }
-        "xdesktop" -> dev.win11we.shell.ui.xdesktop.XDesktopWindow()
         else -> ComingSoon(label = label, enabled = enabled)
     }
     // Composition itself cannot be try/caught; the screens that do I/O report through

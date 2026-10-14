@@ -57,7 +57,7 @@ object RuntimePaths {
      * `container.rootfsLocation` setting when set, else [defaultRootfs].
      *
      * This existed implicitly in three call sites (browser launch, container
-     * launcher, X Desktop) and NOT in two others (Diagnostics, which therefore
+     * launcher, the desktop layer) and NOT in two others (Diagnostics, which therefore
      * skipped all five X self-test rows whenever the setting pointed elsewhere,
      * and the download page). One function, so the self-test, Provision and the
      * launcher can never disagree about which directory they are judging.

@@ -176,7 +176,8 @@ class XSelfTestTest {
         val serverDown = test(healthyRunner(), serverRunning = false).run()
         serverDown.steps.forEach { step ->
             assertEquals(StepVerdict.SKIPPED, step.verdict)
-            assertTrue(step.reason!!.contains("X Desktop"))
+            // The viewer app is gone: the skip reason names the server + the desktop boot.
+            assertTrue(step.reason!!.contains("X server"))
         }
 
         val noClients = test(healthyRunner(), rootfsDir = rootfs(withClients = false)).run()

@@ -24,8 +24,11 @@ class RoadmapGatingTest {
     @Test
     fun `every shell app opens a real window - nothing is left as a stub`() {
         val ids = ShellApps.map { it.id }
+        // "xdesktop" is deliberately GONE: the X screen IS the shell's desktop
+        // layer (ui/xdesktop/XDesktopSurface in DesktopScreen) - guest windows
+        // live on the desktop, not inside a viewer app.
         assertEquals(
-            listOf("explorer", "notepad", "browser", "settings", "terminal", "taskmgr", "containers", "xdesktop", "diagnostics"),
+            listOf("explorer", "notepad", "browser", "settings", "terminal", "taskmgr", "containers", "diagnostics"),
             ids,
         )
         assertTrue("all N2 apps must be enabled", ShellApps.all { it.enabled })

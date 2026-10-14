@@ -51,15 +51,14 @@ private val Card = RoundedCornerShape(9.dp)
 /**
  * Browser window. The shell never renders web content itself: it resolves the
  * address and hands it to a real browser - an Android one via intent, or the
- * desktop engine (Firefox ESR in the rootfs, D1/R3) which opens on the X Desktop.
+ * desktop engine (Firefox ESR in the rootfs, D1/R3) whose windows appear
+ * directly on the desktop - the shell's desktop layer IS the X screen.
  */
 @Composable
 fun BrowserApp(
     state: BrowserState,
     onChooseBrowser: (String) -> Unit,
     modifier: Modifier = Modifier,
-    /** Opens (or focuses) the X Desktop window after a desktop-engine launch. */
-    onRequestXDesktop: () -> Unit = {},
 ) {
     val engine = state.engine()
     val context = LocalContext.current
@@ -107,7 +106,7 @@ fun BrowserApp(
             val fallback = state.fallbackNote { DesktopEngineReadiness.missing(it) }
             Text(
                 text = when {
-                    launchable -> "${engine.label} - opens on the X Desktop"
+                    launchable -> "${engine.label} - opens right on the desktop"
                     state.engineBlocked() -> "${engine.label} - runtime not installed"
                     fallback != null -> "Desktop engine not ready ($fallback) - opens in ${engine.label} instead"
                     else -> "Opens in ${engine.label}"
@@ -138,7 +137,6 @@ fun BrowserApp(
                                 state.desktopMessage?.let {
                                     Toast.makeText(context, it, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
                                 }
-                                if (ok) onRequestXDesktop()
                             }
                             state.engineBlocked() ->
                                 Toast.makeText(

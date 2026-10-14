@@ -155,10 +155,9 @@ remains the authoritative gate.
 
 ## 6. Device playbook (owner; logs feed back like D1f/D1g did)
 
-1. Install the CI debug APK (arm64, Android 9+). Cold start: the X Desktop
-   session window opens **maximized** on the shell's desktop - one window, the
-   (empty) display inside, "Waiting for clients". Close it → the shell. Toggle:
-   Settings ▸ Containers ▸ *Boot into X Desktop session*.
+1. Install the CI debug APK (arm64, Android 9+). Cold start: the Win11 shell
+   comes up and its desktop layer already IS the (empty) X screen - one window,
+   nothing to open. Launching a guest (step 6) takes the desktop over directly.
 2. Settings ▸ Storage ▸ Runtime download: ROOTFS + FIREFOX_ESR + both WINE
    debs → extract → Provision (browser stack).
 3. Container Manager: **Install Wine payload** → expect "Wine payload ready at
@@ -168,9 +167,10 @@ remains the authoritative gate.
    of seconds). Diagnostics ▸ Run self-test: rows 2/3 (`wine64 --version`,
    `wine64 cmd /c echo hello`) must now PASS — they were SKIPPED before.
 5. Start the container → `wine64 cmd` window on :100; `echo hello` inside.
-6. Browser ▸ Firefox ESR ▸ open example.com, then a JS-heavy site: no white
-   window (software compositing), touch scroll, soft keyboard, clipboard both
-   ways.
+6. Browser ▸ Firefox ESR ▸ open example.com: the session pill shows the launch,
+   then the openbox-framed Firefox window appears **directly on the desktop**.
+   A JS-heavy site next: no white window (software compositing), touch scroll,
+   soft keyboard (tap the desktop first), clipboard both ways.
 7. Kill the app from Recents mid-session, relaunch: Container Manager ▸ the
    prefix row may note a stale `.update-lock` → **Repair** → Ready. Start works
    again — this is the corruption round-trip.

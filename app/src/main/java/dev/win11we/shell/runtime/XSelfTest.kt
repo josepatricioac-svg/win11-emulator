@@ -143,8 +143,9 @@ class XSelfTest(
             !RuntimePaths.rootfsExtracted(rootfsDir) ->
                 "Rootfs not extracted at ${rootfsDir.absolutePath} - Runtime download first."
             !xServerRunning() ->
-                "The shell's X server is not running - open Start ▸ X Desktop once " +
-                    "(it binds ${RuntimePaths.X_DISPLAY}), then re-run."
+                "The shell's X server is not running - it boots with the desktop itself " +
+                    "(binds ${RuntimePaths.X_DISPLAY}); if the bind failed, the shared log names " +
+                    "the error. Restart the app, then re-run."
             else -> null
         }
         val missing = { path: String, pkg: String ->
@@ -199,7 +200,7 @@ class XSelfTest(
             outcome.exitCode == null && outcome.error?.contains("Timed out") == true -> {
                 verdict = StepVerdict.FAIL
                 reason = "${probe.id} hung: the socket connected but the server never answered - " +
-                    "check the X Desktop window and the shared log." +
+                    "check the desktop surface and the shared log." +
                     if (probe.id == GTK_PROBE_ID) {
                         " A first run also builds the fontconfig cache, so give it a minute and re-run."
                     } else ""

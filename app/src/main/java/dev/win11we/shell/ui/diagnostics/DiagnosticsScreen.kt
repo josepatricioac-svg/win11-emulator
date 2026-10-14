@@ -137,7 +137,7 @@ fun DiagnosticsScreen(state: DiagnosticsState, modifier: Modifier = Modifier) {
                     "whole window; a FAIL carries the exit code, the client's own output and the " +
                     "connection's protocol trace. If GTK3 fails, its row quotes GTK's " +
                     "\"request_code\" line - that number names the X request to implement next. " +
-                    "Open Start ▸ X Desktop once first so the server is bound. The clients come from " +
+                    "The server boots with the desktop itself - there is nothing to open first. The clients come from " +
                     "x11-utils, x11-apps and libgtk-3-bin (the Provision step installs all three); a " +
                     "missing one SKIPs with the package named. Runs on a worker thread, and the first " +
                     "GTK3 run can take a minute while it builds the font cache.",

@@ -534,6 +534,7 @@ class XConnection(
                 window.x = newX
                 window.y = newY
                 target.children.add(id)
+                document.noteStructureChange()
                 notifyStructure(X11.EV_REPARENT_NOTIFY, newParent, id)
                 // The parent/position change is a configuration change the client
                 // must hear about (a WM's frame flow waits on this ConfigureNotify).

@@ -72,7 +72,7 @@ the spec positions - deliberately, as with the D1b test fixes.
   resources live server-wide in `XDocument`; `CWCursor` is parsed in
   Create/ChangeWindowAttributes (previously an unconsumed value-list word);
   `QueryBestSize` clamps cursors to 64x64; `effectiveCursorGlyph()` resolves the
-  X inherit-from-ancestor rule and the X Desktop surface draws a **software cursor**
+  X inherit-from-ancestor rule and the desktop surface draws a **software cursor**
   (arrow, I-beam, crosshair, watch approximation) at the server-side pointer
   position, unscaled for usability. Pixmap-based cursors render as the arrow.
 - **SendEvent**: real delivery - destination resolution (root/PointerWindow/
@@ -310,7 +310,7 @@ Android-clipboard reclaims instead of holding stale ownership. Implemented:
   SetCursorName/GetCursorName/ChangeCursor(ByName) manage real named cursor
   resources; GetCursorImage(AndName) rasterises the built-in 16x16 glyph art
   (the same shapes the software cursor draws - honest approximation, documented
-  in `XFixesCursorArt`); HideCursor/ShowCursor is honoured by the X Desktop
+  in `XFixesCursorArt`); HideCursor/ShowCursor is honoured by the desktop
   surface (`effectiveCursorGlyph` answers `CURSOR_HIDDEN`, the renderer skips).
 - **Real region algebra** (`XRegionOps`, pure + unit-tested): union, intersect,
   subtract (slab splitting), invert against bounds, translate, expand, extents,
@@ -371,7 +371,7 @@ never places guest windows itself.
 
 - **No shell SubstructureRedirect.** The claim is exclusive in X (second
   selector = Access error), so a shell WM would lock every guest window
-  manager out. `XServer.ensureRunning` and the X Desktop surface no longer
+  manager out. `XServer.ensureRunning` and the desktop surface no longer
   attach `ShellWindowManager`; the session brings its own WM (openbox for the
   browser session, `explorer.exe /desktop` for Wine later). Without a WM,
   clients map undecorated and still work. `ShellWindowManager` stays for tests
@@ -408,7 +408,7 @@ never places guest windows itself.
 
 ### Soft keyboard (the D1b open item)
 
-No XIM/XKB is needed for Latin-1 text: the X Desktop window hosts a 1dp transparent
+No XIM/XKB is needed for Latin-1 text: the desktop's X layer hosts a 1dp transparent
 `BasicTextField`; taps focus it and show the soft keyboard. Committed text is
 diffed by the pure-Kotlin `ImeCommitExtractor` (composition-aware: preview text is
 never injected, commits inject whole words), then `XInput.injectText` turns each
@@ -551,7 +551,8 @@ xeyes red = core protocol gap; xeyes green + xclock red = RENDER gap; all of
 those green + `gtk3-display` red = a GTK3/XI2/XKB gap, and GTK's own
 `request_code` in the row says which; **all five green = the handshake Firefox
 needs is there.**
-Prerequisites that are missing (server not bound - open Start ▸ X Desktop once;
+Prerequisites that are missing (server not bound - it boots with the desktop, so
+restart the app and check the shared log for a bind error;
 rootfs not extracted; `x11-apps`/`libgtk-3-bin` not installed) SKIP with the
 reason named, so a missing diagnostic never reads as a red run.
 
@@ -562,13 +563,14 @@ even repaint to "Testing..." while it blocked. The same is true of the
 `--version` probes and the R4 self-test. Any throwable becomes a shared-log line
 instead of taking the process down (crash-safety rules 1 and 2).
 
-Open **Start → X Desktop** (not pinned to the taskbar). The window starts the server on
-`:100` at its own pixel size and shows "Waiting for clients" until a guest connects.
-Anything that speaks core X11 to the abstract socket `@/tmp/.X11-unix/X100` — e.g.
-`xclock` from a proot rootfs with `DISPLAY=:100` — appears in the desktop surface
-(unmanaged, or framed once the session's window manager is up; D1g pass-through).
-Tap the surface to focus it, then type with the soft keyboard; the pointer shows the
-client-chosen cursor shape.
+There is nothing to open: the shell's desktop layer IS the X screen. The server boots
+with the desktop at `:100` and the layer keeps the root locked to the surface size.
+While no guest window is mapped the Win11 wallpaper shows; anything that speaks core
+X11 to the abstract socket `@/tmp/.X11-unix/X100` — e.g. `xclock` from a proot rootfs
+with `DISPLAY=:100` — takes the desktop over the moment it maps (unmanaged, or framed
+once the session's window manager is up; D1g pass-through). Tap the desktop to focus
+it, then type with the soft keyboard; the pointer shows the client-chosen cursor
+shape.
 
 ## Lifecycle: one window, one process (this pass)
 
@@ -576,13 +578,15 @@ The server has never been a separate app - it is the in-process `XServer` object
 and this section pins the *contract* around it (implemented in
 `runtime/SessionLifecycle.kt`, wired in `MainActivity`/`DesktopScreen`):
 
-- **Boot**: with Settings ▸ Containers ▸ *Boot into X Desktop session* on (the
-  default), the shell calls `SessionLifecycle.boot` → `XServer.ensureRunning()`
-  and opens the X Desktop window **maximized**: the emulator starts, the desktop
-  is inside it, and there is exactly one window (the single `MainActivity`).
-  Every other entry point that needs the display (the X Desktop surface itself,
-  `DesktopBrowserLauncher`) calls the same idempotent ensure - guests can never
-  race a server that is not listening yet.
+- **Boot**: `DesktopScreen` calls `SessionLifecycle.boot` →
+  `XServer.ensureRunning()` as soon as the shell composes, and its desktop layer
+  (`ui/xdesktop/XDesktopSurface`) renders that display full-bleed under the shell
+  windows: transparent while no guest window is mapped, the guest's desktop the
+  moment one maps. There is exactly one window (the single `MainActivity`) and
+  NO viewer app - the former "X Desktop" window was deleted. Every other entry
+  point that needs the display (the surface itself, `DesktopBrowserLauncher`)
+  calls the same idempotent ensure - guests can never race a server that is not
+  listening yet.
 - **Resize**: `XDesktopState.onSurfaceSize` now keeps the X screen locked to the
   surface: rotation or a window resize calls `XServer.resizeScreen`, which
   re-lays the root, keeps clients alive and broadcasts a root `ConfigureNotify`

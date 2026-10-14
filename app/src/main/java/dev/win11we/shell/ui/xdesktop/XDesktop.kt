@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -54,6 +56,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.win11we.shell.runtime.DesktopBrowserLauncher
 import dev.win11we.shell.ui.terminal.SharedLog
 import dev.win11we.shell.x11.CursorGlyph
@@ -642,16 +645,28 @@ class XDesktopState {
         }
     }
 
-    /** Called once per frame while visible; bumps [frame] when the server changed. */
+    /**
+     * Mapped non-root windows: the desktop layer's visibility gate. Zero means
+     * "no guest owns the screen right now" - the shell wallpaper shows through
+     * and a launching session is represented by its pill instead of a black
+     * rectangle. Recomputed only when a revision actually changed.
+     */
+    var guestWindows by mutableIntStateOf(0)
+        private set
+
+    /** Called once per frame while composed; bumps [frame] when the server changed. */
     fun onPoll() {
+        val document = XServer.document
         val signature = XServer.displayList.revision * 31 +
             XServer.contentRevision * 7 +
+            document.structureRevision * 3 +
             XServer.clientCount
         if (signature != frame) {
             frame = signature
             clients = XServer.clientCount
+            guestWindows = document.paintOrder().count { it.id != document.rootId }
             // A guest connected: the launcher's STARTING phase is over (the
-            // loading indicator in the window yields to the client's pixels).
+            // session pill yields to the client's pixels).
             if (clients > 0) DesktopBrowserLauncher.noteClientConnected()
         }
     }
@@ -828,13 +843,39 @@ class XDesktopState {
 }
 
 /**
- * The window body that shows the X screen. The server keeps running when the
- * window closes - guest sessions outlive their viewer, like a real X display.
+ * The shell's DESKTOP LAYER: the X screen itself, rendered full-bleed behind
+ * the shell windows - there is no "X Desktop" app/window anymore (the viewer
+ * model was deleted on purpose: guest windows - the browser, wine apps - are
+ * part of the desktop, not something you open an app to look at).
+ *
+ * Visibility rule (what keeps the shell honest): with no mapped guest windows
+ * the layer paints NOTHING and the Win11 wallpaper shows through; the moment a
+ * session maps its first window (openbox frame, Firefox, explorer.exe ...),
+ * the guest's X desktop - root background, windows, frames, software cursor -
+ * takes over the whole surface, exactly like switching to the guest's screen.
+ * A launching/failed session shows a small pill instead of a black rectangle.
+ *
+ * Input: pointer events route through [XDesktopState.onMotionEvent] into the
+ * server (root-window taps included - harmless, and what focuses the guest for
+ * the soft keyboard); [onDesktopTap] additionally lets the shell close its
+ * Start menu on a desktop click, replacing the old wallpaper click. Keyboard
+ * and IME work exactly as they did in the window: a hidden field owns the
+ * input connection and commits become real X key events.
+ *
+ * Lifecycle: the server is booted by DesktopScreen (SessionLifecycle.boot) and
+ * stopped with the Activity (MainActivity.onDestroy); this layer only adopts
+ * whatever is running ([XDesktopState.onSurfaceSize] starts-or-reconciles, so
+ * a late server start still renders) and keeps the X screen locked to the
+ * surface size (rotation/resize -> resizeScreen -> root ConfigureNotify).
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-fun XDesktopWindow(modifier: Modifier = Modifier) {
-    val state = remember { XDesktopState() }
+fun XDesktopSurface(
+    state: XDesktopState,
+    modifier: Modifier = Modifier,
+    /** Desktop click that is not on a shell window: the shell closes its Start menu. */
+    onDesktopTap: () -> Unit = {},
+) {
     val keyboardController = LocalSoftwareKeyboardController.current
     LaunchedEffect(state.started) {
         if (!state.started) return@LaunchedEffect
@@ -849,27 +890,36 @@ fun XDesktopWindow(modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(androidx.compose.ui.graphics.Color.Black)
             .onSizeChanged { state.onSurfaceSize(it.width, it.height) }
             .drawBehind {
-                // Reading frame subscribes this draw to the server signature poll;
-                // reading cursorTick re-draws the software cursor on pointer moves
-                // (both are Compose state read in the draw phase - no recomposition).
+                // Reading frame/cursorTick subscribes this draw to the server
+                // poll and the pointer (Compose state read in the draw phase -
+                // no recomposition). guestWindows gates the whole layer: no
+                // guest content -> fully transparent -> the wallpaper shows.
                 state.frame.let {
-                    state.render(drawContext.canvas.nativeCanvas, size.width.toInt(), size.height.toInt())
+                    if (state.guestWindows > 0) {
+                        state.render(
+                            drawContext.canvas.nativeCanvas,
+                            size.width.toInt(),
+                            size.height.toInt(),
+                        )
+                    }
                 }
                 @Suppress("UNUSED_EXPRESSION")
                 state.cursorTick
             }
-            .pointerInteropFilter { event -> state.onMotionEvent(event) }
+            .pointerInteropFilter { event ->
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) onDesktopTap()
+                state.onMotionEvent(event)
+            }
             .onPreviewKeyEvent { state.onPreviewKey(it) }
             .focusRequester(state.focusRequester)
             .focusable()
             .onKeyEvent { state.onKey(it) },
     ) {
         // The hidden IME field: a 1dp transparent BasicTextField that owns the
-        // input connection. Committed text becomes X key events (XInput.injectText),
-        // so any guest app that takes keyboard focus can be typed into.
+        // input connection. Committed text becomes X key events, so any guest
+        // app that takes keyboard focus can be typed into - now desktop-wide.
         BasicTextField(
             value = state.imeValue,
             onValueChange = state::onImeValueChanged,
@@ -891,49 +941,63 @@ fun XDesktopWindow(modifier: Modifier = Modifier) {
                 onSend = { state.onImeAction() },
             ),
         )
-        if (!state.started) {
+        if (!state.started && state.startError != null) {
+            // The server failed to bind: name it on the desktop instead of
+            // letting the shell pretend nothing happened.
             Text(
-                text = state.startError?.let { "X server failed to start: $it" }
-                    ?: "Starting X server on ${XServer.DISPLAY}…",
-                color = androidx.compose.ui.graphics.Color.White,
-                modifier = Modifier.align(Alignment.Center).padding(16.dp),
+                text = "X server failed to start: ${state.startError}",
+                color = androidx.compose.ui.graphics.Color(0xFFFF9E9E),
+                fontSize = 11.sp,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp),
             )
-        } else if (state.clients == 0) {
-            // Goal 2 step 2: a VISIBLE loading state while a desktop browser
-            // launches - the first run really takes up to a minute (fontconfig
-            // cache), and a silent black window reads as a hang. A failure
-            // replaces it with the named refusal instead of going quiet.
+        } else if (state.guestWindows == 0) {
+            // Session pill: visible feedback while a desktop browser launches
+            // (the first run really takes up to a minute - fontconfig cache),
+            // and the named refusal when it fails. No idle placeholder: an
+            // empty X desktop is just the shell's wallpaper.
             val phase = DesktopBrowserLauncher.launchPhase
             val failure = if (phase == DesktopBrowserLauncher.LaunchPhase.FAILED) {
                 DesktopBrowserLauncher.launchMessage
             } else {
                 null
             }
-            if (phase == DesktopBrowserLauncher.LaunchPhase.STARTING) {
-                androidx.compose.material3.CircularProgressIndicator(
-                    color = androidx.compose.ui.graphics.Color.White,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier.align(Alignment.Center).padding(bottom = 72.dp),
-                )
+            if (phase == DesktopBrowserLauncher.LaunchPhase.STARTING || failure != null) {
+                androidx.compose.foundation.layout.Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 24.dp)
+                        .background(
+                            androidx.compose.ui.graphics.Color(0xE6101418),
+                            androidx.compose.foundation.shape.RoundedCornerShape(50),
+                        )
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                ) {
+                    if (phase == DesktopBrowserLauncher.LaunchPhase.STARTING) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            color = androidx.compose.ui.graphics.Color.White,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                    }
+                    Text(
+                        text = when {
+                            phase == DesktopBrowserLauncher.LaunchPhase.STARTING ->
+                                DesktopBrowserLauncher.launchMessage?.lineSequence()?.firstOrNull()
+                                    ?: "Starting desktop session\u2026"
+                            else ->
+                                "Desktop session failed to start: $failure"
+                        },
+                        color = if (failure != null) {
+                            androidx.compose.ui.graphics.Color(0xFFFF9E9E)
+                        } else {
+                            androidx.compose.ui.graphics.Color.White
+                        },
+                        fontSize = 11.sp,
+                    )
+                }
             }
-            Text(
-                text = when {
-                    phase == DesktopBrowserLauncher.LaunchPhase.STARTING ->
-                        DesktopBrowserLauncher.launchMessage ?: "Starting desktop browser…"
-                    failure != null ->
-                        "Desktop browser failed to start:\n$failure\n\n" +
-                            "Diagnostics and Terminal ▸ log carry the details."
-                    else ->
-                        "X server running on ${XServer.DISPLAY}\nWaiting for clients - start a container to run Windows apps.\nTap the desktop, then use the soft keyboard to type into guest apps."
-                },
-                color = when {
-                    failure != null -> androidx.compose.ui.graphics.Color(0xFFFF9E9E)
-                    phase == DesktopBrowserLauncher.LaunchPhase.STARTING ->
-                        androidx.compose.ui.graphics.Color.White
-                    else -> androidx.compose.ui.graphics.Color(0xFFB8B8B8)
-                },
-                modifier = Modifier.align(Alignment.Center).padding(16.dp),
-            )
         }
     }
 }

@@ -548,6 +548,24 @@ class XDocument(
     fun setScreenSize(widthPx: Int, heightPx: Int) {
         screen = screen.copy(widthPx = widthPx, heightPx = heightPx)
         windows[screen.rootId]?.let { it.width = widthPx; it.height = heightPx }
+        noteStructureChange()
+    }
+
+    /**
+     * Bumped on every window-TREE change (create/destroy/map/unmap/reparent/
+     * configure/circulate/screen resize). The desktop layer polls this cheap
+     * counter to notice guest windows appearing or disappearing WITHOUT
+     * walking the tree per frame - XServer.contentRevision only covers
+     * WM-driven changes and the display list only covers drawing, so a pure
+     * structural change (a client mapping its first window) used to be
+     * invisible until the first paint landed.
+     */
+    @Volatile
+    var structureRevision: Long = 0
+        private set
+
+    fun noteStructureChange() {
+        structureRevision++
     }
 
     /** Set by XServer: invoked when an event was queued onto another connection. */
@@ -631,6 +649,7 @@ class XDocument(
         )
         windows[id] = window
         owner.children.add(id)
+        noteStructureChange()
         return window
     }
 
@@ -648,6 +667,7 @@ class XDocument(
         synchronized(passiveGrabs) { passiveGrabs.removeAll { it.window == id } }
         pointerGrab?.takeIf { it.window == id }?.let { pointerGrab = null }
         keyboardGrab?.takeIf { it.window == id }?.let { keyboardGrab = null }
+        noteStructureChange()
         return true
     }
 
@@ -658,6 +678,7 @@ class XDocument(
         if (parent.children.size < 2) return true
         parent.children.remove(id)
         if (place == 0) parent.children.add(id) else parent.children.add(0, id)
+        noteStructureChange()
         return true
     }
 
@@ -672,6 +693,7 @@ class XDocument(
         val window = windows[id] ?: return false
         if (window.mapped) return false
         window.mapped = true
+        noteStructureChange()
         return isViewable(id)
     }
 
@@ -681,6 +703,7 @@ class XDocument(
         window.mapped = false
         revertFocusIf(id)
         dropSelectionsOfWindow(id)
+        noteStructureChange()
         return true
     }
 
@@ -691,6 +714,7 @@ class XDocument(
         width?.takeIf { it > 0 }?.let { window.width = it }
         height?.takeIf { it > 0 }?.let { window.height = it }
         borderWidth?.takeIf { it >= 0 }?.let { window.borderWidth = it }
+        noteStructureChange()
         return true
     }
 

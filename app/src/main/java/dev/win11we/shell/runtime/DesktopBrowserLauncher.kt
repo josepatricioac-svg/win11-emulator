@@ -98,12 +98,12 @@ object DesktopEngineReadiness {
 object DesktopBrowserLauncher {
 
     /**
-     * Launch lifecycle for the X Desktop window's loading indicator (Goal 2
-     * step 2): STARTING covers the gap between the proot spawn and the first
-     * guest X connection - up to a minute on a first run while fontconfig
-     * builds its cache - so the window says what is happening instead of
-     * looking dead. Compose state; written from launch (any thread) under a
-     * mutable snapshot, read by the X Desktop window.
+     * Launch lifecycle for the desktop's session pill (Goal 2 step 2):
+     * STARTING covers the gap between the proot spawn and the first guest X
+     * connection - up to a minute on a first run while fontconfig builds its
+     * cache - so the desktop says what is happening instead of looking dead.
+     * Compose state; written from launch (any thread) under a mutable
+     * snapshot, read by the X desktop layer (ui/xdesktop/XDesktopSurface).
      */
     enum class LaunchPhase { IDLE, STARTING, RUNNING, FAILED }
 
@@ -120,7 +120,7 @@ object DesktopBrowserLauncher {
         }
     }
 
-    /** Called by the X Desktop window when a guest client has connected. */
+    /** Called by the X desktop layer when a guest client has connected. */
     fun noteClientConnected() {
         if (launchPhase == LaunchPhase.STARTING) setPhase(LaunchPhase.RUNNING, null)
     }
@@ -153,7 +153,7 @@ object DesktopBrowserLauncher {
                 if (url.isBlank()) {
                     return DesktopLaunchOutcome(
                         false,
-                        "Firefox ESR is already running (no URL to hand over) - shown in the X Desktop window.",
+                        "Firefox ESR is already running (no URL to hand over) - it is on the desktop.",
                     )
                 }
                 // Hand the URL to the RUNNING instance through its D-Bus session:
@@ -187,7 +187,7 @@ object DesktopBrowserLauncher {
                 ContainerService.start(appContext)
                 DesktopLaunchOutcome(
                     true,
-                    "Firefox ESR starting on ${RuntimePaths.X_DISPLAY} - open Start \u25B8 X Desktop to see it.",
+                    "Firefox ESR starting on ${RuntimePaths.X_DISPLAY} - its window appears directly on the desktop.",
                 )
             } else {
                 setPhase(LaunchPhase.FAILED, "[${result.failure}] ${result.message}")

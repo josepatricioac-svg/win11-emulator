@@ -127,3 +127,40 @@ docs/WINE_RUNTIME.md §6); no UI for installing arbitrary Windows apps into a
 prefix; `win32` prefixes stay unavailable on arm64 (named, not silently);
 RoadmapGatingTest untouched (desktop-engine catalogue stays statically gated —
 readiness is the dynamic half, as before).
+
+
+## Snapshot 2026-10-14 (2) — the X Desktop app is deleted: the desktop layer IS the X screen
+
+Owner directive: "delete the X Desktop app itself and make the whole desktop run
+inside the X server … no need to open an app to view things like the browser."
+Implemented exactly that, on top of the lifecycle/Prefix-Manager pass above:
+
+- **Deleted**: the `xdesktop` ShellApp entry, the WindowContent branch,
+  `XDesktopWindow` (the viewer composable), BrowserApp's `onRequestXDesktop`
+  plumbing, and the `shell.bootToDesktopSession` setting (key, store var,
+  catalogue entry, toggle) — the server now boots unconditionally with the
+  shell, there is no window to boot into.
+- **Added**: `XDesktopSurface` (same file, `ui/xdesktop/XDesktop.kt`) composed
+  by DesktopScreen UNDER the window layer, full-bleed. Visibility rule: paints
+  nothing while no non-root X window is mapped (wallpaper shows through); the
+  moment a session maps one, the guest desktop (root background, openbox frames,
+  apps, software cursor) takes over the surface. Desktop taps route into X and
+  dismiss the Start menu; the hidden IME field now serves the whole desktop.
+  A small session pill (STARTING spinner / FAILED reason) replaces the old
+  in-window placeholder text.
+- **X plumbing**: `XDocument.structureRevision` (bumped by create/destroy/map/
+  unmap/reparent/configure/circulate/resize) joins the poll signature, so a
+  guest window appearing is detected on the same frame even before its first
+  paint; `XDesktopState.guestWindows` drives the visibility gate.
+- **Messages/pins updated deliberately**: RoadmapGatingTest's app-id list loses
+  `xdesktop` (comment explains why); XSelfTest's "open Start ▸ X Desktop" skip
+  reason → "boots with the desktop" (XSelfTestTest pin follows); Diagnostics and
+  DesktopBrowserLauncher copy no longer name a viewer window.
+- Docs synced: README (diagram, bullets, lifecycle section, browser story,
+  Layout), docs/X_SERVER.md (device section + lifecycle), WINE_RUNTIME playbook,
+  BROWSER_ENGINES. PIPELINE_STATE's earlier snapshot stays as the record of the
+  previous pass. versionName 0.1.0-d1h.2.
+- Harness: 681 tests green off-Gradle after the change; whole-tree kotlinc
+  syntax check clean (the only errors in the touched Compose files are the
+  documented desktop-jar artifacts — painterResource/nativeCanvas/AndroidView/
+  nativeKeyEvent — that CI's real Android classpath resolves).

@@ -285,13 +285,6 @@ private fun StoragePage() {
 private fun ContainersPage(store: SettingsStore) {
     PageTitle("Containers")
     SettingsCard {
-        ToggleRow(
-            title = "Boot into X Desktop session",
-            subtitle = "Start the emulator straight into the embedded X desktop (one window, maximized). " +
-                "Off: the Win11 shell comes up first and the session opens from Start ▸ X Desktop.",
-            checked = store.bootToDesktopSession,
-            onCheckedChange = { store.bootToDesktopSession = it },
-        )
         RadioRow(
             title = "Box64 preset",
             subtitle = "Default profile for new containers; per-container override arrives in P2",

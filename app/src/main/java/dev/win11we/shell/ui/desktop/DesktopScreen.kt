@@ -41,6 +41,21 @@ fun DesktopScreen(store: SettingsStore) {
     val context = LocalContext.current
     val manager = rememberWindowManager(context, store)
     var startOpen by remember { mutableStateOf(false) }
+    // THE desktop's X layer state: one server, one screen, rendered full-bleed
+    // behind the shell windows (there is no X Desktop app/window anymore).
+    val xState = remember { dev.win11we.shell.ui.xdesktop.XDesktopState() }
+    // Lifecycle: emulator start -> embedded X server start, before any guest is
+    // spawned (guests connect to :100 the moment proot execs them). Idempotent;
+    // a bind failure is named in the shared log, never thrown (crash rule 1).
+    LaunchedEffect(Unit) {
+        val boot = dev.win11we.shell.runtime.SessionLifecycle.boot(
+            ensureXServer = { dev.win11we.shell.x11.XServer.ensureRunning() },
+            lastXError = { dev.win11we.shell.x11.XServer.lastError },
+        )
+        if (!boot.success) {
+            dev.win11we.shell.ui.terminal.SharedLog.error("session boot: ${boot.message}")
+        }
+    }
 
     FluentTheme(dark = store.themeMode == ThemeMode.DARK) {
     // P1: bridge X selections <-> the Android clipboard while the desktop lives
@@ -75,32 +90,6 @@ fun DesktopScreen(store: SettingsStore) {
         val desktopSize = DpSize(maxWidth, maxHeight - taskbarHeight)
         val palette = fluentPalette()
 
-        // "Start the emulator -> the desktop is inside it" (Phase 1): when the
-        // setting is on (the default), boot the embedded X server and open the
-        // X Desktop session MAXIMIZED as soon as the desktop is measured - one
-        // window (this Activity), the guest desktop rendered inside it. The
-        // shell stays fully reachable: close/minimize that window, or turn the
-        // setting off in Settings ▸ Containers for the shell-first boot. Runs
-        // once per process (sessionBooted), never on recomposition.
-        var sessionBooted by remember { mutableStateOf(false) }
-        LaunchedEffect(desktopSize, store.bootToDesktopSession) {
-            if (sessionBooted || !store.bootToDesktopSession) return@LaunchedEffect
-            sessionBooted = true
-            // SessionLifecycle.boot: the display must exist BEFORE any guest is
-            // spawned (guests connect to :100 the moment proot execs them).
-            val boot = dev.win11we.shell.runtime.SessionLifecycle.boot(
-                ensureXServer = { dev.win11we.shell.x11.XServer.ensureRunning() },
-                lastXError = { dev.win11we.shell.x11.XServer.lastError },
-            )
-            if (!boot.success) {
-                dev.win11we.shell.ui.terminal.SharedLog.error("session boot: ${boot.message}")
-            }
-            val spec = dev.win11we.shell.window.ShellApps.firstOrNull { it.id == "xdesktop" }
-            if (spec != null && manager.windows.none { it.app.id == "xdesktop" && !it.closing }) {
-                manager.open(spec, desktopSize).mode = dev.win11we.shell.window.WindowMode.MAXIMIZED
-            }
-        }
-
         // Mica/acrylic source: the bloom wallpaper pre-rendered tiny, blurred by
         // its own downscale and saturated. Once per desktop size and theme, in a
         // remember - never per frame, never from disk.
@@ -121,6 +110,16 @@ fun DesktopScreen(store: SettingsStore) {
         )
 
         Box(modifier = Modifier.fillMaxWidth().height(desktopSize.height)) {
+            // The guest desktop IS this layer: transparent while no guest window
+            // is mapped (the wallpaper shows through), the X screen - root
+            // background, openbox frames, Firefox, wine apps, software cursor -
+            // the moment a session maps one. Desktop taps route into X and also
+            // dismiss the Start menu, exactly like a real desktop click.
+            dev.win11we.shell.ui.xdesktop.XDesktopSurface(
+                state = xState,
+                modifier = Modifier.fillMaxSize(),
+                onDesktopTap = { startOpen = false },
+            )
             WindowLayer(manager = manager, desktopSize = desktopSize, modifier = Modifier.fillMaxSize())
         }
 
