@@ -274,15 +274,20 @@ object XServer {
     }
 
     /**
-     * Makes sure a display exists even when no X Desktop window is open yet:
-     * attaches the shell WM and starts at a default screen size. Guest launches
-     * (the Firefox ESR desktop-browser session) call this before spawning; an
-     * X Desktop window opened later resizes the screen, keeping clients alive.
+     * Makes sure a display exists even when no X Desktop window is open yet,
+     * at a default screen size. Guest launches (the Firefox ESR desktop-browser
+     * session) call this before spawning; an X Desktop window opened later
+     * resizes the screen, keeping clients alive.
+     *
+     * The server runs PASS-THROUGH: the shell does not claim
+     * SubstructureRedirect - the claim is exclusive, and a shell WM here would
+     * lock every guest window manager out. The desktop session brings its own
+     * WM (openbox for the browser session, `explorer.exe /desktop` for Wine
+     * later); without one, clients map undecorated and still work.
+     * [attachWindowManager] stays for tests and a future per-window mode.
      */
-    fun ensureRunning(widthPx: Int = 1280, heightPx: Int = 800): Boolean {
-        if (document.windowManager == null) attachWindowManager(ShellWindowManager.forServer())
-        return if (running) true else start(widthPx, heightPx)
-    }
+    fun ensureRunning(widthPx: Int = 1280, heightPx: Int = 800): Boolean =
+        if (running) true else start(widthPx, heightPx)
 
     /**
      * Starts listening on the abstract-namespace socket. Returns false with

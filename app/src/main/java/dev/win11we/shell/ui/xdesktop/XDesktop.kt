@@ -61,7 +61,6 @@ import dev.win11we.shell.x11.DrawOp
 import dev.win11we.shell.x11.BlendSpec
 import dev.win11we.shell.x11.GlyphRunSpec
 import dev.win11we.shell.x11.ImeCommitExtractor
-import dev.win11we.shell.x11.ShellWindowManager
 import dev.win11we.shell.x11.XDisplayList
 import dev.win11we.shell.x11.XDocument
 import dev.win11we.shell.x11.XInput
@@ -98,9 +97,31 @@ class XCanvasRenderer {
     fun draw(dst: Canvas, document: XDocument, lists: XDisplayList) {
         caches.keys.retainAll { id -> document.window(id) != null || lists.sizeOf(id) != null }
         for (window in document.paintOrder()) {
+            // InputOnly windows (depth 0) never render - GTK3 uses them as
+            // invisible input surfaces, and painting their "background" would
+            // punch black holes into the desktop.
+            if (window.depth == 0) continue
             val cache = bitmapFor(window.id, window.width, window.height, window.backgroundPixel, document, lists)
                 ?: continue
-            dst.drawBitmap(cache.bitmap, window.x.toFloat(), window.y.toFloat(), null)
+            val origin = document.absoluteOrigin(window)
+            // Subwindow clipping: a child renders inside every ancestor's rect -
+            // what makes an openbox frame clip its client window, and what keeps
+            // a child positioned partly outside its parent from bleeding over
+            // the desktop.
+            dst.save()
+            var ancestor = window.parent?.let { document.window(it) }
+            while (ancestor != null) {
+                val ao = document.absoluteOrigin(ancestor)
+                dst.clipRect(
+                    ao[0].toFloat(),
+                    ao[1].toFloat(),
+                    (ao[0] + ancestor.width).toFloat(),
+                    (ao[1] + ancestor.height).toFloat(),
+                )
+                ancestor = ancestor.parent?.let { document.window(it) }
+            }
+            dst.drawBitmap(cache.bitmap, origin[0].toFloat(), origin[1].toFloat(), null)
+            dst.restore()
         }
     }
 
@@ -581,7 +602,10 @@ class XDesktopState {
 
     fun onSurfaceSize(widthPx: Int, heightPx: Int) {
         if (started || startError != null || widthPx <= 0 || heightPx <= 0) return
-        XServer.attachWindowManager(ShellWindowManager.forServer())
+        // Pass-through session model: the shell does NOT claim
+        // SubstructureRedirect (the claim is exclusive - holding it would lock
+        // a guest WM like openbox out, and openbox is what frames/decorates the
+        // desktop the user sees in this surface).
         // Per-client protocol reports land in the shell log, which the Terminal and
         // Diagnostics screens both read. This is what makes a silent guest crash
         // diagnosable: the report names every extension the client queried and

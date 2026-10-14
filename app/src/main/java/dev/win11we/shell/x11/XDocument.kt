@@ -661,14 +661,18 @@ class XDocument(
         return true
     }
 
+    /**
+     * Marks the window mapped and reports whether it became VIEWABLE. Real X
+     * records a child's map state even while an unmapped ancestor hides it -
+     * when the ancestor maps, the child becomes viewable and generates Expose
+     * (which the connection's exposeSubtree walk delivers). Conflating
+     * "mapped" with "viewable" here used to lose those children entirely.
+     */
     fun mapWindow(id: Int): Boolean {
         val window = windows[id] ?: return false
         if (window.mapped) return false
-        // A child only becomes visible when its parent is mapped, like X.
-        val parent = window.parent?.let { windows[it] }
-        if (parent != null && !parent.mapped) return false
         window.mapped = true
-        return true
+        return isViewable(id)
     }
 
     fun unmapWindow(id: Int): Boolean {
@@ -695,7 +699,11 @@ class XDocument(
         val out = mutableListOf<XWindow>()
         fun walk(id: Int) {
             val window = windows[id] ?: return
-            if (window.mapped) out.add(window)
+            // An unmapped ancestor hides its whole subtree (viewability): the
+            // walk stops there, so mapped-but-shadowed children neither draw
+            // nor take input until the ancestor maps.
+            if (!window.mapped) return
+            out.add(window)
             window.children.forEach(::walk)
         }
         walk(rootId)
@@ -703,8 +711,44 @@ class XDocument(
     }
 
     /** Top-most mapped window under a point, for pointer events. */
-    fun windowAt(px: Int, py: Int): XWindow? =
-        paintOrder().lastOrNull { it.contains(px, py) && it.inputShapeAllows(px, py) }
+    fun windowAt(px: Int, py: Int): XWindow? = paintOrder().lastOrNull { w ->
+        val o = absoluteOrigin(w)
+        px in o[0] until o[0] + w.width && py in o[1] until o[1] + w.height &&
+            w.inputShapeAllows(px, py)
+    }
+
+    /**
+     * The window's origin in ROOT coordinates. X child windows are
+     * PARENT-RELATIVE - the model a guest window manager depends on: openbox
+     * reparents every client into a frame at (border, border+title), and
+     * Wine's `explorer.exe /desktop` reparents app windows under its desktop
+     * window. Hit-testing, event coordinates, warp clamping, the renderer and
+     * the XFIXES region/shape conversions all resolve through here.
+     */
+    fun absoluteOrigin(window: XWindow): IntArray {
+        var ax = window.x
+        var ay = window.y
+        var guard = 0
+        var parent = window.parent?.let { windows[it] }
+        while (parent != null && guard++ < 64) {
+            ax += parent.x
+            ay += parent.y
+            parent = parent.parent?.let { windows[it] }
+        }
+        return intArrayOf(ax, ay)
+    }
+
+    /** True when [id] is mapped and every ancestor is too - X's "viewable". */
+    fun isViewable(id: Int): Boolean {
+        var current = windows[id] ?: return false
+        var guard = 0
+        while (true) {
+            if (!current.mapped) return false
+            val parentId = current.parent ?: return true
+            current = windows[parentId] ?: return true
+            if (guard++ > 64) return false
+        }
+    }
 
     // --- atoms -------------------------------------------------------------
 

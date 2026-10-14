@@ -6,9 +6,11 @@ No Termux, no XSDL, no adb.
 
 **Milestone status:** D1a (protocol core + socket) done, D1b (renderer + input + WM)
 done, D1c (real-client compatibility) done, D1d (RENDER 0.4) done, D1e (the
-transport + XInput2 GTK3 needs) done, **D1f (XFIXES 5.0 + SYNC 3.1) done**. What
-remains for D1 is the guest launch itself: the R1 binaries are vendored, so that
-is now a device-provisioning step (Goal 2 step 2), not server code.
+transport + XInput2 GTK3 needs) done, D1f (XFIXES 5.0 + SYNC 3.1) done, **D1g
+(the pass-through desktop session: parent-relative coordinates, viewability,
+Expose-on-map, ReparentWindow placement, frame clipping) done**. What remains
+for D1 is the guest launch itself: the R1 binaries are vendored, so that is now
+a device-provisioning step (Goal 2 step 2), not server code.
 
 ## D1c: what changed and why it was blocking real clients
 
@@ -359,6 +361,51 @@ pre-delta counter value (a documented simplification of the spec's ordering;
 the delta itself is part of the alarm the client holds). Counters, alarms and
 held awaits die with their connection (`dropSyncOf`), per X's resource rules.
 
+### The pass-through desktop session (D1g) - the whole desktop lives in the surface
+
+The device verdict on the first Firefox ESR attempts (client connected - the
+software cursor proved it - but no window ever appeared) forced the model
+question, and the answer reshaped the server: **the desktop is the guest's, not
+the shell's.** One fullscreen surface shows a complete X session; the shell
+never places guest windows itself.
+
+- **No shell SubstructureRedirect.** The claim is exclusive in X (second
+  selector = Access error), so a shell WM would lock every guest window
+  manager out. `XServer.ensureRunning` and the X Desktop surface no longer
+  attach `ShellWindowManager`; the session brings its own WM (openbox for the
+  browser session, `explorer.exe /desktop` for Wine later). Without a WM,
+  clients map undecorated and still work. `ShellWindowManager` stays for tests
+  and a possible future per-window mode - it is no longer wired in production.
+- **Parent-relative coordinates, resolved through `XDocument.absoluteOrigin`.**
+  X child windows position against their parent; the model used to treat every
+  x/y as absolute, which only works while nothing reparents. A WM frame is
+  exactly that: openbox reparents each client to (border, border+title) inside
+  its frame. Hit-testing (`windowAt`), core event coordinates
+  (`pointerEvent`, `enterLeaveEvent`), XI2 device/crossing events,
+  TranslateCoordinates, warp bases and grab confine clamps, XTest FakeInput
+  bases, and the XFIXES region/shape conversions all resolve absolute origins
+  now. `GetGeometry` and `ConfigureNotify` keep the spec's parent-relative
+  answers (they were already correct under the new model).
+- **Mapped vs viewable are different states** (they were conflated): a child
+  mapped under an unmapped parent RECORDS its map (real X semantics) and
+  becomes viewable when the ancestor maps; `paintOrder` stops at unmapped
+  ancestors, so shadowed subtrees neither draw nor take input.
+- **Expose on becoming viewable.** A direct (non-WM) `MapWindow` - which is
+  how openbox maps its clients and how unmanaged clients map - now generates
+  Expose for the window and its already-mapped descendants, through the
+  windows' own connections. Without it a GTK3 client that has not painted yet
+  waits on a black window: the first-paint trigger the in-process
+  `wmMapWindow` path always had, now on the wire path too. Expose rects are
+  window-relative (0,0,w,h) per spec - they used to carry absolute offsets.
+- **ReparentWindow repositions.** The request's (x,y) were dropped on the
+  floor; the spec places the window at (x,y) inside the new parent, and a
+  frame flow waits on the resulting ConfigureNotify. Both happen now.
+- **The renderer clips and honours InputOnly.** Each window draws at its
+  absolute origin, clipped to every ancestor's rect (that is what makes a
+  frame clip its client, and what keeps a child hanging outside its parent
+  from bleeding over the desktop); depth-0 InputOnly windows - GTK3's
+  invisible input surfaces - no longer paint black holes.
+
 ### Soft keyboard (the D1b open item)
 
 No XIM/XKB is needed for Latin-1 text: the X Desktop window hosts a 1dp transparent
@@ -406,10 +453,10 @@ does not re-push (X clients re-claim on every copy).
 
 ### Verification
 
-The x11 suites (256 tests: `XProtocolTest`, `XCompatTest`, `XRenderTest`,
+The x11 suites (264 tests: `XProtocolTest`, `XCompatTest`, `XRenderTest`,
 `XBigRequestsTest`, `XInput2Test`, `XProtocolTraceTest`, `XRedirectTest`,
 `XTextInjectionTest`, `XSnapshotTest`, `XSelectionsTest`, `XFixesTest`,
-`XSyncTest`) are
+`XSyncTest`, `XChildCoordinatesTest`) are
 **compiled and executed** with Kotlin 2.1.10/JDK 17 against minimal Android stubs
 (only `LocalServerSocket`/`LocalSocket`/`Log`, which the wire tests never touch) -
 the first time this project's protocol code was actually run rather than written
@@ -464,7 +511,9 @@ CI `assembleDebug` + device check.
 - GetImage ignores XYBitmap/XYPixmap (serves ZPixmap) and returns background pixels
   where only text was drawn; GetImage on pixmaps needs the display-list sink.
 - Pixmap cursors render as the default arrow; border widths, backing store,
-  save-under, bit gravity and subwindow clipping are not modelled.
+  save-under and bit gravity are not modelled. Subwindow clipping IS (D1g):
+  the renderer clips every window to its ancestor chain - which is what makes
+  WM frames clip their clients.
 - `SendEvent` bytes are delivered verbatim: two clients with *different* byte orders
   would see a mis-ordered synthesised event (single-app reality: one order).
 - KillClient is accepted but does not tear down resources (no per-client ownership
@@ -516,6 +565,7 @@ instead of taking the process down (crash-safety rules 1 and 2).
 Open **Start → X Desktop** (not pinned to the taskbar). The window starts the server on
 `:100` at its own pixel size and shows "Waiting for clients" until a guest connects.
 Anything that speaks core X11 to the abstract socket `@/tmp/.X11-unix/X100` — e.g.
-`xclock` from a proot rootfs with `DISPLAY=:100` — appears as a shell-placed window.
+`xclock` from a proot rootfs with `DISPLAY=:100` — appears in the desktop surface
+(unmanaged, or framed once the session's window manager is up; D1g pass-through).
 Tap the surface to focus it, then type with the soft keyboard; the pointer shows the
 client-chosen cursor shape.

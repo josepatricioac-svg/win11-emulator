@@ -520,14 +520,24 @@ class XConnection(
             X11.REQ_REPARENT_WINDOW -> {
                 val id = reader.int()
                 val newParent = reader.int()
-                reader.short(); reader.short()
+                val newX = reader.shortSigned()
+                val newY = reader.shortSigned()
                 val window = document.window(id)
                 val target = document.window(newParent)
                 if (window == null || target == null) return error(X11.ERR_BAD_WINDOW, opcode, id)
                 window.parent?.let { document.window(it)?.children?.remove(id) }
                 window.parent = newParent
+                // ReparentWindow PLACES the window at (x,y) inside its new parent
+                // (X spec) - this is how a WM frame puts the client at
+                // (border, border+title). Dropping the offsets (the old
+                // behaviour) misplaces every framed window.
+                window.x = newX
+                window.y = newY
                 target.children.add(id)
                 notifyStructure(X11.EV_REPARENT_NOTIFY, newParent, id)
+                // The parent/position change is a configuration change the client
+                // must hear about (a WM's frame flow waits on this ConfigureNotify).
+                configureNotify(window)
             }
             X11.REQ_MAP_WINDOW, X11.REQ_MAP_SUBWINDOWS -> {
                 val id = reader.int()
@@ -547,6 +557,12 @@ class XConnection(
                     if (!wasMapped && document.window(target) != null) {
                         notifyStructure(X11.EV_MAP_NOTIFY, parentId, target)
                     }
+                    // Becoming VIEWABLE generates Expose (X semantics). Without it a
+                    // GTK3 client that has not drawn yet waits on a black window -
+                    // the pass-through desktop session maps through here (openbox's
+                    // MapWindow, or an unmanaged client's), so this is the
+                    // first-paint trigger the in-process wmMapWindow path already had.
+                    if (document.isViewable(target)) exposeSubtree(target)
                 }
             }
             X11.REQ_UNMAP_WINDOW -> {
@@ -729,12 +745,14 @@ class XConnection(
                 val srcY = reader.shortSigned()
                 val srcWindow = document.window(src) ?: return error(X11.ERR_BAD_WINDOW, opcode, src)
                 val dstWindow = document.window(dst) ?: return error(X11.ERR_BAD_WINDOW, opcode, dst)
-                val rootX = srcWindow.x + srcX
-                val rootY = srcWindow.y + srcY
+                val srcOrigin = document.absoluteOrigin(srcWindow)
+                val dstOrigin = document.absoluteOrigin(dstWindow)
+                val rootX = srcOrigin[0] + srcX
+                val rootY = srcOrigin[1] + srcY
                 reply(opcode, dataByte = 1 /* sameScreen */) { writer ->
                     writer.int(0) // child
-                    writer.short(rootX - dstWindow.x)
-                    writer.short(rootY - dstWindow.y)
+                    writer.short(rootX - dstOrigin[0])
+                    writer.short(rootY - dstOrigin[1])
                     writer.pad(16)
                 }
             }
@@ -1859,7 +1877,10 @@ class XConnection(
                 val base = if (root != 0) document.window(root) ?: return error(X11.ERR_BAD_WINDOW, major, root) else null
                 when (type) {
                     X11.EV_KEY_PRESS, X11.EV_KEY_RELEASE -> {
-                        if (root != 0 && base != null) movePointer(base.x + relX, base.y + relY)
+                        if (root != 0 && base != null) {
+                            val keyBase = document.absoluteOrigin(base)
+                            movePointer(keyBase[0] + relX, keyBase[1] + relY)
+                        }
                         val keysym = keyboard.keysymFor(detail, 0)
                         val pressed = type == X11.EV_KEY_PRESS
                         val bit = XInput.modifierBit(keysym)
@@ -1867,7 +1888,10 @@ class XConnection(
                         onKey(detail, keysym, pressed, keyStateMask)
                     }
                     X11.EV_BUTTON_PRESS, X11.EV_BUTTON_RELEASE -> {
-                        if (root != 0 && base != null) movePointer(base.x + relX, base.y + relY)
+                        if (root != 0 && base != null) {
+                            val buttonBase = document.absoluteOrigin(base)
+                            movePointer(buttonBase[0] + relX, buttonBase[1] + relY)
+                        }
                         val pressed = type == X11.EV_BUTTON_PRESS
                         val bit = 1 shl (7 + detail)
                         val mask = if (pressed) buttonMask or bit else buttonMask and bit.inv()
@@ -1875,7 +1899,8 @@ class XConnection(
                     }
                     X11.EV_MOTION_NOTIFY -> {
                         // root=None means the current root: rootX/rootY are absolute.
-                        warpMove((base?.x ?: 0) + relX, (base?.y ?: 0) + relY)
+                        val motionBase = base?.let { document.absoluteOrigin(it) } ?: intArrayOf(0, 0)
+                        warpMove(motionBase[0] + relX, motionBase[1] + relY)
                     }
                     else -> error(X11.ERR_BAD_VALUE, major, type)
                 }
@@ -2138,10 +2163,13 @@ class XConnection(
                 if (regions.containsKey(id)) return error(X11.ERR_BAD_ID_CHOICE, major, id, minor)
                 val window = document.window(windowId)
                     ?: return error(X11.ERR_BAD_WINDOW, major, windowId, minor)
-                val bounds = intArrayOf(window.x, window.y, window.width, window.height)
+                val windowOrigin = document.absoluteOrigin(window)
+                val bounds = intArrayOf(windowOrigin[0], windowOrigin[1], window.width, window.height)
                 val rects = if (kind == XFixes.WINDOW_REGION_CLIP) {
-                    val above = document.windowsAbove(windowId)
-                        .map { intArrayOf(it.x, it.y, it.width, it.height) }
+                    val above = document.windowsAbove(windowId).map {
+                        val o = document.absoluteOrigin(it)
+                        intArrayOf(o[0], o[1], it.width, it.height)
+                    }
                     XRegionOps.subtract(listOf(bounds), above)
                 } else {
                     XRegionOps.normalize(listOf(bounds))
@@ -2273,8 +2301,9 @@ class XConnection(
                 } else {
                     regions[regionId] ?: return error(XFixes.ERR_BAD_REGION, major, regionId, minor)
                 }
+                val shapeOrigin = document.absoluteOrigin(window)
                 val rects = region?.let {
-                    XRegionOps.translate(it.rects, window.x + xOff, window.y + yOff)
+                    XRegionOps.translate(it.rects, shapeOrigin[0] + xOff, shapeOrigin[1] + yOff)
                 }
                 when (kind) {
                     XFixes.SHAPE_BOUNDING -> window.boundingShape = rects
@@ -3458,8 +3487,9 @@ class XConnection(
     ) {
         val receiver = document.window(receiverId) ?: return
         val (base, locked, effective) = XInput2.modifierParts(keyStateMask)
-        val eventX = rootX - receiver.x
-        val eventY = rootY - receiver.y
+        val receiverOrigin = document.absoluteOrigin(receiver)
+        val eventX = rootX - receiverOrigin[0]
+        val eventY = rootY - receiverOrigin[1]
         deliverGenericEvent(XInput2.MAJOR_OPCODE, evtype) { writer ->
             with(XInput2) {
                 writer.short(deviceId)
@@ -3515,8 +3545,8 @@ class XConnection(
                 // ---- 32-byte boundary ----
                 writer.fp1616(rootX)
                 writer.fp1616(rootY)
-                writer.fp1616(rootX - receiver.x)
-                writer.fp1616(rootY - receiver.y)
+                writer.fp1616(rootX - document.absoluteOrigin(receiver)[0])
+                writer.fp1616(rootY - document.absoluteOrigin(receiver)[1])
                 writer.byte(1) // same_screen
                 writer.byte(if (hasFocus) 1 else 0) // focus
                 writer.short(1) // buttons_len
@@ -3615,7 +3645,8 @@ class XConnection(
     fun sendEvent(windowId: Int, code: Int, detailId: Int = 0) {
         val window = document.window(windowId) ?: return
         when (code) {
-            X11.EV_EXPOSE -> exposeIfWanted(windowId, window.x, window.y, window.width, window.height)
+            // Expose rects are WINDOW-relative (X spec): the full window.
+            X11.EV_EXPOSE -> exposeIfWanted(windowId, 0, 0, window.width, window.height)
             X11.EV_CONFIGURE_NOTIFY -> configureNotify(window)
             X11.EV_PROPERTY_NOTIFY -> notifyProperty(windowId, detailId)
             X11.EV_CREATE_NOTIFY, X11.EV_DESTROY_NOTIFY, X11.EV_MAP_NOTIFY,
@@ -3625,6 +3656,19 @@ class XConnection(
             }
         }
         flushPending()
+    }
+
+    /**
+     * Exposes a newly-viewable window and its already-mapped descendants, each
+     * through its OWN connection (the mapper may be a WM mapping other clients'
+     * windows). Expose rects are window-relative: the full window, count 0.
+     */
+    private fun exposeSubtree(windowId: Int) {
+        val window = document.window(windowId) ?: return
+        document.ownerOf(windowId)?.sendEvent(windowId, X11.EV_EXPOSE)
+        window.children.toList().forEach { child ->
+            if (document.window(child)?.mapped == true) exposeSubtree(child)
+        }
     }
 
     private fun selectsFor(mask: Int, code: Int): Boolean = when (code) {
@@ -3807,7 +3851,8 @@ class XConnection(
         val base = if (dst != 0) {
             document.window(dst) ?: return error(X11.ERR_BAD_WINDOW, opcode, dst, minor)
         } else null
-        warpMove((base?.x ?: 0) + dstX, (base?.y ?: 0) + dstY)
+        val warpBase = base?.let { document.absoluteOrigin(it) } ?: intArrayOf(0, 0)
+        warpMove(warpBase[0] + dstX, warpBase[1] + dstY)
     }
 
     /** Shared pointer move: confine-to-grab clamping, Enter/Leave tracking, MotionNotify. */
@@ -3817,8 +3862,9 @@ class XConnection(
         document.pointerGrab?.takeIf { it.connection === this }?.let { grab ->
             if (grab.confineTo != 0) {
                 document.window(grab.confineTo)?.let {
-                    nx = nx.coerceIn(it.x, maxOf(it.x, it.right - 1))
-                    ny = ny.coerceIn(it.y, maxOf(it.y, it.bottom - 1))
+                    val o = document.absoluteOrigin(it)
+                    nx = nx.coerceIn(o[0], maxOf(o[0], o[0] + it.width - 1))
+                    ny = ny.coerceIn(o[1], maxOf(o[1], o[1] + it.height - 1))
                 }
             }
         }
@@ -3884,8 +3930,9 @@ class XConnection(
         writer.int(child)
         writer.short(x)
         writer.short(y)
-        writer.short(x - target.x)
-        writer.short(y - target.y)
+        val crossingOrigin = document.absoluteOrigin(target)
+        writer.short(x - crossingOrigin[0])
+        writer.short(y - crossingOrigin[1])
         writer.short(buttonMask or keyStateMask)
         writer.byte(0) // mode: NotifyNormal
         writer.byte(1) // sameScreenFocus
@@ -4058,8 +4105,9 @@ class XConnection(
         writer.int(child)
         writer.short(rootPointerX)
         writer.short(rootPointerY)
-        writer.short(x - target.x)
-        writer.short(y - target.y)
+        val targetOrigin = document.absoluteOrigin(target)
+        writer.short(x - targetOrigin[0])
+        writer.short(y - targetOrigin[1])
         writer.short(buttonMask or keyStateMask)
         writer.byte(1) // sameScreenAndFocus
         writer.pad(1)

@@ -711,9 +711,13 @@ class XProtocolTest {
         val child = rootId + 112
         document.createWindow(parent, rootId, 0, 0, 10, 10)
         document.createWindow(child, parent, 0, 0, 5, 5)
-        assertFalse(document.mapWindow(child))
+        // Real X separates the two states: the child IS mapped now (and stays
+        // mapped), it is just not VIEWABLE while its parent is unmapped.
+        assertFalse(document.mapWindow(child)) // not viewable yet
+        assertFalse(document.isViewable(child))
         document.mapWindow(parent)
-        assertTrue(document.mapWindow(child))
+        assertTrue(document.isViewable(child)) // the parent's map reveals it
+        assertFalse(document.mapWindow(child)) // already mapped: nothing to do
     }
 
     @Test
