@@ -103,8 +103,16 @@ class ContainerLauncher(
                 "Rootfs not found at ${request.rootfsDir.absolutePath} - download it in R3.",
             )
         }
+        // The Wine-prefix checks apply to WINE requests ONLY. The structural
+        // signal is the bind target: a Wine prefix always lands at the fixed
+        // guest path /root/.wine, while a session that brings its own state dir
+        // (Firefox ESR binds its profile at /root/.mozilla) has no prefix and
+        // must never be judged by wineboot's markers. This gate was missing and
+        // sent the desktop browser to a bogus PREFIX_MISSING refusal on device
+        // ("desktop session failed to start ... wine prefix").
+        val isWinePrefix = request.guestPrefix == ProotCommand.GUEST_PREFIX
         val prefix = File(request.container.prefixPath)
-        if (!prefix.isDirectory) {
+        if (isWinePrefix && !prefix.isDirectory) {
             // Name the whole chain, because "prefix missing" reads like a bug the
             // user can fix by retrying. It is not: a prefix is populated by running
             // wineboot inside the rootfs, wineboot needs a Wine payload, and no
@@ -127,7 +135,7 @@ class ContainerLauncher(
                     "where the chain stops (box64 --version, wine64 --version, wine64 cmd).",
             )
         }
-        if (!WinePayload.prefixLooksInitialised(prefix)) {
+        if (isWinePrefix && !WinePayload.prefixLooksInitialised(prefix)) {
             // An empty directory is not a prefix: wine would treat it as a fresh
             // one and try to initialise it mid-launch, half-way through a ptrace
             // session. Refuse first, with the reason.

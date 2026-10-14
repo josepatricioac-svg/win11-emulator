@@ -119,6 +119,44 @@ class FirefoxSessionTest {
     }
 
     @Test
+    fun `a firefox session passes validation - the profile dir is NOT judged as a wine prefix`() {
+        // Device regression: ContainerLauncher.validate used to run the wineboot
+        // markers (system.reg/user.reg/drive_c) against EVERY request, so the
+        // browser session - whose "prefix" is the Firefox profile bound at
+        // /root/.mozilla - was refused with PREFIX_MISSING and the desktop pill
+        // read "failed to start ... wine prefix". The wine-prefix checks apply
+        // only to requests binding the fixed /root/.wine guest prefix.
+        val nativeDir = tmp.newFolder("real-lib")
+        listOf(BinaryRole.PROOT, BinaryRole.PROOT_LOADER, BinaryRole.TALLOC).forEach { role ->
+            File(nativeDir, role.fileName).writeBytes(
+                byteArrayOf(0x7F, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte()) + ByteArray(2044),
+            )
+        }
+        val pins = BinaryRole.entries.filter { File(nativeDir, it.fileName).isFile }
+            .associate { it.fileName to NativeBinaries.sha256(File(nativeDir, it.fileName))!! }
+        val started = mutableListOf<List<String>>()
+        val realLauncher = ContainerLauncher(
+            NativeBinaries(nativeDir, pins),
+            LogBuffer(),
+            launcher = object : ProcessLauncher {
+                override fun start(command: List<String>, environment: Map<String, String>, workingDir: File?): LaunchAttempt {
+                    started += command
+                    return LaunchAttempt(UnusedHandle(), null)
+                }
+            },
+            streamThreads = false,
+        )
+        val rootfs = tmp.newFolder("rootfs")
+        val profile = tmp.newFolder("profile") // exists, but is NOT a wine prefix
+        val result = realLauncher.start(
+            request("https://example.org", profile, tmp.newFolder("x11")).copy(rootfsDir = rootfs),
+        )
+        assertTrue(result.message, result.success)
+        assertEquals(1, started.size)
+        assertFalse("native arm64 - no box64", started.single().any { it.contains("box64") })
+    }
+
+    @Test
     fun `the environment is firefox-specific explicit and sorted - no wine variables`() {
         val env = launcher.buildEnvironment(request(null, File(tmp.root, "p"), File(tmp.root, "x")))
         assertEquals(RuntimePaths.X_DISPLAY, env["DISPLAY"])
