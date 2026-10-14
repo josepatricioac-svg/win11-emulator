@@ -197,3 +197,27 @@ desktop-only ones); whole-tree kotlinc syntax check clean. versionName
 0.1.0-d1h.3. Device re-check: Browser ▸ Firefox ESR ▸ Open must now reach the
 proot spawn (pill → openbox-framed window on the desktop) instead of the
 PREFIX_MISSING refusal.
+
+## Snapshot 2026-10-14 (4) — stale apt/dpkg lock recovery (device failure "held by process 6895")
+
+Owner-reported: Firefox setup died with "Could not get lock /var/lib/dpkg/
+lock-frontend - held by process 6895 (apt-get)". Cause: a previous provision
+whose proot was SIGKILLed (swipe-away/system kill/timeout) orphaned its guest
+apt-get under the app uid, still holding the flocks; --kill-on-exit cannot run
+from a SIGKILL.
+
+Fix: `runtime/PackageLockRecovery.kt` - HOST-side scan of /proc for same-uid
+processes whose first argv token basename is exactly apt-get/apt/dpkg (the
+substring rule that would match the provisioning bash or proot carrying the
+script text is explicitly excluded and test-pinned), SIGKILL via Os.kill, one
+honest log line per action. Wired into BOTH provisioners (RootfsProvisioner +
+WineProvisioner) right after the doctor pre-flight, before the jail spawns;
+the scripts' existing `dpkg --configure -a` heals the half-configured state.
+Off-device the killer is the stubbed android.system.Os, so unit tests and CI
+can never kill anything - they pin the scan/match/report logic instead
+(PackageLockRecoveryTest, 11 tests).
+
+Harness: 684 tests green. Docs: README provision paragraph + WINE_RUNTIME §2.
+versionName 0.1.0-d1h.4. Device re-check: Firefox setup (or Install Wine
+payload) right after a force-kill mid-provision must log "lock recovery:
+killed stale ... (pid N)" and then complete instead of dying on the lock.

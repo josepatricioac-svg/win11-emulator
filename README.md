@@ -304,6 +304,15 @@ publishers (Ubuntu `SHA256SUMS`, the Ubuntu archive `Packages` index, Mozilla
 `SHA512SUMS`) and are recorded in `docs/THIRD_PARTY.md`. After extraction, the
 **Provision** card installs the browser's GTK3/X11/font/CA-cert stack with `apt-get`
 inside proot (`RootfsProvisioner`, package list pinned in code, every line logged). Its
+**Stale apt/dpkg locks are recovered automatically** (`PackageLockRecovery`): when
+proot is SIGKILLed mid-provision (swipe-away, system kill, timeout), `--kill-on-exit`
+never runs and a guest `apt-get`/`dpkg` can survive under the app's own uid still
+holding `/var/lib/dpkg`'s flocks - the "Could not get lock ... held by process N
+(apt-get)" device failure. Every provision (browser AND Wine) scans the host `/proc`
+for same-uid package-manager orphans before spawning the jail, SIGKILLs what it
+finds, logs each kill, and lets the script's `dpkg --configure -a` heal the
+half-configured state. The match is first-argv-token-only, so recovery can never kill
+the shell or proot carrying the script text. The
 **Run doctor** chip first checks the host-side prerequisites — pinned proot set,
 extracted rootfs, rootfs really is arm64, `ports.ubuntu.com` sources, resolv.conf, free
 space, writable TMPDIR, archive reachability — and then **really execs proot** with four

@@ -121,6 +121,10 @@ object WineProvisioner {
             }
             return ProvisionResult(false, preflight.headline(), preflight.checks.map { it.line() })
         }
+        // Stale-lock recovery, identical to RootfsProvisioner's: an orphaned
+        // apt/dpkg from a killed run would otherwise make this install die on
+        // "Could not get lock ... held by process N (apt-get)" within seconds.
+        PackageLockRecovery.recoverInto(log)
         val tmpDir = File(filesDir, "tmp")
         val resolvConf = runCatching { RuntimePaths.ensureResolvConf(filesDir) }
             .getOrElse { return ProvisionResult(false, "Could not write resolv.conf: ${it.message}") }

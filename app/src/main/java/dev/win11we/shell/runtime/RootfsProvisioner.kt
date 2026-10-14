@@ -308,6 +308,13 @@ object RootfsProvisioner {
             }
             return ProvisionResult(false, preflight.headline(), preflight.checks.map { it.line() })
         }
+        // Stale-lock recovery: an apt-get/dpkg orphaned by a KILLED earlier run
+        // (proot SIGKILLed -> --kill-on-exit never ran) holds the /var/lib/dpkg
+        // flocks and every later provision dies with "Could not get lock ...
+        // held by process N (apt-get)". The orphan shares our uid, so it is
+        // killed HOST-side here, before the jail is spawned; the script's first
+        // step (dpkg --configure -a) then heals whatever it left half-done.
+        PackageLockRecovery.recoverInto(log)
         val tmpDir = File(filesDir, "tmp")
         val resolvConf = runCatching { ensureResolvConf(File(tmpDir, "resolv.conf")) }
             .getOrElse { return ProvisionResult(false, "Could not write resolv.conf: ${it.message}") }

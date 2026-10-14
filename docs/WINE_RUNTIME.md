@@ -44,6 +44,16 @@ Start refuses with `PREFIX_MISSING` and the whole chain quoted.
   vendored fork's argument rules), with the doctor's pre-flight (host checks +
   real proot smoke test) before apt is attempted, `PROOT_NO_SECCOMP=1`,
   `PROOT_TMP_DIR`, resolv.conf written **and** bind-mounted.
+- **Stale-lock recovery** (`runtime/PackageLockRecovery.kt`, shared with the
+  browser provision): an `apt-get`/`dpkg` orphaned by a SIGKILLed earlier proot
+  (`--kill-on-exit` never ran) holds the dpkg flocks and used to wedge every
+  later install with "Could not get lock … held by process N (apt-get)". Before
+  the jail spawns, the host `/proc` is scanned for same-uid processes whose
+  FIRST argv token is `apt-get`/`apt`/`dpkg` (substring matching would kill the
+  carrier shell/proot - pinned by tests), each hit is SIGKILLed and logged, and
+  `dpkg --configure -a` heals the rest. A legitimately concurrent install is
+  reclaimed too: one provisioning run at a time, newest wins, everything named
+  in Terminal ▸ log.
 - **The disk is the verdict**: exit 0 without `WinePayload.launcherIn(rootfs)`
   finding a launcher is reported as FAILED with the paths it searched.
 - UI: Container Manager header ▸ *Install Wine payload* (visible exactly when
