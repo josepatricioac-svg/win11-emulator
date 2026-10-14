@@ -56,6 +56,11 @@ object RootfsProvisioner {
         // only dependency is the libgtk-3-0 already listed) calls gtk_init() and
         // prints GTK's own diagnosis when the server answers something it cannot use.
         "libgtk-3-bin",
+        // The guest window manager: the X server runs pass-through (the shell
+        // does not claim SubstructureRedirect), so the desktop session brings
+        // its own WM. Openbox is ~1 MB, pulls no panel/desktop dependencies and
+        // is a full EWMH citizen (frames, _NET_WM_SYNC_REQUEST, focus).
+        "openbox",
         "fontconfig",
         "fonts-dejavu-core",
         "fonts-liberation", // metric-compatible Arial/Times stand-ins
@@ -166,6 +171,10 @@ object RootfsProvisioner {
         "dpkg --configure -a; " +
             "apt-get $APT_OPTIONS update && " +
             "apt-get $APT_OPTIONS install -y --no-install-recommends ${packages.joinToString(" ")} && " +
+            // Build the fontconfig cache NOW: otherwise the first Firefox start
+            // spends up to a minute building it inside the jail - the visible
+            // "takes forever, then a black screen" first-load stall.
+            "fc-cache -f && " +
             "apt-get $APT_OPTIONS clean && rm -rf /var/lib/apt/lists/*",
     )
 

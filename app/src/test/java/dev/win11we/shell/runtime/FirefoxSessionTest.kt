@@ -114,6 +114,7 @@ class FirefoxSessionTest {
         assertEquals("1", env["MOZ_DISABLE_CONTENT_SANDBOX"])
         assertEquals("1", env["MOZ_DISABLE_GMP_SANDBOX"])
         assertEquals("1", env["MOZ_DISABLE_RDD_SANDBOX"])
+        assertEquals("1", env["MOZ_FORCE_DISABLE_E10S"]) // proot ptrace cost: one process
         assertTrue(env.getValue("PATH").endsWith("/opt/firefox-esr"))
         assertNull("no Wine environment for this session", env["WINEPREFIX"])
         assertNull(env["WINEDEBUG"])
@@ -296,5 +297,23 @@ class FirefoxDBusSessionTest {
         val handoff = FirefoxSession.sessionCommand("https://second.example")
         assertEquals(session, handoff)
         assertTrue(session[2].contains(FirefoxSession.GUEST_DBUS_SOCKET))
+    }
+
+    @Test
+    fun `the desktop session starts openbox - and only the fresh session does`() {
+        val script = FirefoxSession.sessionCommand("https://example.org")[2]
+        // The guest WM prelude: start openbox, wait (BOUNDED) for its EWMH
+        // announcement, then exec firefox - the whole desktop renders inside
+        // the X Desktop surface because the server runs pass-through.
+        assertTrue(script.contains("command -v openbox"))
+        assertTrue(script.contains("openbox >/dev/null 2>&1 &"))
+        assertTrue(script.contains("_NET_SUPPORTING_WM_CHECK"))
+        assertTrue(script.contains("exec '/opt/firefox-esr/firefox' '-P' 'shell' 'https://example.org'"))
+        assertTrue(script.contains("while [ ${'$'}i -lt 20 ]"))
+        // A handoff must NOT start a second WM - the session's openbox is up.
+        val handoff = FirefoxSession.sessionCommand("https://example.org", withDesktop = false)
+        assertFalse(handoff[2].contains("openbox"))
+        assertTrue(handoff[2].contains(FirefoxSession.GUEST_DBUS_SOCKET))
+        assertTrue(handoff[2].contains("exec '/opt/firefox-esr/firefox'"))
     }
 }

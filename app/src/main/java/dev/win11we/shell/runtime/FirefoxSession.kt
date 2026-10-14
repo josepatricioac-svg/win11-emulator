@@ -69,7 +69,7 @@ object FirefoxSession {
      * prelude degrades silently to "no bus": firefox still runs, only the
      * remote handoff to a running instance is unavailable.
      */
-    fun dbusBootstrapScript(firefoxCommand: List<String>): String {
+    fun dbusBootstrapScript(firefoxCommand: List<String>, withDesktop: Boolean = true): String {
         val exec = firefoxCommand.joinToString(" ") { shellQuote(it) }
         return buildString {
             appendLine("ADDR='$GUEST_DBUS_ADDRESS'")
@@ -84,18 +84,43 @@ object FirefoxSession {
             appendLine("  while [ \$i -lt 50 ]; do probe && break; i=\$((i+1)); sleep 0.1; done")
             appendLine("fi")
             appendLine("export DBUS_SESSION_BUS_ADDRESS=\"\$ADDR\"")
+            if (withDesktop) append(desktopPrelude())
             append("exec $exec")
         }
     }
 
     /**
-     * What the launcher actually execs: [guestCommand] wrapped in the D-Bus
-     * bootstrap. Same command for the first launch and for handing a URL to the
-     * running instance - with a live bus, firefox's own remote client forwards
-     * the URL to the running session and exits; without one it starts fresh.
+     * The desktop-session prelude: start openbox as the guest window manager
+     * (the shell's X server runs pass-through - it does NOT claim
+     * SubstructureRedirect, so the session brings its own WM and the whole
+     * desktop, frames and all, renders inside the X Desktop surface), and give
+     * it up to ~5 s to announce itself through _NET_SUPPORTING_WM_CHECK before
+     * Firefox maps its first window. Without openbox provisioned the session
+     * still runs: windows map undecorated, and readiness names the missing
+     * piece rather than the launch failing.
      */
-    fun sessionCommand(url: String? = null): List<String> =
-        listOf("/bin/bash", "-c", dbusBootstrapScript(guestCommand(url)))
+    fun desktopPrelude(): String = buildString {
+        appendLine("if command -v openbox >/dev/null 2>&1; then")
+        appendLine("  openbox >/dev/null 2>&1 &")
+        appendLine("  i=0")
+        appendLine("  while [ \$i -lt 20 ]; do")
+        appendLine("    xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q 'window id' && break")
+        appendLine("    i=\$((i+1))")
+        appendLine("    sleep 0.25")
+        appendLine("  done")
+        appendLine("fi")
+    }
+
+    /**
+     * What the launcher actually execs: [guestCommand] wrapped in the D-Bus
+     * bootstrap and (for a fresh session) the openbox desktop prelude. Same
+     * command for the first launch and for handing a URL to the running
+     * instance - with a live bus, firefox's own remote client forwards the URL
+     * to the running session and exits; without one it starts fresh. A handoff
+     * passes [withDesktop] = false: the session (and its WM) is already up.
+     */
+    fun sessionCommand(url: String? = null, withDesktop: Boolean = true): List<String> =
+        listOf("/bin/bash", "-c", dbusBootstrapScript(guestCommand(url), withDesktop))
 
     /** Bind mounts for one session: persistent profile, X socket dir and guest DNS. */
     fun binds(profileDir: File, xSocketUnixDir: File, resolvConf: File): List<Bind> = listOf(
@@ -146,6 +171,11 @@ object FirefoxEnvironment {
         put("XDG_CONFIG_HOME", "/root/.config")
         put("XDG_CACHE_HOME", "/root/.cache")
         put("MOZ_ENABLE_WAYLAND", "0") // X11 only: the shell's own X server
+        // proot ptraces EVERY guest process; multi-process Firefox pays that per
+        // fork, which is most of the "takes forever" first load. Single-process
+        // mode is the standard proot-Firefox remedy; a Firefox that no longer
+        // honours the switch simply ignores it.
+        put("MOZ_FORCE_DISABLE_E10S", "1")
         put("MOZ_DISABLE_CONTENT_SANDBOX", "1")
         put("MOZ_DISABLE_GMP_SANDBOX", "1")
         put("MOZ_DISABLE_RDD_SANDBOX", "1")

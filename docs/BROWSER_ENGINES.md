@@ -107,6 +107,21 @@ unlocks itself the moment the runtime is complete:
    "first run builds the fontconfig cache — up to a minute" until the first
    guest X connection flips it to RUNNING; a refusal replaces it with its
    named reason.
+7. **The session is a desktop, not a bare window (approach change, 2026-10-13)**:
+   the X server runs PASS-THROUGH - the shell never claims SubstructureRedirect
+   (the claim is exclusive and would lock a guest window manager out) - and the
+   session script starts **openbox** before Firefox, waiting up to ~5 s for its
+   `_NET_SUPPORTING_WM_CHECK` announcement (bounded: a dead WM must never hang
+   the launch). Openbox frames, places and focuses Firefox like the real EWMH
+   WM it is (`_NET_WM_SYNC_REQUEST` rides the D1f SYNC counters), and the whole
+   desktop renders inside the single X Desktop surface. URL handoffs skip the
+   WM start - the session's openbox is already up. Two more first-load fixes
+   ride along: `MOZ_FORCE_DISABLE_E10S=1` collapses Firefox to one process
+   (proot ptraces every fork; the multi-process model was most of the stall,
+   and a Firefox that no longer honours the switch ignores it), and Provision
+   runs `fc-cache -f` so the fontconfig cache is built at provision time
+   instead of during the first paint. Without openbox provisioned the session
+   still runs - windows map undecorated - and readiness names the gap.
 
 Honest limits while gated (each named by the readiness message, nothing silent):
 

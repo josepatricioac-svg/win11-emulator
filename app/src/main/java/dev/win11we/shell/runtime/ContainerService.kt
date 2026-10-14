@@ -168,7 +168,7 @@ object RuntimeHolder {
             container = Container.defaults(id, name, profile.absolutePath),
             rootfsDir = rootfs,
             xDisplay = RuntimePaths.X_DISPLAY,
-            guestCommand = FirefoxSession.sessionCommand(url),
+            guestCommand = FirefoxSession.sessionCommand(url, withDesktop = !handoff),
             guestPrefix = FirefoxSession.GUEST_PROFILE_DIR,
             binds = FirefoxSession.binds(profile, RuntimePaths.xSocketUnixDir(filesDir), resolvConf),
             environment = FirefoxEnvironment.build(RuntimePaths.X_DISPLAY),

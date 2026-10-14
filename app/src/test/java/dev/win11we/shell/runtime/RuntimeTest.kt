@@ -411,6 +411,7 @@ class ProotCommandTest {
                 "x11-apps",
                 "x11-utils",
                 "libgtk-3-bin",
+                "openbox",
                 "fontconfig",
                 "fonts-dejavu-core",
                 "fonts-liberation",
