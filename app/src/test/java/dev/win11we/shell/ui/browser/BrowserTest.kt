@@ -2,6 +2,7 @@ package dev.win11we.shell.ui.browser
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -59,93 +60,61 @@ class UrlsTest {
     }
 }
 
+/**
+ * The desktop-only [BrowserState] basics. Android-browser detection is gone
+ * (owner decision): the state has no installed list, no target package and no
+ * intent path - only the desktop engine, its readiness and its launcher.
+ */
 class BrowserStateTest {
 
-    private fun browser(packageName: String, label: String, isDefault: Boolean = false) =
-        BrowserApp(packageName = packageName, label = label, icon = null, isDefault = isDefault)
-
     @Test
-    fun `firefox is preferred when installed and the user has not chosen`() {
-        val state = BrowserState(
-            installed = listOf(
-                browser("com.android.chrome", "Chrome", isDefault = true),
-                browser("org.mozilla.firefox", "Firefox"),
-            ),
-        )
-        assertEquals("org.mozilla.firefox", state.targetPackage())
-        assertEquals("Firefox", state.targetLabel())
+    fun `the default engine is firefox esr and unknown choices fall back to it`() {
+        assertEquals("desktop:firefox-esr", BrowserState().engine().id)
+        assertEquals("desktop:firefox-esr", BrowserState(chosenEngineId = "desktop:nope").engine().id)
+        assertEquals("desktop:firefox-esr", BrowserState(chosenEngineId = "android:com.opera.browser").engine().id)
+        assertEquals("desktop:edge-arm64", BrowserState(chosenEngineId = "desktop:edge-arm64").engine().id)
     }
 
     @Test
-    fun `an explicit user choice wins over the firefox preference`() {
-        val state = BrowserState(
-            installed = listOf(
-                browser("org.mozilla.firefox", "Firefox"),
-                browser("com.brave.browser", "Brave"),
-            ),
-            preferredPackage = "com.brave.browser",
-        )
-        assertEquals("com.brave.browser", state.targetPackage())
-    }
-
-    @Test
-    fun `a stale choice falls back to firefox then to the system default`() {
-        val withFirefox = BrowserState(
-            installed = listOf(
-                browser("com.android.chrome", "Chrome", isDefault = true),
-                browser("org.mozilla.firefox", "Firefox"),
-            ),
-            preferredPackage = "com.opera.browser", // uninstalled
-        )
-        assertEquals("org.mozilla.firefox", withFirefox.targetPackage())
-
-        val withoutFirefox = BrowserState(
-            installed = listOf(browser("com.android.chrome", "Chrome", isDefault = true)),
-            preferredPackage = "com.opera.browser",
-        )
-        assertEquals("com.android.chrome", withoutFirefox.targetPackage())
-    }
-
-    @Test
-    fun `with no browser installed the system default intent is used`() {
-        val state = BrowserState(installed = emptyList())
-        assertNull(state.targetPackage())
-        assertEquals("System default browser", state.targetLabel())
-    }
-
-    @Test
-    fun `resolve records the url and target, empty input does nothing`() {
-        val state = BrowserState(installed = listOf(browser("org.mozilla.firefox", "Firefox")))
+    fun `resolve records the url and the engine id, empty input does nothing`() {
+        val state = BrowserState()
         assertNull(state.resolve())
         assertNull(state.lastUrl)
 
         state.query = "mozilla.org"
         assertEquals("https://mozilla.org", state.resolve())
         assertEquals("https://mozilla.org", state.lastUrl)
-        assertEquals("org.mozilla.firefox", state.lastTarget)
+        assertEquals("desktop:firefox-esr", state.lastTarget)
         assertEquals(listOf("https://mozilla.org"), state.history())
     }
 
     @Test
-    fun `chooseBrowser switches the target immediately`() {
-        val state = BrowserState(
-            installed = listOf(
-                browser("org.mozilla.firefox", "Firefox"),
-                browser("com.vivaldi.browser", "Vivaldi"),
-            ),
-        )
-        state.chooseBrowser("com.vivaldi.browser")
-        assertEquals("com.vivaldi.browser", state.lastTarget)
+    fun `chooseEngine records the selection immediately`() {
+        val state = BrowserState()
+        state.chooseEngine("desktop:chromium-arm64")
+        assertEquals("desktop:chromium-arm64", state.lastTarget)
     }
 
     @Test
-    fun `a failed launch is surfaced to the ui`() {
+    fun `without readiness nothing is launchable and the blocker is named`() {
         val state = BrowserState()
-        assertTrue(!state.launchFailed)
-        state.markLaunchFailed()
+        assertTrue(state.engineBlocked())
+        assertFalse(state.desktopLaunchable())
+        assertFalse(state.launchDesktop())
+        assertTrue(state.blockingNote()!!.startsWith("needs "))
+    }
+
+    @Test
+    fun `a failed launch flag is cleared by the next resolve`() {
+        val state = BrowserState(
+            initialQuery = "https://example.org",
+            desktopEngineReady = { true },
+            launchDesktopBrowser = { _, _ -> DesktopLaunchOutcome(false, "refused") },
+        )
+        assertFalse(state.launchDesktop())
         assertTrue(state.launchFailed)
         state.query = "example.org"
         state.resolve()
-        assertTrue(!state.launchFailed) // cleared by the next attempt
+        assertFalse(state.launchFailed) // cleared by the next attempt
     }
 }

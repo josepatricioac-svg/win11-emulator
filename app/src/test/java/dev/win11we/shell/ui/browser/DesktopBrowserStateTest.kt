@@ -9,7 +9,9 @@ import org.junit.Test
 /**
  * The desktop-engine launch seam of [BrowserState] (D1/R3 plumbing): a ready
  * engine with a launcher becomes launchable; everything else keeps the exact
- * gated behaviour the roadmap contract (and RoadmapGatingTest) requires.
+ * gated behaviour the roadmap contract (and RoadmapGatingTest) requires. Since
+ * Android-browser detection was removed, "blocked" is the ONLY non-launchable
+ * state - there is no silent intent fallback to test anymore, by design.
  */
 class DesktopBrowserStateTest {
 
@@ -21,7 +23,6 @@ class DesktopBrowserStateTest {
         query: String = "example.com",
     ) = BrowserState(
         initialQuery = query,
-        installed = listOf(BrowserApp("org.mozilla.firefox", "Firefox", null, false)),
         chosenEngineId = firefoxId,
         desktopEngineReady = { id -> ready && id == firefoxId },
         launchDesktopBrowser = launcher,
@@ -36,14 +37,13 @@ class DesktopBrowserStateTest {
         })
         assertTrue(browser.desktopLaunchable())
         assertFalse(browser.engineBlocked())
+        assertNull(browser.blockingNote())
         assertTrue(browser.launchDesktop())
         assertEquals(firefoxId, captured?.first)
         assertTrue("the resolved URL must be handed over", captured!!.second.startsWith("https://example.com"))
         assertEquals("Firefox ESR starting on :100", browser.desktopMessage)
         assertFalse(browser.launchFailed)
         assertEquals(firefoxId, browser.lastTarget)
-        // A desktop engine never resolves to an Android intent target.
-        assertNull(browser.targetPackage())
     }
 
     @Test
@@ -65,18 +65,17 @@ class DesktopBrowserStateTest {
     }
 
     @Test
-    fun `an unready desktop choice falls back to the android browser and launches nothing`() {
+    fun `an unready engine is blocked, named and never launched - no silent reroute`() {
         var calls = 0
         val browser = state(ready = false, launcher = { _, _ -> calls++; DesktopLaunchOutcome(true, "nope") })
-        // The resolver's designed fallback: an unready desktop choice resolves to the
-        // installed Android Firefox, so the Open button keeps working - not blocked,
-        // but also never pretending to launch the container engine.
-        assertTrue(browser.engine() is BrowserEngine.AndroidBrowser)
+        assertTrue(browser.engineBlocked())
         assertFalse(browser.desktopLaunchable())
-        assertFalse(browser.engineBlocked())
         assertFalse(browser.launchDesktop())
-        assertEquals(0, calls)
-        assertEquals("org.mozilla.firefox", browser.targetPackage())
+        assertEquals("the launcher must never fire while blocked", 0, calls)
+        // The blocker is named - first by the readiness worker's exact step...
+        assertEquals("Firefox ESR not installed", browser.blockingNote { "Firefox ESR not installed" })
+        // ...and before any readiness info exists, by the catalogue requirement.
+        assertTrue(browser.blockingNote { null }!!.contains("R3"))
     }
 
     @Test
@@ -87,47 +86,20 @@ class DesktopBrowserStateTest {
     }
 
     @Test
-    fun `the fallback note names the missing step when a desktop engine falls back`() {
-        val browser = BrowserState(
-            initialQuery = "example.org",
-            installed = listOf(BrowserApp("org.mozilla.firefox", "Firefox", null, false)),
-            chosenEngineId = firefoxId,
-            desktopEngineReady = { false },
-        )
-        assertEquals("Firefox ESR not installed", browser.fallbackNote { "Firefox ESR not installed" })
-        // With no readiness info yet, the catalogue requirement names the step.
-        assertTrue(browser.fallbackNote { null }!!.contains("R3"))
-        // A ready desktop engine has no fallback note.
-        val ready = state(ready = true, launcher = { _, _ -> DesktopLaunchOutcome(true, "ok") })
-        assertNull(ready.fallbackNote { "unused" })
-        // Android choices never produce a note.
-        val android = BrowserState(installed = listOf(BrowserApp("org.mozilla.firefox", "Firefox", null, true)))
-        assertNull(android.fallbackNote { "unused" })
+    fun `resolve records the url and the engine id`() {
+        val browser = state(ready = true, launcher = { _, _ -> DesktopLaunchOutcome(true, "ok") })
+        assertEquals("https://example.com", browser.resolve())
+        assertEquals("https://example.com", browser.lastUrl)
+        assertEquals(firefoxId, browser.lastTarget)
+        assertEquals(listOf("https://example.com"), browser.history())
     }
 
     @Test
-    fun `android engines are untouched by the desktop seam`() {
-        val browser = BrowserState(
-            initialQuery = "https://example.org",
-            installed = listOf(BrowserApp("org.mozilla.firefox", "Firefox", null, true)),
-            desktopEngineReady = { true },
-            launchDesktopBrowser = { _, _ -> DesktopLaunchOutcome(true, "must not be called") },
-        )
-        assertFalse(browser.desktopLaunchable())
-        assertFalse(browser.engineBlocked())
-        assertEquals("org.mozilla.firefox", browser.targetPackage())
-        assertEquals("https://example.org", browser.resolve())
-    }
-
-    @Test
-    fun `choosing a still-gated desktop engine keeps the android fallback`() {
-        val browser = BrowserState(
-            initialQuery = "example.org",
-            installed = listOf(BrowserApp("org.mozilla.firefox", "Firefox", null, false)),
-            chosenEngineId = "desktop:edge-arm64",
-            desktopEngineReady = { false },
-        )
-        assertTrue("edge waits on D2 - resolver must fall back", browser.engine() is BrowserEngine.AndroidBrowser)
-        assertFalse(browser.desktopLaunchable())
+    fun `a stale android choice resolves to the default engine and stays gated`() {
+        // Settings may still hold an "android:..." id from before detection was
+        // removed; it must resolve safely to the default desktop engine.
+        val browser = BrowserState(chosenEngineId = "android:com.brave.browser")
+        assertEquals(firefoxId, browser.engine().id)
+        assertTrue(browser.engineBlocked())
     }
 }

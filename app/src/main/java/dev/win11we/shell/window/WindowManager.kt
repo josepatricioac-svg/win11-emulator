@@ -18,7 +18,6 @@ import dev.win11we.shell.R
 import dev.win11we.shell.settings.SettingsStore
 import android.content.Context
 import dev.win11we.shell.ui.browser.BrowserState
-import dev.win11we.shell.ui.browser.Browsers
 import dev.win11we.shell.ui.explorer.ExplorerState
 import dev.win11we.shell.ui.notepad.NotepadState
 import dev.win11we.shell.ui.settings.SettingsState
@@ -194,8 +193,6 @@ fun rememberWindowManager(context: Context, store: SettingsStore): WindowManager
             "explorer" -> ExplorerState(root = if (root.isDirectory) root else File(root.parent ?: "/"))
             "notepad" -> NotepadState()
             "browser" -> BrowserState(
-                installed = Browsers.installed(appContext),
-                preferredPackage = store.browserPackage.ifBlank { null },
                 chosenEngineId = store.browserEngine.ifBlank { null },
                 // Cheap state reads only (rule 6): the readiness snapshot is
                 // filled by DesktopEngineReadiness' guarded worker.

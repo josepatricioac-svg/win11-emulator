@@ -27,7 +27,6 @@ object SettingsKeys {
     const val THEME_MODE = "shell.themeMode"
     const val TASKBAR_ALIGNMENT = "shell.taskbarAlignment"
     const val WINDOW_ANIMATIONS = "shell.windowAnimations"
-    const val BROWSER_PACKAGE = "shell.browserPackage"
     const val BROWSER_ENGINE = "shell.browserEngine"
     const val SHOW_BROWSER_PIN = "shell.showBrowserPin"
     const val SHOW_CONTAINERS_PIN = "shell.showContainersPin"
@@ -38,7 +37,6 @@ object SettingsKeys {
         THEME_MODE,
         TASKBAR_ALIGNMENT,
         WINDOW_ANIMATIONS,
-        BROWSER_PACKAGE,
         BROWSER_ENGINE,
         SHOW_BROWSER_PIN,
         SHOW_CONTAINERS_PIN,
@@ -95,11 +93,6 @@ class SettingsStore(private val prefs: ShellPreferences) {
         get() = values[SettingsKeys.BROWSER_ENGINE].orEmpty()
         set(value) = write(SettingsKeys.BROWSER_ENGINE, value)
 
-    /** Empty means "let Android pick the default http handler". */
-    var browserPackage: String
-        get() = values[SettingsKeys.BROWSER_PACKAGE].orEmpty()
-        set(value) = write(SettingsKeys.BROWSER_PACKAGE, value)
-
     var showBrowserPin: Boolean
         get() = booleanValue(SettingsKeys.SHOW_BROWSER_PIN, true)
         set(value) = write(SettingsKeys.SHOW_BROWSER_PIN, value.toString())
@@ -116,10 +109,6 @@ class SettingsStore(private val prefs: ShellPreferences) {
     var rootfsLocation: String
         get() = values[SettingsKeys.ROOTFS_LOCATION].orEmpty()
         set(value) = write(SettingsKeys.ROOTFS_LOCATION, value)
-
-    /** The pinned browser when it is still installed, otherwise null. */
-    fun preferredBrowserOrNull(installed: Collection<String>): String? =
-        browserPackage.takeIf { it.isNotBlank() && it in installed }
 
     private fun write(key: String, value: String) {
         values[key] = value

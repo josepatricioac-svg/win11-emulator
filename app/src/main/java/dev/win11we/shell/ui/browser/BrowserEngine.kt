@@ -4,49 +4,42 @@ import androidx.annotation.DrawableRes
 import dev.win11we.shell.R
 
 /**
- * How the shell reaches the web.
+ * How the shell reaches the web: ALWAYS a desktop engine inside the container.
  *
- * - [AndroidBrowser] hands the URL to an installed Android app (works today).
- * - [DesktopBrowser] runs a real PC browser inside the container and shows it on
- *   the shell's X server (needs R1 proot/box64, R3 rootfs, D1 X server). Those
- *   are the builds that expose desktop-only features - profile sync, extensions,
- *   sidebars, devtools - that no Android browser has.
+ * The Android-browser family (PackageManager detection, ACTION_VIEW hand-offs,
+ * the "system default" engine and the silent fallbacks around them) was
+ * REMOVED on owner decision: this shell's point is that browsing happens
+ * inside the emulator, on the X screen that IS the desktop. Detection added a
+ * second story, a `<queries>` manifest block, and a silent fallback that
+ * masked an unready runtime - the opposite of the gating contract. An engine
+ * that is not ready is now shown blocked with its named missing step, never
+ * quietly rerouted off-device.
  */
 sealed interface BrowserEngine {
     val id: String
     val label: String
 
-    data class AndroidBrowser(
-        val packageName: String,
-        override val label: String,
-        val isSystemDefault: Boolean = false,
-    ) : BrowserEngine {
-        override val id: String get() = "android:$packageName"
-    }
-
-    /** [requirement] names the roadmap step that unlocks this engine. */
+    /**
+     * A real PC browser running inside the rootfs on the shell's own X server
+     * (R1 proot/box64, R3 rootfs, D1 display). Nothing is bundled in the APK:
+     * engines are downloaded into the container with pinned hashes and their
+     * licences recorded in docs/THIRD_PARTY.md and docs/BROWSER_ENGINES.md.
+     */
     data class DesktopBrowser(
         override val id: String,
         override val label: String,
         val detail: String,
         val license: String,
+        /** Names the roadmap step that unlocks this engine (fallback label). */
         val requirement: String,
         @DrawableRes val iconRes: Int = R.drawable.ic_app_browser,
     ) : BrowserEngine {
         val available: Boolean get() = false // flips to true when the runtime reports ready (R4)
     }
-
-    /** Let Android pick whatever handles http(s). */
-    data object SystemDefault : BrowserEngine {
-        override val id: String get() = "android:"
-        override val label: String get() = "System default browser"
-    }
 }
 
 /**
- * Desktop engines we plan to offer. Nothing here is bundled in the APK: they are
- * downloaded into the container rootfs (R3) with pinned hashes and their licences
- * recorded in docs/THIRD_PARTY.md and docs/BROWSER_ENGINES.md.
+ * Desktop engines we plan to offer.
  */
 object DesktopBrowserCatalogue {
     val ALL: List<BrowserEngine.DesktopBrowser> = listOf(
@@ -82,7 +75,7 @@ object DesktopBrowserCatalogue {
         ),
     )
 
-    fun byId(id: String): BrowserEngine.DesktopBrowser? = ALL.firstOrNull { it.id == id }
+    fun byId(id: String?): BrowserEngine.DesktopBrowser? = ALL.firstOrNull { it.id == id }
 }
 
 /**
@@ -103,44 +96,20 @@ object DesktopEngineLabels {
 
 /**
  * Resolution rules for "which engine do we use", pure so they are unit-tested:
- * explicit choice when still valid, else Firefox on Android, else the system default.
+ * the explicit choice when it is a catalogued engine, else [DEFAULT]. Readiness
+ * is NOT part of the choice - an unready engine stays chosen and is reported
+ * blocked with its named missing step ([BrowserState.blockingNote]); the old
+ * resolver silently fell back to an Android browser here, which no longer
+ * exists by design.
  */
 object EngineResolver {
 
-    fun resolve(
-        chosenId: String?,
-        androidBrowsers: List<BrowserEngine.AndroidBrowser>,
-        desktopReady: (String) -> Boolean = { false },
-    ): BrowserEngine {
-        val installed = androidBrowsers.map { it.packageName }
-        return when {
-            chosenId.isNullOrBlank() -> preferFirefox(androidBrowsers)
-            chosenId == BrowserEngine.SystemDefault.id -> BrowserEngine.SystemDefault
-            chosenId.startsWith("desktop:") ->
-                DesktopBrowserCatalogue.byId(chosenId)?.takeIf { desktopReady(chosenId) } ?: preferFirefox(androidBrowsers)
-            chosenId.startsWith("android:") -> {
-                val packageName = chosenId.removePrefix("android:")
-                if (packageName in installed) {
-                    androidBrowsers.first { it.packageName == packageName }
-                } else {
-                    preferFirefox(androidBrowsers)
-                }
-            }
-            else -> preferFirefox(androidBrowsers)
-        }
-    }
+    /** The engine the shell offers out of the box: the fully-plumbed Firefox ESR. */
+    const val DEFAULT_ENGINE_ID = "desktop:firefox-esr"
 
-    /** Firefox first (our stated preference), then the system default, then anything installed. */
-    private fun preferFirefox(browsers: List<BrowserEngine.AndroidBrowser>): BrowserEngine =
-        browsers.firstOrNull { it.packageName == Browsers.PREFERRED_PACKAGE }
-            ?: browsers.firstOrNull { it.isSystemDefault }
-            ?: browsers.firstOrNull()
-            ?: BrowserEngine.SystemDefault
+    val DEFAULT: BrowserEngine.DesktopBrowser
+        get() = DesktopBrowserCatalogue.byId(DEFAULT_ENGINE_ID)!!
 
-    /** Package to put on the intent, or null for "let Android choose". */
-    fun targetPackage(engine: BrowserEngine): String? = when (engine) {
-        is BrowserEngine.AndroidBrowser -> engine.packageName
-        BrowserEngine.SystemDefault -> null
-        is BrowserEngine.DesktopBrowser -> null // launched inside the container instead (R2/D1)
-    }
+    fun resolve(chosenId: String?): BrowserEngine.DesktopBrowser =
+        DesktopBrowserCatalogue.byId(chosenId) ?: DEFAULT
 }

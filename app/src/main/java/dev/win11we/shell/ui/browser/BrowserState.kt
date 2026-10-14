@@ -10,58 +10,43 @@ data class DesktopLaunchOutcome(val success: Boolean, val message: String)
 
 /**
  * Per-window state of the Browser app: the address bar text, the resolved URL
- * and which package it would be handed to. The shell renders no web content
- * itself - it drives a real browser: an Android one via intent, or (D1/R3)
- * Firefox ESR inside the rootfs on the shell's own X server.
+ * and the desktop engine it will be handed to. The shell renders no web
+ * content itself and hands nothing to Android: the engine runs inside the
+ * rootfs on the X screen that IS the desktop (D1/R3), so a launched browser
+ * window appears directly on the desktop - there is no viewer and no intent.
  */
 @Stable
 class BrowserState(
     initialQuery: String = "",
-    val installed: List<BrowserApp> = emptyList(),
-    val preferredPackage: String? = null,
-    /** Id of the engine chosen in Settings / the Browser window; blank = auto. */
+    /** Id of the engine chosen in Settings / the Browser window; null/blank = [EngineResolver.DEFAULT]. */
     val chosenEngineId: String? = null,
-    /** True once the container runtime reports a desktop browser is usable (R4). */
+    /** True once the container runtime reports the engine is usable. */
     val desktopEngineReady: (String) -> Boolean = { false },
     /**
-     * Launches a ready desktop engine inside the container; null where the shell
+     * Launches the chosen engine inside the container; null where the shell
      * cannot launch (pure tests) - a ready engine without a launcher stays
      * blocked, exactly like the roadmap-gating contract requires.
      */
     val launchDesktopBrowser: ((engineId: String, url: String) -> DesktopLaunchOutcome)? = null,
 ) {
-    /** Android browsers as engines, for the resolver. */
-    fun engines(): List<BrowserEngine.AndroidBrowser> =
-        installed.map { BrowserEngine.AndroidBrowser(it.packageName, it.label, it.isDefault) }
+    /** The engine this window will use right now - always a desktop engine. */
+    fun engine(): BrowserEngine.DesktopBrowser = EngineResolver.resolve(chosenEngineId)
 
-    /** The engine this window will use right now. */
-    fun engine(): BrowserEngine =
-        EngineResolver.resolve(chosenEngineId ?: preferredPackage?.let { "android:$it" }, engines(), desktopEngineReady)
+    /** True when the chosen engine is ready AND the shell has a launcher for it. */
+    fun desktopLaunchable(): Boolean = desktopEngineReady(engine().id) && launchDesktopBrowser != null
 
-    /** True when the chosen desktop engine can actually be launched by the shell now. */
-    fun desktopLaunchable(): Boolean {
-        val engine = engine()
-        return engine is BrowserEngine.DesktopBrowser &&
-            desktopEngineReady(engine.id) && launchDesktopBrowser != null
-    }
-
-    /** True when the chosen engine needs the container runtime and cannot launch yet. */
-    fun engineBlocked(): Boolean = engine() is BrowserEngine.DesktopBrowser && !desktopLaunchable()
+    /** True when the engine cannot launch yet. Nothing silently replaces it. */
+    fun engineBlocked(): Boolean = !desktopLaunchable()
 
     /**
-     * When the user chose a desktop engine that is not ready, [EngineResolver]
-     * falls back to an Android browser - silently, by design of the resolver.
-     * This names what is missing so the UI never pretends the fallback is what
-     * the user asked for. [missingStep] is typically `DesktopEngineReadiness.missing`.
+     * The named missing step while blocked, so the UI never pretends a blocked
+     * engine works. [missingStep] is typically `DesktopEngineReadiness.missing`;
+     * before the readiness worker has reported, the engine's own roadmap
+     * requirement is quoted.
      */
-    fun fallbackNote(missingStep: (String) -> String?): String? {
-        val chosen = chosenEngineId ?: return null
-        if (!chosen.startsWith("desktop:")) return null
-        val engine = engine()
-        if (engine is BrowserEngine.DesktopBrowser && engine.id == chosen) return null
-        return missingStep(chosen)
-            ?: DesktopBrowserCatalogue.byId(chosen)?.requirement?.let { "needs $it" }
-            ?: "not ready"
+    fun blockingNote(missingStep: (String) -> String? = { null }): String? {
+        if (desktopLaunchable()) return null
+        return missingStep(engine().id) ?: "needs ${engine().requirement}"
     }
 
     var query by mutableStateOf(initialQuery)
@@ -76,18 +61,11 @@ class BrowserState(
     var desktopMessage by mutableStateOf<String?>(null)
         private set
 
-    /** Package we would use: the user's choice when it is still installed, else Firefox, else the default. */
-    fun targetPackage(): String? = EngineResolver.targetPackage(engine())
-        ?: preferredPackage.takeIf { it in installed.map { browser -> browser.packageName } }
-
-    fun targetLabel(): String =
-        installed.firstOrNull { it.packageName == targetPackage() }?.label ?: "System default browser"
-
-    /** Resolves the address bar into the intent that should be fired; null when empty. */
+    /** Resolves the address bar into the URL that should be launched; null when empty. */
     fun resolve(): String? {
         val url = Urls.parse(query) ?: return null
         lastUrl = url
-        lastTarget = targetPackage()
+        lastTarget = engine().id
         launchFailed = false
         return url
     }
@@ -98,24 +76,19 @@ class BrowserState(
      * always says what happened, including the named missing step.
      */
     fun launchDesktop(): Boolean {
-        val engine = engine()
-        if (engine !is BrowserEngine.DesktopBrowser || !desktopLaunchable()) return false
+        if (!desktopLaunchable()) return false
         val url = Urls.parse(query) ?: return false
-        val outcome = launchDesktopBrowser?.invoke(engine.id, url)
-            ?: return false
+        val outcome = launchDesktopBrowser?.invoke(engine().id, url) ?: return false
         lastUrl = url
         launchFailed = !outcome.success
         desktopMessage = outcome.message
-        if (outcome.success) lastTarget = engine.id
+        if (outcome.success) lastTarget = engine().id
         return outcome.success
     }
 
-    fun markLaunchFailed() {
-        launchFailed = true
-    }
-
-    fun chooseBrowser(packageName: String) {
-        lastTarget = packageName
+    /** UI feedback when the user picks an engine card. */
+    fun chooseEngine(id: String) {
+        lastTarget = id
     }
 
     fun history(): List<String> = listOfNotNull(lastUrl)

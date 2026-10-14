@@ -35,7 +35,6 @@ class SettingsStoreTest {
         assertEquals(ThemeMode.DARK, store.themeMode)
         assertEquals(TaskbarAlignment.CENTER, store.taskbarAlignment)
         assertTrue(store.windowAnimations)
-        assertEquals("", store.browserPackage) // system default handler
         assertTrue(store.showBrowserPin)
         assertTrue(store.showContainersPin)
         assertEquals(Box64Preset.GENERAL, store.box64Preset)
@@ -49,7 +48,6 @@ class SettingsStoreTest {
         store.themeMode = ThemeMode.LIGHT
         store.taskbarAlignment = TaskbarAlignment.LEFT
         store.windowAnimations = false
-        store.browserPackage = "org.mozilla.firefox"
         store.showBrowserPin = false
         store.box64Preset = Box64Preset.OFFICE
         store.rootfsLocation = "/data/user/0/dev.win11we.shell/files/win11we"
@@ -58,7 +56,6 @@ class SettingsStoreTest {
         assertEquals(ThemeMode.LIGHT, reloaded.themeMode)
         assertEquals(TaskbarAlignment.LEFT, reloaded.taskbarAlignment)
         assertFalse(reloaded.windowAnimations)
-        assertEquals("org.mozilla.firefox", reloaded.browserPackage)
         assertFalse(reloaded.showBrowserPin)
         assertEquals(Box64Preset.OFFICE, reloaded.box64Preset)
         assertEquals("/data/user/0/dev.win11we.shell/files/win11we", reloaded.rootfsLocation)
@@ -91,23 +88,15 @@ class SettingsStoreTest {
         assertEquals("", store.browserEngine) // "" = resolve automatically (Firefox first)
         store.browserEngine = "desktop:firefox-esr"
         assertEquals("desktop:firefox-esr", SettingsStore(prefs).browserEngine)
+        store.browserEngine = "desktop:chromium-arm64"
+        assertEquals("desktop:chromium-arm64", SettingsStore(prefs).browserEngine)
+        // A stale "android:..." value (stored before Android detection was
+        // removed) round-trips harmlessly - the resolver maps it to the
+        // default engine instead of crashing or handing a URL to the system.
         store.browserEngine = "android:com.brave.browser"
         assertEquals("android:com.brave.browser", SettingsStore(prefs).browserEngine)
         store.browserEngine = ""
         assertEquals("", SettingsStore(prefs).browserEngine)
-    }
-
-    @Test
-    fun `a pinned browser is only preferred while it is installed`() {
-        val store = SettingsStore(FakePreferences())
-        store.browserPackage = "org.mozilla.firefox"
-        assertEquals(
-            "org.mozilla.firefox",
-            store.preferredBrowserOrNull(listOf("org.mozilla.firefox", "com.android.chrome")),
-        )
-        assertNull(store.preferredBrowserOrNull(listOf("com.android.chrome")))
-        store.browserPackage = ""
-        assertNull(store.preferredBrowserOrNull(listOf("org.mozilla.firefox")))
     }
 
     @Test
@@ -124,7 +113,7 @@ class SettingsStoreTest {
         // A store rebuilt from the same preferences sees the persisted values.
         val reloaded = SettingsStore(prefs)
         assertFalse(reloaded.windowAnimations)
-        assertEquals(store.browserPackage, reloaded.browserPackage)
+        assertEquals(store.browserEngine, reloaded.browserEngine)
         assertEquals(store.box64Preset, reloaded.box64Preset)
         assertTrue(SettingsKeys.ALL.size >= 8)
     }

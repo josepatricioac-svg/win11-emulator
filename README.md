@@ -227,7 +227,7 @@ fails if that ever changes silently:
 | --- | --- | --- |
 | Container Manager (Wine) | Real UI, real persisted containers, and the **Prefix Manager**: *Install Wine payload* provisions the rootfs from the pinned Wine 9.0 debs (apt-resolved deps, disk-verified), *Initialize prefix* runs `wineboot --init && wineserver -w` for exactly one container's isolated prefix, *Repair* clears stale locks and re-runs wineboot. Start still validates binaries → rootfs → prefix and refuses with the whole chain named | device provisioning (rootfs download + payload install) |
 | Wine prefix, `wineboot`, installing apps | Prefixes are created/validated/repaired by `WinePrefixManager` (registry-header + `#arch` validation, `.update-lock` cleanup, graceful `wineserver -k` on app exit via `SessionLifecycle`); a prefix that was never initialised is still refused at launch. What has NO UI yet: installing arbitrary Windows apps into a prefix (`Start` runs `wine64 cmd`; the hardened browser-exe plan lives in `WineBrowserLaunch.request`, unwired) | a BYO-installer flow (PIPELINE_PLAN step 4) |
-| Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Firefox ESR is **fully plumbed and hardened**: pinned R3 artifact, readiness checks that name the missing piece, proot launch plan through R2's launcher on the shell's X server, a private D-Bus session so a second URL reaches the *running* instance, a Provision **doctor**, and the Phase-2A fixes: `/dev/shm` bind (1777), `PROOT_NO_SECCOMP=1`, sandbox-off env, software-rendering prefs (the no-GLX white-screen guard), resolv.conf DNS. Chromium/Electron **under Wine** get the same class of fixes as a pure launch plan (`WineBrowserLaunch`: `--no-sandbox --disable-gpu --disable-dev-shm-usage --disable-setuid-sandbox …` on `:100`). Until the runtime is provisioned on-device, selecting a desktop engine falls back to an Android browser; Edge/Chromium stay listed with their gating steps | device provisioning (Firefox ESR), **R1/R2/R3 + D2 + BYO installer** (Edge/Chromium) |
+| Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Firefox ESR is **fully plumbed and hardened**: pinned R3 artifact, readiness checks that name the missing piece, proot launch plan through R2's launcher on the shell's X server, a private D-Bus session so a second URL reaches the *running* instance, a Provision **doctor**, and the Phase-2A fixes: `/dev/shm` bind (1777), `PROOT_NO_SECCOMP=1`, sandbox-off env, software-rendering prefs (the no-GLX white-screen guard), resolv.conf DNS. Chromium/Electron **under Wine** get the same class of fixes as a pure launch plan (`WineBrowserLaunch`: `--no-sandbox --disable-gpu --disable-dev-shm-usage --disable-setuid-sandbox …` on `:100`). Until the runtime is provisioned on-device, Open refuses with the named missing step (Android-browser fallback was removed - nothing leaves the emulator); Edge/Chromium stay listed with their gating steps | device provisioning (Firefox ESR), **R1/R2/R3 + D2 + BYO installer** (Edge/Chromium) |
 | Terminal `wine`/`box64`/`proot`/`cmd` | Answer "not available yet" and name the step | R2 pty executor |
 | Task Manager container rows | Absent (no processes to show) | R2 |
 | Diagnostics wine64 self-test | Command lines are built and shown, not executed; the `proot --version` and `box64 --version` probes have real vendored binaries to run | wine provisioning (payload + prefix) |
@@ -255,9 +255,9 @@ The shell is written so that the common interactions recompose as little as poss
 - **Taskbar**: each pin is its own composable, so the window-list reads are scoped to that
   pin. Moving a window no longer rebuilds the bar, its tooltips or the clock.
 - **First open**: the expensive one-offs are warmed at startup on a low-priority background
-  thread - the PackageManager browser query (cached per process), the SHA-256 of the shipped
+  thread - the SHA-256 of the shipped
   binaries (cached per file stamp) and every app's payload factory (class loading, disk
-  reads, container list parsing). `Browsers.invalidate()` exists for refresh-after-install.
+  reads, container list parsing).
 - **Frame loop**: one `withFrameNanos` loop drives every window animation and only writes
   state while something is actually animating; steady windows cost no writes, so a desktop
   with idle windows does not recompose at 60 fps.
@@ -496,15 +496,20 @@ list: running windows, New window, Task Manager.
 ## Browser
 
 The Browser pin opens a shell window with an address bar. The shell never renders web
-content: it resolves the input (URL, bare hostname -> `https://`, otherwise a search)
-and hands it to a real browser via `ACTION_VIEW`. **Firefox is preferred** when
-installed (`org.mozilla.firefox`), then the user's pinned choice, then Android's
-default handler; Settings ▸ Apps lists what is installed and stores the preference.
-Firefox is never bundled in the APK.
+content **and never hands URLs to Android**: installed-browser detection, the
+`ACTION_VIEW` hand-off and the `<queries>` manifest block were REMOVED on owner
+decision - they added a second story and a silent fallback that masked an unready
+runtime. The shell resolves the input (URL, bare hostname -> `https://`, otherwise a
+DuckDuckGo search) and launches a **desktop engine inside the emulator**: the window
+appears directly on the desktop, because the desktop layer IS the X screen. An engine
+that is not ready is shown blocked with its exact missing step - nothing is rerouted
+off-device behind the user's back, and a stale `android:` preference in Settings
+resolves safely to the default engine.
 
-For desktop-class browsing (profiles, extensions, AI/Copilot-style sidebars) the shell
-models a second engine family - **Linux arm64 Firefox ESR / Chromium** in the rootfs and
-**Windows arm64 Edge** under Wine. **Firefox ESR's launch path is fully plumbed (D1c/D1d)**:
+The engine family is **Linux arm64 Firefox ESR / Chromium** in the rootfs and
+**Windows arm64 Edge** under Wine; Settings ▸ Apps picks between them (persisted, no
+package detection). Nothing is bundled in the APK. **Firefox ESR's launch path is
+fully plumbed (D1c/D1d)**:
 Mozilla's official self-contained arm64 build is a pinned R3 artifact, a guarded worker
 evaluates readiness (R1 binaries → rootfs → Firefox installed → GTK3 stack) into a
 Compose-state snapshot, and a ready engine launches through R2's `ContainerLauncher` as
@@ -523,9 +528,10 @@ guest WM (provisioned with the GTK3 stack) before Firefox, and
 biggest first-load stalls (per-fork ptrace cost, font-cache building) out of
 the first paint. The prelude
 starts a private `dbus-daemon --session` at a fixed guest address, which is what lets
-a second URL reach the *running* instance instead of being refused as a double start. Until the runtime is vendored the card names the
-missing piece and selection falls back to an Android browser, exactly as
-`RoadmapGatingTest` pins it. See `docs/BROWSER_ENGINES.md` for the feasibility write-up,
+a second URL reach the *running* instance instead of being refused as a double start.
+Until the runtime is provisioned the card names the missing piece and Open refuses
+with that name - exactly as `RoadmapGatingTest` pins it (no Android fallback exists
+anymore). See `docs/BROWSER_ENGINES.md` for the feasibility write-up,
 the licensing constraints (Edge is proprietary and must not be redistributed) and the
 open decisions.
 
@@ -631,10 +637,10 @@ app/src/main/java/dev/win11we/shell/
   settings/SettingsStore.kt    persisted, observable shell settings (+ keys, presets)
   ui/settings/SettingsUi.kt    sections, searchable settings catalogue
   ui/settings/SettingsScreen.kt Personalisation / Apps / Storage / Containers / Diagnostics / About
-  ui/browser/Browsers.kt       installed-browser discovery, intent building, URL parsing
-  ui/browser/BrowserState.kt   address bar, target package, launch bookkeeping
-  ui/browser/BrowserApp.kt     Browser window: address bar + browser chooser
-  ui/browser/BrowserEngine.kt  Android vs desktop engines, catalogue, resolver
+  ui/browser/Urls.kt           address-bar resolution (URL / hostname / search) - pure
+  ui/browser/BrowserEngine.kt  desktop-engine catalogue, resolver, readiness labels
+  ui/browser/BrowserState.kt   address bar, engine choice, launch bookkeeping
+  ui/browser/BrowserApp.kt     Browser window: address bar + desktop-engine catalogue
   ui/taskmanager/ProcessList.kt  /proc parsing, CPU maths, sampler, history ring
   ui/taskmanager/TaskManagerScreen.kt Processes + Performance tabs, End task
   ui/terminal/LogBuffer.kt     bounded shared log sink + shell-style argv splitting

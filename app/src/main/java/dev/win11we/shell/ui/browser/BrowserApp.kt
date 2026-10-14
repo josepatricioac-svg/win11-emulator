@@ -1,6 +1,5 @@
 package dev.win11we.shell.ui.browser
 
-import android.content.ActivityNotFoundException
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -49,10 +48,11 @@ private val Pill = RoundedCornerShape(50)
 private val Card = RoundedCornerShape(9.dp)
 
 /**
- * Browser window. The shell never renders web content itself: it resolves the
- * address and hands it to a real browser - an Android one via intent, or the
- * desktop engine (Firefox ESR in the rootfs, D1/R3) whose windows appear
- * directly on the desktop - the shell's desktop layer IS the X screen.
+ * Browser window. The shell never renders web content and never hands URLs to
+ * Android: it resolves the address and launches a desktop engine (Firefox ESR
+ * in the rootfs, D1/R3) whose window appears directly on the desktop - the
+ * desktop layer IS the X screen. Engines that are not ready are shown blocked
+ * with the exact missing step; nothing falls back silently anymore.
  */
 @Composable
 fun BrowserApp(
@@ -103,19 +103,13 @@ fun BrowserApp(
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             val launchable = state.desktopLaunchable()
-            val fallback = state.fallbackNote { DesktopEngineReadiness.missing(it) }
+            val blockedNote = if (launchable) null else state.blockingNote { DesktopEngineReadiness.missing(it) }
             Text(
                 text = when {
                     launchable -> "${engine.label} - opens right on the desktop"
-                    state.engineBlocked() -> "${engine.label} - runtime not installed"
-                    fallback != null -> "Desktop engine not ready ($fallback) - opens in ${engine.label} instead"
-                    else -> "Opens in ${engine.label}"
+                    else -> "${engine.label} - not ready ($blockedNote)"
                 },
-                color = when {
-                    state.engineBlocked() -> Color(0xFFFFB4A6)
-                    fallback != null -> Color(0xFFFFC44D) // amber: opening in the fallback engine
-                    else -> TextSecondary
-                },
+                color = if (launchable) TextSecondary else Color(0xFFFFB4A6),
                 fontSize = 12.5.sp,
                 modifier = Modifier.weight(1f),
             )
@@ -128,9 +122,8 @@ fun BrowserApp(
                     .clip(Pill)
                     .background(AccentBlue)
                     .clickable(onClickLabel = "Open") {
-                        val url = state.resolve()
                         when {
-                            url == null ->
+                            state.resolve() == null ->
                                 Toast.makeText(context, "Nothing to open", Toast.LENGTH_SHORT).show()
                             launchable -> {
                                 val ok = state.launchDesktop()
@@ -138,19 +131,12 @@ fun BrowserApp(
                                     Toast.makeText(context, it, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
                                 }
                             }
-                            state.engineBlocked() ->
+                            else ->
                                 Toast.makeText(
                                     context,
-                                    "${engine.label} needs the container runtime (R1/R3) and the X server (D1).",
+                                    "${engine.label} is not launchable yet: $blockedNote",
                                     Toast.LENGTH_LONG,
                                 ).show()
-                            else ->
-                                try {
-                                    context.startActivity(Browsers.launchIntent(url, state.targetPackage()))
-                                } catch (error: ActivityNotFoundException) {
-                                    state.markLaunchFailed()
-                                    Toast.makeText(context, "No browser could open $url", Toast.LENGTH_LONG).show()
-                                }
                         }
                     }
                     .padding(horizontal = 18.dp, vertical = 8.dp),
@@ -158,66 +144,31 @@ fun BrowserApp(
         }
         if (state.launchFailed) {
             Spacer(Modifier.height(8.dp))
-            Text("No browser answered. Install Firefox, or pick one below.", color = Color(0xFFFF8A7A), fontSize = 12.sp)
+            Text("The session refused the launch - the reason is below and in Terminal ▸ log.", color = Color(0xFFFF8A7A), fontSize = 12.sp)
         }
         state.desktopMessage?.let { message ->
             Spacer(Modifier.height(8.dp))
             Text(message, color = TextSecondary, fontSize = 12.sp)
         }
 
-        Spacer(Modifier.height(18.dp))
-        Text("Installed browsers", color = TextPrimary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            text = "The shell hands the URL to the browser process; nothing is rendered or proxied in-app.",
-            color = TextTertiary,
-            fontSize = 11.5.sp,
-        )
-        Spacer(Modifier.height(10.dp))
-
-        if (state.installed.isEmpty()) {
-            BrowserCard(
-                title = "No browser found",
-                subtitle = "Install Firefox (org.mozilla.firefox) or any other browser, then reopen this window.",
-                iconRes = R.drawable.ic_app_browser,
-                trailing = null,
-            )
-        } else {
-            state.installed.forEach { browser ->
-                val chosen = browser.packageName == state.targetPackage()
-                BrowserCard(
-                    title = browser.label,
-                    subtitle = browser.packageName + if (browser.isDefault) "  ·  system default" else "",
-                    drawable = browser.icon,
-                    iconRes = R.drawable.ic_app_browser,
-                    trailing = if (chosen) "Preferred" else "Use",
-                    accent = chosen,
-                    onClick = {
-                        state.chooseBrowser(browser.packageName)
-                        onChooseBrowser("android:" + browser.packageName)
-                    },
-                )
-                Spacer(Modifier.height(6.dp))
-            }
-        }
-
         Spacer(Modifier.height(20.dp))
-        Text("Desktop browsers (in the container)", color = TextPrimary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+        Text("Browser engines (inside the emulator)", color = TextPrimary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
         Text(
             text = "PC-class browsers with profiles, extensions and sidebars. They run inside the Linux rootfs on the " +
-                "shell's own X server - never as an Android app, and never bundled in this APK.",
+                "shell's own X server and their windows appear directly on the desktop - never as an Android app, " +
+                "and never bundled in this APK.",
             color = TextTertiary,
             fontSize = 11.5.sp,
         )
         Spacer(Modifier.height(10.dp))
         DesktopBrowserCatalogue.ALL.forEach { desktop ->
-            val chosen = engine is BrowserEngine.DesktopBrowser && engine.id == desktop.id
+            val chosen = engine.id == desktop.id
             val ready = state.desktopEngineReady(desktop.id)
             val missing = if (ready) null else DesktopEngineReadiness.missing(desktop.id)
             BrowserCard(
                 title = desktop.label,
-                subtitle = missing ?: desktop.detail,
+                subtitle = DesktopEngineLabels.status(desktop, ready, missing),
                 iconRes = desktop.iconRes,
                 trailing = when {
                     chosen && ready -> "Selected - ready"
@@ -228,7 +179,7 @@ fun BrowserApp(
                 badge = desktop.license,
                 locked = !desktop.available && !ready,
                 onClick = {
-                    state.chooseBrowser(desktop.id)
+                    state.chooseEngine(desktop.id)
                     onChooseBrowser(desktop.id)
                 },
             )
@@ -238,7 +189,8 @@ fun BrowserApp(
         Spacer(Modifier.height(14.dp))
         Text(
             text = "Bare addresses become https:// links; anything else is searched with DuckDuckGo. " +
-                "Firefox is preferred when installed - it is MPL-2.0 licensed and is never bundled in this APK.",
+                "Engines are downloaded into the container (Settings ▸ Storage ▸ Runtime download) with pinned " +
+                "hashes - nothing is bundled in this APK.",
             color = TextTertiary,
             fontSize = 11.5.sp,
         )
@@ -251,7 +203,6 @@ private fun BrowserCard(
     subtitle: String,
     iconRes: Int,
     trailing: String?,
-    drawable: android.graphics.drawable.Drawable? = null,
     accent: Boolean = false,
     badge: String? = null,
     locked: Boolean = false,
@@ -267,17 +218,8 @@ private fun BrowserCard(
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (drawable != null) {
-            androidx.compose.ui.viewinterop.AndroidView(
-                factory = { context ->
-                    android.widget.ImageView(context).apply { setImageDrawable(drawable) }
-                },
-                modifier = Modifier.size(26.dp),
-            )
-        } else {
-            Box(Modifier.size(26.dp).clip(CircleShape).background(Color(0x224CC2FF)), contentAlignment = Alignment.Center) {
-                Icon(painterResource(iconRes), null, tint = AccentBlue, modifier = Modifier.size(15.dp))
-            }
+        Box(Modifier.size(26.dp).clip(CircleShape).background(Color(0x224CC2FF)), contentAlignment = Alignment.Center) {
+            Icon(painterResource(iconRes), null, tint = AccentBlue, modifier = Modifier.size(15.dp))
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {

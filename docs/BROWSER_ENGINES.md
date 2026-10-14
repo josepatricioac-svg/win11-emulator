@@ -11,7 +11,7 @@ the app must own the X server, the processes and the downloads.
 | --- | --- | --- | --- |
 | **Linux arm64 native** (Firefox ESR, Chromium) | `proot` + Ubuntu 22.04 arm64 rootfs → X11 to our own X server | Full: profiles, extensions, sidebars, devtools | **Primary path.** Same machinery as Wine, no emulation, no GPL entanglement |
 | **Windows arm64/x64** (Edge arm64, Firefox x64) | Edge arm64: `proot` + Wine (native arm64 PE, no box64).<br>Firefox x64: `proot` + Wine + **box64** | Full, plus vendor AI sidebars | Edge arm64 is the interesting one; Firefox x64 via box64 is the slow fallback |
-| Android browser via intent | `ACTION_VIEW` out of the shell | Mobile feature set only | What N2 ships today; stays as the "no runtime installed" fallback |
+| ~~Android browser via intent~~ | ~~`ACTION_VIEW` out of the shell~~ | Mobile feature set only | **REMOVED (owner decision, 2026-10-14)**: detection, intents and the `<queries>` manifest block are gone - a not-ready engine is blocked and named, never rerouted off-device |
 
 There is **no Windows/arm64 build of Firefox** from Mozilla, so "Firefox ESR like a PC"
 means the **Linux arm64 build** (Ubuntu's `firefox-esr`/`firefox` package or Mozilla's
@@ -34,18 +34,23 @@ contract — and each one gets a licence entry in `THIRD_PARTY.md` when it lands
 
 ## What is implemented today (this step)
 
-- `BrowserEngine` sealed model: `AndroidBrowser` / `DesktopBrowser` / `SystemDefault`.
+- `BrowserEngine` sealed model: **`DesktopBrowser` only** - the `AndroidBrowser` and
+  `SystemDefault` variants were deleted together with `Browsers.kt` (PackageManager
+  detection, icon loading, `ACTION_VIEW` intents, the package cache) and the
+  manifest's `<queries>` block. What survives of that file is the pure `Urls`
+  parser, now `ui/browser/Urls.kt`.
 - `DesktopBrowserCatalogue`: the four engines above, each with detail text, licence and
   the roadmap step that unlocks it. `available == false` until the runtime reports ready
   (R4 self-test is the gate).
-- `EngineResolver`: chosen engine if still valid → **Firefox on Android** → system
-  default → `SystemDefault`. A `desktop:` choice resolves to a real desktop engine only
-  when `desktopEngineReady(id)` is true, otherwise it falls back instead of failing.
-- Browser window: Android browsers (live, launchable) plus the desktop catalogue
-  (selectable, clearly labelled with what it needs); picking one persists
-  `shell.browserEngine`.
-- Settings ▸ Apps stores the same preference; Task Manager can end a browser window like
-  any other.
+- `EngineResolver`: chosen engine when catalogued, else `DEFAULT` (Firefox ESR).
+  Readiness gates the LAUNCH (`BrowserState.engineBlocked` + `blockingNote`), never
+  the choice - the old silent Android fallback is gone by design. A stale stored
+  `android:...` id resolves to the default instead of crashing.
+- Browser window: the desktop catalogue (selectable, labelled with the exact missing
+  step); picking one persists `shell.browserEngine`. Open launches inside the
+  container or names the blocker in a toast - it never leaves the emulator.
+- Settings ▸ Apps lists the same catalogue (no installed-package rows anymore);
+  Task Manager can end a browser window like any other.
 
 ## Firefox ESR launch path — fully plumbed (D1c), gated on the R1 binaries
 

@@ -3,7 +3,6 @@ package dev.win11we.shell.window
 import dev.win11we.shell.R
 import dev.win11we.shell.container.ContainerStatus
 import dev.win11we.shell.container.NotInstalledRuntime
-import dev.win11we.shell.ui.browser.BrowserApp
 import dev.win11we.shell.ui.browser.BrowserEngine
 import dev.win11we.shell.ui.browser.BrowserState
 import dev.win11we.shell.ui.browser.DesktopBrowserCatalogue
@@ -66,19 +65,21 @@ class RoadmapGatingTest {
     }
 
     @Test
-    fun `an unavailable desktop engine falls back to an android browser`() {
-        val firefox = BrowserApp("org.mozilla.firefox", "Firefox", null, false)
-        val state = BrowserState(installed = listOf(firefox), chosenEngineId = "desktop:firefox-esr")
-        assertFalse(state.engineBlocked())
-        assertEquals("org.mozilla.firefox", state.targetPackage())
+    fun `an unready engine is blocked and named - never rerouted to android`() {
+        // Android-browser detection is removed: a not-ready engine cannot be
+        // silently replaced by an intent anymore; it is blocked WITH the step.
+        val state = BrowserState(chosenEngineId = "desktop:firefox-esr")
+        assertTrue("nothing may launch before the runtime is ready", state.engineBlocked())
+        assertFalse(state.desktopLaunchable())
+        assertFalse(state.launchDesktop())
+        assertTrue(state.blockingNote()!!.contains("R3"))
     }
 
     @Test
-    fun `a ready desktop engine has no intent target and is reported as blocked`() {
-        val state = BrowserState(installed = emptyList(), chosenEngineId = "desktop:edge-arm64", desktopEngineReady = { true })
+    fun `a ready desktop engine without the shell launcher is reported as blocked`() {
+        val state = BrowserState(chosenEngineId = "desktop:edge-arm64", desktopEngineReady = { true })
         assertTrue(state.engine() is BrowserEngine.DesktopBrowser)
         assertTrue("R2 must launch it inside the container, the UI has to say so", state.engineBlocked())
-        assertNull(state.targetPackage())
         assertEquals("Microsoft Edge (Windows arm64)", state.engine().label)
     }
 }

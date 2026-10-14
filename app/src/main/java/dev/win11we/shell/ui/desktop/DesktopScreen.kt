@@ -61,10 +61,10 @@ fun DesktopScreen(store: SettingsStore) {
     // P1: bridge X selections <-> the Android clipboard while the desktop lives
     // (guest copies push out; Android-side changes reclaim selection ownership).
     dev.win11we.shell.ui.xdesktop.ClipboardBridgeEffect()
-    // Warm the caches that opening a window would otherwise pay for on the main thread:
-    // the PackageManager browser query and the SHA-256 of the shipped binaries.
+    // Warm the caches that opening a window would otherwise pay for on the main
+    // thread: the SHA-256 of the shipped binaries. (The PackageManager browser
+    // query is gone with Android-browser detection - nothing to warm.)
     LaunchedEffect(Unit) {
-        dev.win11we.shell.ui.browser.Browsers.warmUp(context)
         val launcher = dev.win11we.shell.runtime.RuntimeHolder.init(
             context,
             dev.win11we.shell.runtime.RuntimePaths

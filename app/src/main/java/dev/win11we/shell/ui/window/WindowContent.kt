@@ -110,11 +110,8 @@ private fun WindowBody(
             BrowserApp(
                 state = state,
                 onChooseBrowser = { engineId ->
-                    val store = ShellSettings.get().store
-                    store.browserEngine = engineId
-                    if (engineId.startsWith("android:")) {
-                        store.browserPackage = engineId.removePrefix("android:")
-                    }
+                    // Desktop engines only: the choice persists to Settings.
+                    ShellSettings.get().store.browserEngine = engineId
                 },
             )
         }

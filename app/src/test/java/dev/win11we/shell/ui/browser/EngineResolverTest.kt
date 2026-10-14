@@ -7,61 +7,31 @@ import org.junit.Test
 
 class EngineResolverTest {
 
-    private val firefox = BrowserEngine.AndroidBrowser("org.mozilla.firefox", "Firefox")
-    private val chrome = BrowserEngine.AndroidBrowser("com.android.chrome", "Chrome", isSystemDefault = true)
-    private val brave = BrowserEngine.AndroidBrowser("com.brave.browser", "Brave")
-    private val android = listOf(chrome, firefox, brave)
-
     @Test
-    fun `no choice means firefox when it is installed`() {
-        assertEquals(firefox, EngineResolver.resolve(null, android))
-        assertEquals(firefox, EngineResolver.resolve("", android))
+    fun `no choice means the default desktop engine`() {
+        assertEquals("desktop:firefox-esr", EngineResolver.resolve(null).id)
+        assertEquals("desktop:firefox-esr", EngineResolver.resolve("").id)
+        assertEquals(EngineResolver.DEFAULT_ENGINE_ID, EngineResolver.DEFAULT.id)
     }
 
     @Test
-    fun `without firefox the system default wins, then anything installed`() {
-        assertEquals(chrome, EngineResolver.resolve(null, listOf(chrome, brave)))
-        assertEquals(brave, EngineResolver.resolve(null, listOf(brave)))
+    fun `a catalogued choice is honoured whatever its readiness`() {
+        // Readiness gates the LAUNCH (BrowserState.engineBlocked), never the
+        // choice: an unready engine stays selected and is named as blocked -
+        // the resolver no longer substitutes anything silently.
+        assertEquals("desktop:edge-arm64", EngineResolver.resolve("desktop:edge-arm64").id)
+        assertEquals("desktop:chromium-arm64", EngineResolver.resolve("desktop:chromium-arm64").id)
     }
 
     @Test
-    fun `with nothing installed we fall back to the system handler`() {
-        assertEquals(BrowserEngine.SystemDefault, EngineResolver.resolve(null, emptyList()))
-        assertNull(EngineResolver.targetPackage(BrowserEngine.SystemDefault))
-    }
-
-    @Test
-    fun `an explicit android choice is honoured`() {
-        assertEquals(brave, EngineResolver.resolve("android:com.brave.browser", android))
-        assertEquals("com.brave.browser", EngineResolver.targetPackage(brave))
-    }
-
-    @Test
-    fun `a stale android choice falls back to firefox`() {
-        assertEquals(firefox, EngineResolver.resolve("android:com.opera.browser", android))
-    }
-
-    @Test
-    fun `the system default engine can be chosen explicitly`() {
-        assertEquals(BrowserEngine.SystemDefault, EngineResolver.resolve("android:", android))
-    }
-
-    @Test
-    fun `desktop engines stay blocked until the container runtime is ready`() {
-        val engine = EngineResolver.resolve("desktop:firefox-esr", android)
-        assertTrue("must fall back while the runtime is missing", engine is BrowserEngine.AndroidBrowser)
-        assertEquals(firefox, engine)
-
-        val ready = EngineResolver.resolve("desktop:firefox-esr", android) { id -> id == "desktop:firefox-esr" }
-        assertTrue(ready is BrowserEngine.DesktopBrowser)
-        assertEquals("Firefox ESR (Linux arm64)", ready.label)
-        assertNull("desktop engines launch inside the container, not via an intent", EngineResolver.targetPackage(ready))
-    }
-
-    @Test
-    fun `unknown engine ids fall back instead of crashing`() {
-        assertEquals(firefox, EngineResolver.resolve("desktop:does-not-exist", android))
-        assertEquals(firefox, EngineResolver.resolve("nonsense", android))
+    fun `stale android choices and unknown ids fall back to the default engine`() {
+        // A stored "android:..." preference predates the removal of Android
+        // browser detection; it must resolve safely, not crash or hand a URL
+        // to the system.
+        assertEquals(EngineResolver.DEFAULT_ENGINE_ID, EngineResolver.resolve("android:org.mozilla.firefox").id)
+        assertEquals(EngineResolver.DEFAULT_ENGINE_ID, EngineResolver.resolve("android:").id)
+        assertEquals(EngineResolver.DEFAULT_ENGINE_ID, EngineResolver.resolve("nonsense").id)
+        assertEquals(EngineResolver.DEFAULT_ENGINE_ID, EngineResolver.resolve("desktop:does-not-exist").id)
     }
 
     @Test

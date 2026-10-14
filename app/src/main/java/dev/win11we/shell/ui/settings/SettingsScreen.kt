@@ -42,7 +42,6 @@ import dev.win11we.shell.settings.Box64Preset
 import dev.win11we.shell.settings.SettingsStore
 import dev.win11we.shell.settings.TaskbarAlignment
 import dev.win11we.shell.settings.ThemeMode
-import dev.win11we.shell.ui.browser.Browsers
 import dev.win11we.shell.runtime.DesktopEngineReadiness
 import dev.win11we.shell.ui.browser.DesktopBrowserCatalogue
 import dev.win11we.shell.ui.browser.DesktopEngineLabels
@@ -198,41 +197,15 @@ private fun PersonalisationPage(store: SettingsStore) {
 @Composable
 private fun AppsPage(store: SettingsStore) {
     val context = LocalContext.current
-    val installed = remember { Browsers.installed(context) }
     // Readiness is evaluated on a guarded worker (no disk I/O in composition).
     androidx.compose.runtime.LaunchedEffect(Unit) { DesktopEngineReadiness.refreshAsync(context) }
     PageTitle("Apps")
     Hint(
-        "Default browser engine. Android browsers launch now; desktop engines run inside the " +
-            "container on the shell's X server. Each one shows the exact step it is still waiting on.",
+        "Browser engines run INSIDE the emulator, on the X screen that is the desktop - the " +
+            "shell never hands a URL to Android. Each engine shows the exact step it is still " +
+            "waiting on; nothing falls back silently.",
     )
     SettingsCard {
-        installed.forEach { browser ->
-            RadioRow(
-                title = browser.label,
-                subtitle = browser.packageName + if (browser.isDefault) "  ·  system default" else "",
-                options = emptyList(),
-                selectedIndex = 0,
-                onSelect = {},
-                checked = browser.packageName == store.browserPackage,
-                onClick = { store.browserPackage = browser.packageName },
-            )
-        }
-        if (installed.isEmpty()) {
-            SettingsRow(
-                title = "No browser installed",
-                subtitle = "Install Firefox (org.mozilla.firefox) to make the Browser pin useful",
-            )
-        }
-        RadioRow(
-            title = "Let the system choose",
-            subtitle = "Uses Android's default http handler instead of a fixed package",
-            options = emptyList(),
-            selectedIndex = 0,
-            onSelect = {},
-            checked = store.browserPackage.isBlank(),
-            onClick = { store.browserPackage = "" },
-        )
         DesktopBrowserCatalogue.ALL.forEach { engine ->
             RadioRow(
                 title = engine.label,
@@ -244,7 +217,7 @@ private fun AppsPage(store: SettingsStore) {
                 options = emptyList(),
                 selectedIndex = 0,
                 onSelect = {},
-                checked = store.browserEngine == engine.id,
+                checked = store.browserEngine.ifBlank { dev.win11we.shell.ui.browser.EngineResolver.DEFAULT_ENGINE_ID } == engine.id,
                 onClick = { store.browserEngine = engine.id },
             )
         }

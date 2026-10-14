@@ -24,7 +24,7 @@ val SettingsCatalogue: List<SettingsEntry> = listOf(
     SettingsEntry("theme", "App theme", SettingsSection.PERSONALISATION, "dark light colour color appearance"),
     SettingsEntry("taskbar", "Taskbar alignment", SettingsSection.PERSONALISATION, "centre center left icons"),
     SettingsEntry("animations", "Window animations", SettingsSection.PERSONALISATION, "motion open close minimise"),
-    SettingsEntry("browser", "Default browser", SettingsSection.APPS, "firefox web http link"),
+    SettingsEntry("browser", "Browser engine", SettingsSection.APPS, "firefox web http link default browser desktop engine"),
     SettingsEntry("pins", "Taskbar pins", SettingsSection.APPS, "browser containers show hide"),
     SettingsEntry("rootfs", "Rootfs location", SettingsSection.STORAGE, "ubuntu wine prefix path download"),
     SettingsEntry("space", "Free space", SettingsSection.STORAGE, "disk storage space"),

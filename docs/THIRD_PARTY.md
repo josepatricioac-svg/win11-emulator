@@ -47,13 +47,14 @@ here before it lands, and GPL options will be discussed first.
 Task Manager reads `/proc/stat`, `/proc/self/stat` and `/proc/self/status` and uses
 `ActivityManager.MemoryInfo` - no new libraries, no third-party code.
 
-Browser handling: the shell only fires an `ACTION_VIEW` intent. **No browser engine is
-bundled.** Desktop engines (Firefox ESR, Chromium, Edge arm64) are modelled and gated but
-not shipped; see `docs/BROWSER_ENGINES.md` for licences and the redistribution rules. Firefox (Mozilla, MPL-2.0) is merely the preferred *target* when the user
-already has it installed; its package name appears in `<queries>` so it can be listed
-on API 30+. Other package names listed there (Chrome, Brave, Vivaldi, Edge, Opera,
-Chromium, Tor Browser, Firefox Focus/Fennec) are used only for detection - no
-affiliation or endorsement. Search fallback URL: DuckDuckGo (`https://duckduckgo.com/?q=`),
+Browser handling: the shell launches desktop engines INSIDE the container only.
+Android-browser detection, the `ACTION_VIEW` hand-off and the manifest's `<queries>`
+package list were **removed** (owner decision, 2026-10-14) - the shell neither lists
+nor fires intents at other apps' browsers, so no third-party package names appear in
+the APK at all. **No browser engine is bundled.** Desktop engines (Firefox ESR,
+Chromium, Edge arm64) are downloaded into the rootfs with pinned hashes; see
+`docs/BROWSER_ENGINES.md` for licences and the redistribution rules. Firefox ESR
+(Mozilla, MPL-2.0) is the default engine. Search fallback URL: DuckDuckGo (`https://duckduckgo.com/?q=`),
 a plain HTTPS GET, no integration or API key.
 
 ### Restyle additions (Fluent tokens)

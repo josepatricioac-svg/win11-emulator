@@ -164,3 +164,36 @@ Implemented exactly that, on top of the lifecycle/Prefix-Manager pass above:
   syntax check clean (the only errors in the touched Compose files are the
   documented desktop-jar artifacts — painterResource/nativeCanvas/AndroidView/
   nativeKeyEvent — that CI's real Android classpath resolves).
+
+## Snapshot 2026-10-14 (3) — browser device-bug fix + Android-browser detection removed
+
+Owner-reported device bug and directive, both landed in one pass:
+
+1. **Fix**: opening the desktop browser failed with a wine-prefix refusal
+   ("desktop session failed to start ... Wine prefix ... never initialised").
+   Root cause: `ContainerLauncher.validate` ran the wineboot-marker checks
+   against EVERY request — a latent hole since `441222b`, because the Firefox
+   session's "prefix" is its profile dir bound at `/root/.mozilla`, not a Wine
+   prefix at `/root/.wine`. The checks are now gated on
+   `request.guestPrefix == ProotCommand.GUEST_PREFIX` (the structural wine
+   signal), and `FirefoxSessionTest` carries the regression test (a firefox
+   request with an initialised-binary set reaches spawn).
+2. **Removal**: Android browser detection is gone — `Browsers.kt` (PackageManager
+   queries, icon loading, `ACTION_VIEW` intents, cache/warm-up), the
+   `AndroidBrowser`/`SystemDefault` engine variants, `BrowserState.installed/
+   preferredPackage/targetPackage/targetLabel`, the manifest `<queries>` block,
+   `SettingsKeys.BROWSER_PACKAGE` + `preferredBrowserOrNull`, the Settings ▸ Apps
+   installed list and the BrowserApp "Installed browsers" section. What remains:
+   `Urls.kt` (pure parser), the desktop catalogue, a desktop-only resolver
+   (stale `android:` prefs resolve to the default engine), and honest blocking —
+   an unready engine is named, never silently rerouted off-device.
+   Deliberate test rewrites: BrowserTest, EngineResolverTest,
+   DesktopBrowserStateTest, RoadmapGatingTest (2 browser tests),
+   SettingsStoreTest. Docs synced: README §Browser + gating table + Performance,
+   BROWSER_ENGINES.md, THIRD_PARTY.md.
+
+Harness: 673 tests green (681 − 14 removed Android-detection tests + 6 new
+desktop-only ones); whole-tree kotlinc syntax check clean. versionName
+0.1.0-d1h.3. Device re-check: Browser ▸ Firefox ESR ▸ Open must now reach the
+proot spawn (pill → openbox-framed window on the desktop) instead of the
+PREFIX_MISSING refusal.
