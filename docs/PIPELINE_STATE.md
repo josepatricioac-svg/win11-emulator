@@ -443,3 +443,12 @@ marker in the example line, bare-names rule, R4 status row), PIPELINE_PLAN
 logs outstanding — that reprioritises everything else); push to GitHub blocked
 in this sandbox (no credentials — commits are local until the owner pushes or
 provides a PAT); the x86_64 Windows-app payload choice (3b proper) stays open.
+
+**Addendum (same session, after the push):** `build-apk` on `92af595` came back
+**green** (run 38812397947: Unit tests ✓, Build debug APK ✓, UI tests ✓) and
+uploaded the `win11we-debug-apk` artifact (15.9 MB) - that artifact is the APK
+for the owner's next device pass. A follow-up docs commit synced the pinned
+test-count numbers the pass changed (README: 742 pure-JVM / 748 with the 6
+opt-in Robolectric, 728 off-Gradle harness, 270 x11; X_SERVER.md: the same 270
+with the three suites the old list omitted) - measured by annotation count,
+the repo's documented method.

@@ -63,7 +63,7 @@ ordering: `runtime/SessionLifecycle.kt`; Wine prefix contract: `docs/WINE_RUNTIM
 | R2 | `ContainerService` (foreground, Stop all), `proot -> box64 -> wine` launch with the explicit env, per-container status, logs into the shared buffer | done (inert until R1 binaries + R3 rootfs exist) |
 | R3 | Rootfs/Wine download: pinned SHA-256 (fail closed), resumable via `Range`, free-space check, progress UI, SAF import | done — **extraction runs in-app** (pure-Kotlin TAR reader + xz-java, verified against the real pinned ubuntu-base and Firefox archives); Firefox ESR artifact pinned from Mozilla |
 | R4 | Diagnostics self-test: `box64 --version`, `wine64 --version`, `wine64 cmd /c echo hello`, green/red/skipped with the failing command + log excerpt | done |
-| D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a–D1e done: spec-accurate protocol core, socket, renderer, input, soft-keyboard text injection, focus/grabs/cursors/fonts/colours, XTest, SubstructureRedirect WM, and **RENDER 0.4** — pictures, Composite with the 14 Porter-Duff ops, FillRectangles, the full CompositeGlyphs pipeline, both rasterisers — plus the one-tap **X self-test** (xdpyinfo/xwininfo probes, a **GTK3 display-open probe**, xeyes/xclock survivors) in Diagnostics, and **D1e**: the BIG-REQUESTS + Generic-Event transport and **XInput2 2.2** — the device list, selections, grabs and the key/button/motion/crossing/focus events GTK3 runs on, **D1f**: **XFIXES 5.0** (event-driven selection/cursor watches, real region algebra, picture-clip + input-shape wiring) plus **SYNC 3.1** (INT64 counters, held Awaits, alarms) - what GTK3's clipboard and resize sync watch for - and **D1g**: the pass-through desktop session (parent-relative coordinates via `absoluteOrigin`, mapped-vs-viewable, Expose on becoming viewable, ReparentWindow placement, ancestor-clipped rendering) so a guest WM (openbox now, `explorer.exe /desktop` later) owns the whole desktop inside the surface. 264 x11 wire tests green on a JVM; the R1 binaries are vendored, so the guest launch is a device-provisioning step; see `docs/X_SERVER.md`) |
+| D1 | In-app X server on a private unix socket, fullscreen surface running `explorer.exe /desktop`, touch/mouse/keyboard | **partial** (D1a–D1e done: spec-accurate protocol core, socket, renderer, input, soft-keyboard text injection, focus/grabs/cursors/fonts/colours, XTest, SubstructureRedirect WM, and **RENDER 0.4** — pictures, Composite with the 14 Porter-Duff ops, FillRectangles, the full CompositeGlyphs pipeline, both rasterisers — plus the one-tap **X self-test** (xdpyinfo/xwininfo probes, a **GTK3 display-open probe**, xeyes/xclock survivors) in Diagnostics, and **D1e**: the BIG-REQUESTS + Generic-Event transport and **XInput2 2.2** — the device list, selections, grabs and the key/button/motion/crossing/focus events GTK3 runs on, **D1f**: **XFIXES 5.0** (event-driven selection/cursor watches, real region algebra, picture-clip + input-shape wiring) plus **SYNC 3.1** (INT64 counters, held Awaits, alarms) - what GTK3's clipboard and resize sync watch for - and **D1g**: the pass-through desktop session (parent-relative coordinates via `absoluteOrigin`, mapped-vs-viewable, Expose on becoming viewable, ReparentWindow placement, ancestor-clipped rendering) so a guest WM (openbox now, `explorer.exe /desktop` later) owns the whole desktop inside the surface. 270 x11 wire tests green on a JVM; the R1 binaries are vendored, so the guest launch is a device-provisioning step; see `docs/X_SERVER.md`) |
 | D2 | Per-window guest hosting: the shell claims SubstructureRedirect and every guest top-level opens as a floating, resizable SHELL window; the desktop layer keeps the wallpaper + the override-redirect popup layer + the session pill | **D2a done (code + wire/unit tests, device pass pending)**: `GuestWindowBridge` (WM claim, two-way reconcile, WM_DELETE→Destroy escalation), `XWindowSurface` (per-window render/input/IME), popup-only desktop pass, RUNNING-unmapped status hint; see `docs/X_SERVER.md` §D2 |
 | P1–P2 | Clipboard, shortcuts, print-to-PDF, audio, fonts, SAF, Open-with, presets, backups | **partial** (P1 clipboard: the X selections ↔ Android text bridge is done and wire-tested — guest copies push out, Android-side changes reclaim PRIMARY/CLIPBOARD; rich targets and the remaining P1/P2 items are not started) |
 
@@ -209,7 +209,7 @@ on; and the renderer draws each window at its absolute origin, clipped to its
 ancestor chain, skipping InputOnly windows. `XChildCoordinatesTest` pins all
 of it at wire level.
 
-**The server runs, renders, takes input and passes 264 wire tests (run for real on a
+**The server runs, renders, takes input and passes 270 wire tests (run for real on a
 JVM with Kotlin 2.1.10); the first device contacts (Firefox ESR) drove D1f/D1g.** The native binaries (R1)
 are vendored now, so the first real guest launch (Firefox ESR, then `explorer.exe
 /desktop`) is a provisioning step away - until then `ExplorerSmokeTest` scripts
@@ -566,7 +566,8 @@ open decisions.
 
 ## UI tests
 
-`./gradlew testDebugUnitTest` runs the 644 pure-JVM tests (window geometry, snap zones,
+`./gradlew testDebugUnitTest` runs the 742 pure-JVM tests (748 with the 6 opt-in
+Robolectric ones; window geometry, snap zones,
 Explorer, Notepad encodings, settings, URL/engine resolution, /proc parsing, argv
 splitting, the log buffer, the built-in commands, the terminal transcript/history, the
 container codec/store, guest<->host path mapping, the Wine environment builder, the
@@ -612,7 +613,10 @@ file set (the exact policies/user.js/profiles.ini keys, JSON balance, idempotent
 materialise, install-gated policies); and the pass-through session model
 (parent-relative coordinates resolved to absolute origins, mapped-vs-viewable,
 Expose on becoming viewable, ReparentWindow placement + ConfigureNotify,
-ancestor-clipped hit-testing and rendering).
+ancestor-clipped hit-testing and rendering); and the payload-driven Wine
+invocation (the ELF-header reader including its big-endian case, the resolved
+loader path, the arch-driven box64 rule, the structural wine-session
+detection, and the no-payload self-test skip).
 
 Compose tests that actually **compose** the taskbar (Robolectric) are opt-in because they
 need a couple of GB of RAM:
@@ -721,10 +725,11 @@ app/src/main/java/dev/win11we/shell/
   runtime/SelfTestRunner.kt    the R4 self-test: 3 steps, verdicts, reasons, report/log excerpt
 ```
 
-Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 635 tests, measured by
+Unit tests (`testDebugUnitTest`, plain JVM, no Robolectric — 742 tests, measured by
 annotation count; the pure-JVM subset is additionally compiled and executed off-device
-against JDK 17 + Kotlin 2.1.10 with minimal Android stubs, so 629 of them are run for
-real outside Gradle too): snap zones,
+against JDK 17 + Kotlin 2.1.10 with minimal Android stubs — the rebuilt harness runs
+728 of them for real outside Gradle: runtime, download, container, all x11 wire suites,
+window, settings and the UI-state suites, recorded in `docs/PIPELINE_STATE.md`): snap zones,
 maximize/restore, halves snapping, edge/corner resize with minimums, on-screen clamping,
 z-order/focus, taskbar toggle open-minimize-restore, Explorer listing/filtering/sorting,
 Windows-style size and type labels, back/forward/up/trail navigation, selection,

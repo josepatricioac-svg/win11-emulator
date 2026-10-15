@@ -453,10 +453,11 @@ does not re-push (X clients re-claim on every copy).
 
 ### Verification
 
-The x11 suites (264 tests: `XProtocolTest`, `XCompatTest`, `XRenderTest`,
-`XBigRequestsTest`, `XInput2Test`, `XProtocolTraceTest`, `XRedirectTest`,
-`XTextInjectionTest`, `XSnapshotTest`, `XSelectionsTest`, `XFixesTest`,
-`XSyncTest`, `XChildCoordinatesTest`) are
+The x11 suites (270 tests, measured by annotation count: `XProtocolTest`, `XCompatTest`,
+`XRenderTest`, `XBigRequestsTest`, `XInput2Test`, `XProtocolTraceTest`, `XRedirectTest`,
+`XTextInjectionTest`, `XSnapshotTest`, `XSelectionsTest`, `XFixesTest`, `XSyncTest`,
+`XChildCoordinatesTest`, plus `XDisplayListTest`, `XGuestWindowTest` and
+`ExplorerSmokeTest`) are
 **compiled and executed** with Kotlin 2.1.10/JDK 17 against minimal Android stubs
 (only `LocalServerSocket`/`LocalSocket`/`Log`, which the wire tests never touch) -
 the first time this project's protocol code was actually run rather than written
