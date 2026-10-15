@@ -93,8 +93,8 @@ object ProvisionDoctor {
     /** Field separator inside a deb822 value list; declared before its users. */
     private val WHITESPACE = Regex("\\s+")
 
-    private const val EM_AARCH64 = 183 // 0xB7
-    private const val EM_X86_64 = 62 // 0x3E
+    private const val EM_AARCH64 = ElfHeader.EM_AARCH64
+    private const val EM_X86_64 = ElfHeader.EM_X86_64
 
     val defaultReachability = Reachability { url ->
         try {
@@ -226,19 +226,7 @@ object ProvisionDoctor {
     }
 
     /** @return the ELF header's e_machine, or null when the file is not a readable ELF. */
-    private fun elfMachine(file: File): Int? {
-        val header = ByteArray(20)
-        val read = file.inputStream().use { it.read(header) }
-        if (read < 20 || header[0] != 0x7F.toByte() || header[1] != 'E'.code.toByte() ||
-            header[2] != 'L'.code.toByte() || header[3] != 'F'.code.toByte()
-        ) {
-            return null
-        }
-        val littleEndian = header[5] == 1.toByte()
-        val lo = header[18].toInt() and 0xFF
-        val hi = header[19].toInt() and 0xFF
-        return if (littleEndian) lo or (hi shl 8) else (hi shl 8) or lo
-    }
+    private fun elfMachine(file: File): Int? = ElfHeader.machine(file)
 
     /**
      * 4. arm64 packages live on ports.ubuntu.com, not archive.ubuntu.com. The

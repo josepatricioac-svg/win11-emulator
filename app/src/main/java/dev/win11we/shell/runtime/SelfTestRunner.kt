@@ -72,8 +72,16 @@ data class SelfTestReport(
  * 2. `wine64 --version` in proot    - rootfs + Wine are usable
  * 3. `wine64 cmd /c echo hello`     - a real Windows process runs and prints
  *
+ * The wine rows exec the payload's REAL loader (`WinePayload.guestLauncherPath` -
+ * Ubuntu puts no `wine64` on the guest PATH, a bare name exits 127), with the
+ * host box64 prepended only when that loader is an x86_64 ELF - the same
+ * payload-driven rule [ContainerLauncher.buildCommand] spawns with.
+ *
  * A step whose prerequisites are missing is **SKIPPED with the reason named**, never
- * passed: the point of the screen is to tell the truth about what works.
+ * passed: the point of the screen is to tell the truth about what works. That
+ * includes "no Wine payload in the rootfs" - a red `exit 127` row for a payload
+ * that was simply never installed would read like a bug, not like the missing
+ * prerequisite it is.
  */
 class SelfTestRunner(
     private val binaries: NativeBinaries,
@@ -126,9 +134,21 @@ class SelfTestRunner(
             else -> null
         }
 
+        // A rootfs without a Wine payload is a missing prerequisite, not a red
+        // mystery exit-127: name the step that installs one (SKIPPED, per R4's
+        // skip-with-reason rule). A payload that EXISTS but is incomplete
+        // (loader without libwine - see WinePayload.payloadGap) still RUNS the
+        // rows: that is a real failure worth a red row and its log excerpt.
+        val wineProblem = rootfsProblem ?: if (WinePayload.launcherIn(rootfsDir) == null) {
+            "No Wine payload in the rootfs at ${rootfsDir.absolutePath} - Container Manager ▸ " +
+                "Install Wine payload provisions it (then Initialize prefix before wine64 cmd)."
+        } else {
+            null
+        }
+
         results += timed("wine-version", "wine64 --version (in proot)") {
-            if (rootfsProblem != null) {
-                skipped(wineCommand("wine64", "--version"), rootfsProblem)
+            if (wineProblem != null) {
+                skipped(wineCommand("wine64", "--version"), wineProblem)
             } else {
                 judge(wineCommand("wine64", "--version")) { outcome ->
                     if (outcome.succeeded) null else "wine64 --version failed inside proot"
@@ -138,8 +158,8 @@ class SelfTestRunner(
 
         results += timed("wine-echo", "wine64 cmd /c echo hello (in proot)") {
             val command = wineCommand("wine64", "cmd", "/c", "echo", "hello")
-            if (rootfsProblem != null) {
-                skipped(command, rootfsProblem)
+            if (wineProblem != null) {
+                skipped(command, wineProblem)
             } else {
                 judge(command) { outcome ->
                     when {
@@ -159,13 +179,27 @@ class SelfTestRunner(
         return SelfTestReport(steps, clock(), steps.sumOf { it.durationMillis })
     }
 
-    /** The full proot command line for a guest command, reusing R2's builder. */
-    fun wineCommand(vararg guest: String): List<String> = ProotCommand.build(
-        prootBinary = File(binaries.nativeLibraryDir, BinaryRole.PROOT.fileName),
-        rootfsDir = rootfsDir,
-        prefixDir = File(container?.prefixPath ?: File(rootfsDir, "prefix").absolutePath),
-        guestCommand = guest.toList(),
-    )
+    /**
+     * The full proot command line for a guest command, reusing R2's builder - with
+     * the same payload-driven shape [ContainerLauncher.buildCommand] spawns: a bare
+     * `wine64` resolves to the provisioned loader's real guest path, and the host
+     * box64 is prepended only when that loader is an x86_64 ELF (never for the
+     * pinned native arm64 payload - box64 cannot carry an aarch64 binary).
+     */
+    fun wineCommand(vararg guest: String): List<String> {
+        val resolved = WinePayload.resolveGuestCommand(guest.toList(), rootfsDir)
+        val withTranslator = if (WinePayload.launcherArch(rootfsDir) == PayloadArch.X86_64) {
+            listOf(File(binaries.nativeLibraryDir, BinaryRole.BOX64.fileName).absolutePath) + resolved
+        } else {
+            resolved
+        }
+        return ProotCommand.build(
+            prootBinary = File(binaries.nativeLibraryDir, BinaryRole.PROOT.fileName),
+            rootfsDir = rootfsDir,
+            prefixDir = File(container?.prefixPath ?: File(rootfsDir, "prefix").absolutePath),
+            guestCommand = withTranslator,
+        )
+    }
 
     private fun judge(command: List<String>, failureReason: (RunOutcome) -> String?): SelfTestStep {
         val outcome = runner.run(command, environment, workingDir = null, timeoutMillis = timeoutMillis)

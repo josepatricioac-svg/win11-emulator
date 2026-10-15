@@ -93,20 +93,29 @@ object ProotCommand {
         return command
     }
 
-    /** The three checks R4's self-test runs, in order, with the commands it will show. */
+    /**
+     * The three checks R4's self-test runs, in order, with the commands it will show.
+     *
+     * [wineLoader] is the GUEST path of the provisioned payload's loader
+     * (`WinePayload.guestLauncherPath`, e.g. `/usr/lib/wine/wine64`) - Ubuntu puts
+     * no `wine64` on the guest PATH, so a bare name here would exit 127 inside the
+     * jail. Required on purpose: a default spelling is exactly how this plan
+     * drifted from the payload once already.
+     */
     fun selfTestPlan(
         prootBinary: File,
         box64Binary: File,
         rootfsDir: File,
         prefixDir: File,
+        wineLoader: String,
     ): List<List<String>> = listOf(
         RuntimeProbe.box64Command(box64Binary),
-        build(prootBinary, rootfsDir, prefixDir, guestCommand = listOf("wine64", "--version")),
+        build(prootBinary, rootfsDir, prefixDir, guestCommand = listOf(wineLoader, "--version")),
         build(
             prootBinary,
             rootfsDir,
             prefixDir,
-            guestCommand = listOf("wine64", "cmd", "/c", "echo", "hello"),
+            guestCommand = listOf(wineLoader, "cmd", "/c", "echo", "hello"),
         ),
     )
 }

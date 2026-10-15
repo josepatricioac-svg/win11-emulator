@@ -515,12 +515,14 @@ class ProotCommandTest {
     }
 
     @Test
-    fun `the R4 self-test plan is box64 then wine64 then a real command`() {
-        val plan = ProotCommand.selfTestPlan(proot, box64, rootfs, prefix)
+    fun `the R4 self-test plan is box64 then the resolved wine loader then a real command`() {
+        // The wine rows carry the payload's REAL guest path: Ubuntu creates no
+        // `wine64` PATH entry, so a bare name in the plan would exit 127 in the jail.
+        val plan = ProotCommand.selfTestPlan(proot, box64, rootfs, prefix, wineLoader = "/usr/lib/wine/wine64")
         assertEquals(3, plan.size)
         assertEquals(listOf(box64.absolutePath, "--version"), plan[0])
-        assertTrue(plan[1].containsAll(listOf("wine64", "--version")))
-        assertTrue(plan[2].containsAll(listOf("wine64", "cmd", "/c", "echo", "hello")))
+        assertTrue(plan[1].containsAll(listOf("/usr/lib/wine/wine64", "--version")))
+        assertTrue(plan[2].containsAll(listOf("/usr/lib/wine/wine64", "cmd", "/c", "echo", "hello")))
         assertTrue(plan[1].contains(proot.absolutePath))
     }
 }

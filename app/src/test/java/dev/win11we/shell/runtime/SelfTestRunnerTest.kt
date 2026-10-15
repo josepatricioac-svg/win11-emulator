@@ -40,6 +40,11 @@ class SelfTestRunnerTest {
         rootfs = tmp.newFolder("rootfs")
         File(rootfs, "bin").mkdirs()
         File(rootfs, "usr").mkdirs()
+        // A faithful Wine payload fixture: Ubuntu's real loader path (the pinned
+        // noble debs install nothing into /usr/bin) with a real arm64 ELF header -
+        // the wine rows resolve and skip against these bytes, not against names.
+        File(rootfs, "usr/lib/wine").mkdirs()
+        File(rootfs, "usr/lib/wine/wine64").writeBytes(TestElf.header(ElfHeader.EM_AARCH64))
         prefix = tmp.newFolder("prefix")
         listOf(BinaryRole.BOX64, BinaryRole.PROOT, BinaryRole.PROOT_LOADER).forEach { role ->
             File(nativeDir, role.fileName).writeBytes(ByteArray(1024) { 0x42 })
@@ -87,8 +92,44 @@ class SelfTestRunnerTest {
             assertTrue(command.containsAll(listOf("-r", rootfs.absolutePath)))
             assertTrue(command.contains("--kill-on-exit"))
         }
-        assertTrue(scripted.calls[1].containsAll(listOf("wine64", "--version")))
-        assertTrue(scripted.calls[2].containsAll(listOf("wine64", "cmd", "/c", "echo", "hello")))
+        // The wine rows exec the payload's REAL loader path - Ubuntu puts no
+        // `wine64` on the guest PATH - and the pinned arm64 payload runs WITHOUT
+        // box64 in front (a translator cannot carry an aarch64 ELF).
+        assertTrue(scripted.calls[1].containsAll(listOf("/usr/lib/wine/wine64", "--version")))
+        assertTrue(scripted.calls[2].containsAll(listOf("/usr/lib/wine/wine64", "cmd", "/c", "echo", "hello")))
+        listOf(1, 2).forEach { index ->
+            assertFalse(
+                "no box64 in front of the native arm64 loader",
+                scripted.calls[index].contains(File(nativeDir, "libbox64.so").absolutePath),
+            )
+        }
+    }
+
+    @Test
+    fun `an x86_64 payload puts the host box64 in front of the wine rows`() {
+        File(rootfs, "usr/lib/wine/wine64").writeBytes(TestElf.header(ElfHeader.EM_X86_64))
+        val scripted = ScriptedRunner(green)
+        SelfTestRunner(NativeBinaries(nativeDir, pins()), rootfs, null, scripted).run()
+        val box64 = File(nativeDir, "libbox64.so").absolutePath
+        val position = scripted.calls[1].indexOf(box64)
+        assertTrue("box64 must sit between proot and wine", position >= 0)
+        assertEquals("/usr/lib/wine/wine64", scripted.calls[1][position + 1])
+    }
+
+    @Test
+    fun `without a Wine payload the wine rows are SKIPPED naming the install step - never a red 127 mystery`() {
+        File(rootfs, "usr/lib/wine/wine64").delete()
+        val report = runner(green).run()
+        assertEquals(StepVerdict.PASS, report.steps[0].verdict) // box64 --version is host-side
+        listOf(1, 2).forEach { index ->
+            assertEquals(StepVerdict.SKIPPED, report.steps[index].verdict)
+            val reason = report.steps[index].reason!!
+            assertTrue(reason, reason.contains("No Wine payload"))
+            assertTrue("the skip must name the step that unlocks it", reason.contains("Install Wine payload"))
+        }
+        assertFalse(report.allGreen)
+        assertEquals(1, report.passed)
+        assertEquals(2, report.skipped)
     }
 
     @Test

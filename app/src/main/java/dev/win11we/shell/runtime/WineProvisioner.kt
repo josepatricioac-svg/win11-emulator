@@ -31,8 +31,10 @@ import java.io.File
  *    `wineboot` and every builtin DLL live (see [WinePayload.payloadGap]).
  *
  * Pure command building + the [ProcessRunner] seam, unit-tested like
- * [RootfsProvisioner]; the post-check is [WinePayload.isProvisioned] - exit 0
- * without `/usr/bin/wine64` on disk is a FAILURE, not a pass.
+ * [RootfsProvisioner]; the post-check is the disk, via [WinePayload]: exit 0
+ * without a loader ([WinePayload.launcherIn] - on Ubuntu that is
+ * `/usr/lib/wine/wine64`, NOT `/usr/bin/wine64`) or without `libwine`
+ * ([WinePayload.payloadGap] - the wineboot half) is a FAILURE, not a pass.
  */
 object WineProvisioner {
 

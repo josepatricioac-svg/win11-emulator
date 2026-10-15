@@ -18,7 +18,11 @@ data class RuntimeRequest(
     val xDisplay: String,
     val audioSocket: String? = null,
     val locale: String = "en_US.UTF-8",
-    /** Guest command, e.g. ["wine64", "cmd"] - the launcher adds box64 when needed. */
+    /**
+     * Guest command, e.g. ["wine64", "cmd"] - symbolic names are fine: the launcher
+     * resolves a bare `wine64` to the provisioned payload's real loader path and adds
+     * box64 only when that payload is x86_64 (see [ContainerLauncher.needsBox64]).
+     */
     val guestCommand: List<String>,
     val binds: List<Bind> = emptyList(),
     /** Bind target of the container's state directory (`/root/.wine` for Wine). */
@@ -77,13 +81,15 @@ class ContainerLauncher(
     fun runningIds(): Set<String> = handles.keys.toSet()
 
     /**
-     * The RUNNING Wine sessions (guest command goes through box64/wine), for
-     * the shutdown path's graceful `wineserver -k` sweep. The Firefox ESR
-     * session is a native bash exec and is deliberately not included - it has
-     * no wineserver.
+     * The RUNNING Wine sessions, for the shutdown path's graceful `wineserver -k`
+     * sweep. A Wine session is recognised STRUCTURALLY - by the fixed prefix bind
+     * target (`/root/.wine`) - not by the box64 rule: a native arm64 Wine payload
+     * runs WITHOUT box64 and still has a wineserver whose registry must be flushed.
+     * The Firefox ESR session binds its profile at `/root/.mozilla` and is
+     * deliberately not included - it has no wineserver.
      */
     fun runningWineRequests(): List<RuntimeRequest> =
-        handles.keys.mapNotNull { requests[it] }.filter { needsBox64(it.guestCommand) }
+        handles.keys.mapNotNull { requests[it] }.filter { it.guestPrefix == ProotCommand.GUEST_PREFIX }
 
     /** Validates everything *before* spawning, so failures name the missing piece. */
     fun validate(request: RuntimeRequest): LaunchResult {
@@ -93,7 +99,7 @@ class ContainerLauncher(
         if (isRunning(request.container.id)) {
             return LaunchResult.fail(LaunchFailure.ALREADY_RUNNING, "\"${request.container.name}\" is already running.")
         }
-        val prepare = binaries.prepare(requiredFor(request.guestCommand))
+        val prepare = binaries.prepare(requiredFor(request.guestCommand, request.rootfsDir))
         if (prepare.status != PrepareStatus.READY) {
             return LaunchResult.fail(LaunchFailure.BINARIES_NOT_READY, prepare.message)
         }
@@ -180,13 +186,18 @@ class ContainerLauncher(
         return LaunchResult.ok("${request.container.name} started (pid stream attached)")
     }
 
-    /** `proot --rootfs … --bind <prefix>:<guestPrefix> … -- [box64] <guest command>` */
+    /** `proot -r … -b <prefix>:<guestPrefix> … [box64] <resolved guest command>` */
     fun buildCommand(request: RuntimeRequest): List<String> {
         val proot = File(binaries.nativeLibraryDir, BinaryRole.PROOT.fileName)
-        val guest = if (needsBox64(request.guestCommand)) {
-            listOf(File(binaries.nativeLibraryDir, BinaryRole.BOX64.fileName).absolutePath) + request.guestCommand
+        // Bare `wine64` is not on Ubuntu's PATH (no alternatives entry - see
+        // WinePayload.guestLauncherPath); resolve it to the provisioned payload's
+        // real loader path. Without a payload the command stays unchanged and
+        // validate() has already refused with the missing link named.
+        val resolved = WinePayload.resolveGuestCommand(request.guestCommand, request.rootfsDir)
+        val guest = if (needsBox64(resolved, request.rootfsDir)) {
+            listOf(File(binaries.nativeLibraryDir, BinaryRole.BOX64.fileName).absolutePath) + resolved
         } else {
-            request.guestCommand
+            resolved
         }
         return ProotCommand.build(
             prootBinary = proot,
@@ -223,24 +234,42 @@ class ContainerLauncher(
         return env.toSortedMap()
     }
 
-    /** Windows binaries are x86/x64 PE, so they always go through box64. */
-    fun needsBox64(guestCommand: List<String>): Boolean {
+    /**
+     * Whether box64 goes in front of this guest command.
+     *
+     * PAYLOAD-DRIVEN, not name-driven - the old name rule ("anything starting with
+     * `wine` gets box64") was wrong for the pinned payload in both directions:
+     * Ubuntu's Wine 9.0 loader is a NATIVE arm64 ELF, and box64 (an x86_64->arm64
+     * translator) cannot exec it. So for `wine*` commands the answer comes from the
+     * ELF header of the loader actually provisioned in [rootfsDir]
+     * ([WinePayload.launcherArch]): x86_64 -> box64 (the decision-3b x86_64
+     * payload story, engaged automatically the day such a payload is pinned);
+     * arm64 -> run natively ("box64 + Wine only on demand"); unknown/absent ->
+     * run natively rather than prepend a translator on a guess - validate() names
+     * a missing payload before spawn, so the guess is never load-bearing.
+     *
+     * A bare `.exe` token keeps the legacy rule. It is documented honestly: no
+     * Linux kernel and no box64 can exec a Windows PE directly - real Windows
+     * apps always travel as `wine <app.exe>`, whose first token is the loader.
+     */
+    fun needsBox64(guestCommand: List<String>, rootfsDir: File? = null): Boolean {
         val first = guestCommand.firstOrNull()?.substringAfterLast('/')?.lowercase() ?: return false
         return when {
             first == "box64" -> false // caller already asked for it
-            first.startsWith("wine") -> true
+            first.startsWith("wine") -> WinePayload.launcherArch(rootfsDir) == PayloadArch.X86_64
             first.endsWith(".exe") -> true
             else -> false
         }
     }
 
     /**
-     * The binaries THIS guest needs: box64 only carries x86/x64 payloads, so a
-     * native arm64 guest (Firefox ESR) must not be refused for box64's absence.
+     * The binaries THIS guest needs: box64 only carries x86_64 payloads, so
+     * neither a native arm64 guest (Firefox ESR) nor the pinned native arm64
+     * Wine loader may be refused for box64's absence - only an x86_64 payload is.
      */
-    fun requiredFor(guestCommand: List<String>): Set<BinaryRole> =
+    fun requiredFor(guestCommand: List<String>, rootfsDir: File? = null): Set<BinaryRole> =
         BinaryRole.entries.filter { it.required }
-            .filter { it != BinaryRole.BOX64 || needsBox64(guestCommand) }
+            .filter { it != BinaryRole.BOX64 || needsBox64(guestCommand, rootfsDir) }
             .toSet()
 
     fun stop(id: String, reason: String = "stopped by user"): LaunchResult {

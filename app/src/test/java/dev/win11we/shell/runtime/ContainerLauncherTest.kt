@@ -103,6 +103,17 @@ class ContainerLauncherTest {
         guestCommand = command,
     )
 
+    /**
+     * A faithful payload fixture: Ubuntu's real loader path (`/usr/lib/wine/wine64`
+     * - the pinned debs install nothing into /usr/bin) carrying a real ELF header
+     * with the given e_machine, because the box64 rule reads the header, never
+     * the name.
+     */
+    private fun writeWinePayload(machine: Int) {
+        File(rootfs, "usr/lib/wine").mkdirs()
+        File(rootfs, "usr/lib/wine/wine64").writeBytes(TestElf.header(machine))
+    }
+
     // --- the gate: nothing is exec'd unless everything is in place -------------
 
     @Test
@@ -238,6 +249,48 @@ class ContainerLauncherTest {
     }
 
     @Test
+    fun `WinePayload guestLauncherPath answers the real Ubuntu loader path, null without a payload`() {
+        assertNull(WinePayload.guestLauncherPath(rootfs))
+        assertNull("no rootfs context, no invented path", WinePayload.guestLauncherPath(null))
+        writeWinePayload(ElfHeader.EM_AARCH64)
+        assertEquals("/usr/lib/wine/wine64", WinePayload.guestLauncherPath(rootfs))
+        // A hand-made or upstream-tarball payload in /usr/bin wins as the first candidate.
+        File(rootfs, "usr/bin").mkdirs()
+        File(rootfs, "usr/bin/wine64").writeBytes(TestElf.header(ElfHeader.EM_AARCH64))
+        assertEquals("/usr/bin/wine64", WinePayload.guestLauncherPath(rootfs))
+    }
+
+    @Test
+    fun `WinePayload launcherArch reads the ELF header, not the name`() {
+        assertEquals(PayloadArch.UNKNOWN, WinePayload.launcherArch(rootfs))
+        assertEquals(PayloadArch.UNKNOWN, WinePayload.launcherArch(null))
+        writeWinePayload(ElfHeader.EM_AARCH64)
+        assertEquals(PayloadArch.ARM64, WinePayload.launcherArch(rootfs))
+        writeWinePayload(ElfHeader.EM_X86_64)
+        assertEquals(PayloadArch.X86_64, WinePayload.launcherArch(rootfs))
+        // libwine's wineserver is a `sh` wrapper - a loader that is not an ELF
+        // answers UNKNOWN instead of pretending to an architecture.
+        File(rootfs, "usr/lib/wine/wine64").writeText("#!/bin/sh\n")
+        assertEquals(PayloadArch.UNKNOWN, WinePayload.launcherArch(rootfs))
+    }
+
+    @Test
+    fun `WinePayload resolveGuestCommand replaces only a bare wine64, only with a payload on disk`() {
+        val cmd = listOf("wine64", "cmd")
+        assertEquals("no payload: unchanged - the refusal path names it", cmd, WinePayload.resolveGuestCommand(cmd, rootfs))
+        assertEquals(cmd, WinePayload.resolveGuestCommand(cmd, null))
+        assertEquals(emptyList<String>(), WinePayload.resolveGuestCommand(emptyList(), rootfs))
+        writeWinePayload(ElfHeader.EM_AARCH64)
+        assertEquals(listOf("/usr/lib/wine/wine64", "cmd"), WinePayload.resolveGuestCommand(cmd, rootfs))
+        // Real PATH entries (update-alternatives) and caller-chosen paths stay untouched.
+        assertEquals(listOf("wineboot", "--init"), WinePayload.resolveGuestCommand(listOf("wineboot", "--init"), rootfs))
+        assertEquals(listOf("wineserver", "-k"), WinePayload.resolveGuestCommand(listOf("wineserver", "-k"), rootfs))
+        assertEquals(listOf("wine", "notepad.exe"), WinePayload.resolveGuestCommand(listOf("wine", "notepad.exe"), rootfs))
+        val byPath = listOf("/opt/wine/bin/wine64", "cmd")
+        assertEquals(byPath, WinePayload.resolveGuestCommand(byPath, rootfs))
+    }
+
+    @Test
     fun `refuses an empty guest command`() {
         val result = launcher().start(request(command = emptyList()))
         assertEquals(LaunchFailure.NO_COMMAND, result.failure)
@@ -256,7 +309,8 @@ class ContainerLauncherTest {
     // --- the happy path ------------------------------------------------------
 
     @Test
-    fun `start runs proot with box64 in front of wine and the prefix bind fixed`() {
+    fun `an x86_64 wine payload runs behind box64, resolved to its real loader path`() {
+        writeWinePayload(ElfHeader.EM_X86_64)
         val fake = FakeLauncher()
         val launcher = launcher(fake)
         val result = launcher.start(request())
@@ -268,10 +322,36 @@ class ContainerLauncherTest {
         assertTrue(command.containsAll(listOf("-r", rootfs.absolutePath)))
         assertTrue(command.contains(prefix.absolutePath + ":/root/.wine"))
         assertTrue("box64 must sit between proot and wine", command.contains(File(nativeDir, "libbox64.so").absolutePath))
-        assertEquals(listOf("wine64", "cmd"), command.subList(command.size - 2, command.size))
+        // Bare `wine64` is not on Ubuntu's PATH: the payload's real loader path is exec'd.
+        assertEquals(listOf("/usr/lib/wine/wine64", "cmd"), command.subList(command.size - 2, command.size))
         // container drives are bound under /mnt/<letter>
         assertTrue(command.contains("/sdcard/Documents:/mnt/d"))
         assertEquals(command, launcher.commandOf(container.id))
+    }
+
+    @Test
+    fun `the native arm64 wine payload runs WITHOUT box64 - box64 cannot carry an aarch64 ELF`() {
+        writeWinePayload(ElfHeader.EM_AARCH64)
+        val fake = FakeLauncher()
+        val launcher = launcher(fake)
+        val result = launcher.start(request())
+        assertTrue(result.message, result.success)
+
+        val command = fake.commands.single()
+        assertFalse(
+            "no translator in front of a native arm64 loader",
+            command.contains(File(nativeDir, "libbox64.so").absolutePath),
+        )
+        assertEquals(listOf("/usr/lib/wine/wine64", "cmd"), command.subList(command.size - 2, command.size))
+    }
+
+    @Test
+    fun `without a provisioned payload nothing is resolved or translated - validation names the gap first`() {
+        val fake = FakeLauncher()
+        launcher(fake).start(request().copy(container = container.copy(id = "raw", name = "Raw")))
+        val command = fake.commands.single()
+        assertFalse(command.contains(File(nativeDir, "libbox64.so").absolutePath))
+        assertEquals(listOf("wine64", "cmd"), command.subList(command.size - 2, command.size))
     }
 
     @Test
@@ -284,14 +364,68 @@ class ContainerLauncherTest {
     }
 
     @Test
-    fun `needsBox64 recognises windows binaries only`() {
+    fun `needsBox64 is payload-driven for wine - the ELF header decides, never the name`() {
         val launcher = launcher()
-        assertTrue(launcher.needsBox64(listOf("wine64", "cmd")))
-        assertTrue(launcher.needsBox64(listOf("/opt/wine/bin/wine", "notepad.exe")))
+        val wine = listOf("wine64", "cmd")
+        // No payload provisioned (or no rootfs context): run natively - a translator
+        // is never prepended on a guess, and validate() names a missing payload
+        // before spawn, so the guess is never load-bearing.
+        assertFalse(launcher.needsBox64(wine))
+        assertFalse(launcher.needsBox64(wine, rootfs))
+        assertFalse(launcher.needsBox64(wine, File(tmp.root, "no-such-rootfs")))
+
+        writeWinePayload(ElfHeader.EM_AARCH64)
+        assertFalse("the pinned Ubuntu payload is a native arm64 ELF", launcher.needsBox64(wine, rootfs))
+        assertFalse(launcher.needsBox64(listOf("/usr/lib/wine/wine64", "cmd"), rootfs))
+        assertFalse("wineboot/wineserver are real PATH entries and arm64 too", launcher.needsBox64(listOf("wineboot", "--init"), rootfs))
+
+        writeWinePayload(ElfHeader.EM_X86_64)
+        assertTrue("an x86_64 payload is what box64 exists for", launcher.needsBox64(wine, rootfs))
+        assertTrue(launcher.needsBox64(listOf("/opt/wine/bin/wine", "notepad.exe"), rootfs))
+
+        // The name-independent rules.
         assertTrue(launcher.needsBox64(listOf("C:\\office\\winword.exe")))
         assertFalse(launcher.needsBox64(listOf("ls")))
-        assertFalse(launcher.needsBox64(listOf("box64", "wine64")))
+        assertFalse(launcher.needsBox64(listOf("box64", "wine64"), rootfs))
         assertFalse(launcher.needsBox64(emptyList()))
+    }
+
+    @Test
+    fun `requiredFor demands box64 only for an x86_64 payload`() {
+        val launcher = launcher()
+        val wine = listOf("wine64", "cmd")
+        assertFalse("native/no payload: box64 must not gate the launch", launcher.requiredFor(wine, rootfs).contains(BinaryRole.BOX64))
+        writeWinePayload(ElfHeader.EM_AARCH64)
+        assertFalse(launcher.requiredFor(wine, rootfs).contains(BinaryRole.BOX64))
+        writeWinePayload(ElfHeader.EM_X86_64)
+        assertTrue(launcher.requiredFor(wine, rootfs).contains(BinaryRole.BOX64))
+        assertTrue("proot is always required", launcher.requiredFor(wine, rootfs).contains(BinaryRole.PROOT))
+    }
+
+    @Test
+    fun `runningWineRequests finds native wine sessions structurally - not by the box64 rule`() {
+        // The shutdown contract (graceful wineserver -k before teardown) must see
+        // a NATIVE arm64 wine session too: needsBox64 is false for it, so the old
+        // filter would have skipped the registry flush and corrupted prefixes.
+        writeWinePayload(ElfHeader.EM_AARCH64)
+        val launcher = launcher(FakeLauncher())
+        launcher.start(request())
+        assertFalse("the payload is native: no box64", launcher.needsBox64(listOf("wine64", "cmd"), rootfs))
+        assertEquals(1, launcher.runningWineRequests().size)
+        assertEquals(prefix.absolutePath, launcher.runningWineRequests().single().container.prefixPath)
+
+        // A Firefox-shaped session (its own guestPrefix bind, native bash exec)
+        // has no wineserver and must NOT be swept.
+        val browser = request(command = listOf("/bin/bash", "-c", "exec firefox")).copy(
+            container = container.copy(id = "browser", name = "Browser"),
+            guestPrefix = "/root/.mozilla",
+        )
+        launcher.start(browser)
+        assertEquals(
+            "only the /root/.wine-bound session is a Wine session",
+            listOf("office"),
+            launcher.runningWineRequests().map { it.container.id },
+        )
     }
 
     @Test

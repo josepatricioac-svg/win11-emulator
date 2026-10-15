@@ -82,10 +82,17 @@ object WineBrowserLaunch {
     }
 
     /**
-     * The guest command for one Windows browser: `wine64 <exe> <flags> [url]`.
-     * The container launcher wraps it in box64 + proot automatically
-     * ([ContainerLauncher.needsBox64] recognises `wine*`/`*.exe`), inside the
-     * container's OWN prefix (WINEPREFIX is per-container by construction).
+     * The guest command for one Windows browser: `wine64 <exe> <flags> [url]` -
+     * a SYMBOLIC loader name: at spawn the launcher resolves it to the
+     * provisioned payload's real guest path and wraps the command in proot,
+     * adding box64 only when that payload is an x86_64 ELF (the payload-driven
+     * [ContainerLauncher.needsBox64]), inside the container's OWN prefix
+     * (WINEPREFIX is per-container by construction).
+     *
+     * Honesty note: the browser exes this plan targets are x86/x64 PEs, which
+     * need an x86_64 Wine payload (the open "decision 3b" in
+     * docs/PIPELINE_PLAN.md) - the pinned native arm64 payload cannot run them,
+     * and nothing here pretends otherwise.
      *
      * @param exeGuestPath Windows path of the browser exe, e.g.
      *   `C:\Program Files\Google\Chrome\Application\chrome.exe`.
@@ -128,8 +135,9 @@ object WineBrowserLaunch {
      * The complete [RuntimeRequest] for "run this Windows browser exe inside
      * this container" - the plan, the container's Wine environment plus
      * [environmentAdditions], and the DNS + /dev/shm binds every session gets.
-     * The launcher adds box64 + proot around it automatically
-     * ([ContainerLauncher.needsBox64] sees `wine*`), the display is the
+     * The launcher adds proot around it automatically - and box64 only for an
+     * x86_64 payload ([ContainerLauncher.needsBox64], payload-driven) - the
+     * display is the
      * shell's embedded `:100`, and the prefix is the container's own - the
      * browser can ONLY launch inside the emulator's X server, never outside it.
      *

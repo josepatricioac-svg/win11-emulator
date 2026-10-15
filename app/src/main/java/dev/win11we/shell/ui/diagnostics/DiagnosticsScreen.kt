@@ -48,7 +48,10 @@ private val WarnAmber = Color(0xFFFFC44D)
 
 /**
  * R1 diagnostics: which binaries are packaged, whether they are executable, and
- * what `--version` answered. R4 adds the wine64 rows from [ProotCommand.selfTestPlan].
+ * what `--version` answered. R4 adds the Wine rows from
+ * [dev.win11we.shell.runtime.SelfTestRunner] (the payload's real loader path;
+ * box64 only in front of an x86_64 payload; SKIPPED-with-reason when no payload
+ * is provisioned).
  */
 @Composable
 fun DiagnosticsScreen(state: DiagnosticsState, modifier: Modifier = Modifier) {

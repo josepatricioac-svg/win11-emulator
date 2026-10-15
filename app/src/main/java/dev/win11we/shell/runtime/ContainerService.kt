@@ -136,7 +136,12 @@ object RuntimeHolder {
         return launcher ?: ContainerLauncher(binaries = binaries, log = SharedLog.buffer).also { launcher = it }
     }
 
-    /** Builds the request R2 launches; `wine64 cmd` is the default guest command. */
+    /**
+     * Builds the request R2 launches; `wine64 cmd` is the default guest command -
+     * a SYMBOLIC name: the launcher resolves bare `wine64` to the provisioned
+     * payload's real loader path at spawn time (Ubuntu has no `wine64` PATH entry)
+     * and prepends box64 only for an x86_64 payload.
+     */
     fun request(
         container: Container,
         context: Context,
