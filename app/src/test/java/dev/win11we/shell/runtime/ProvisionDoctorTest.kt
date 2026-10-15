@@ -23,6 +23,24 @@ class ProvisionDoctorTest {
     /** Fixture names must be unique: one test builds two reports from fresh dirs. */
     private var fixtureSeq = 0
 
+    /**
+     * The exact deb822 sources the pinned ubuntu-base-24.04.5-base-arm64 ships in
+     * `etc/apt/sources.list.d/ubuntu.sources` (verified against the real archive,
+     * 2026-10-15): two enabled `deb` stanzas, both on ports.ubuntu.com.
+     */
+    private val NOBLE_SOURCES =
+        "Types: deb\n" +
+            "URIs: http://ports.ubuntu.com/ubuntu-ports/\n" +
+            "Suites: noble noble-updates noble-backports\n" +
+            "Components: main universe restricted multiverse\n" +
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n" +
+            "\n" +
+            "Types: deb\n" +
+            "URIs: http://ports.ubuntu.com/ubuntu-ports/\n" +
+            "Suites: noble-security\n" +
+            "Components: main universe restricted multiverse\n" +
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+
     private fun shippedBinaries(): NativeBinaries {
         val dir = tmp.newFolder("nativelib${fixtureSeq++}")
         listOf(BinaryRole.PROOT, BinaryRole.PROOT_LOADER, BinaryRole.TALLOC).forEach { role ->
@@ -49,10 +67,17 @@ class ProvisionDoctorTest {
         elf[19] = ((eMachine shr 8) and 0xFF).toByte()
         File(rootfs, "usr/bin/bash").writeBytes(elf)
         File(rootfs, "etc/apt").mkdirs()
+        // The REAL noble (24.04) layout, byte-shape verified against the pinned
+        // ubuntu-base-24.04.5-base-arm64.tar.gz: /etc/apt/sources.list exists but is
+        // pure comment (no 'deb' line at all), and the enabled sources live in the
+        // deb822 file below. A doctor that only read sources.list reported "No active
+        // 'deb' lines" on this healthy rootfs and blocked Provision outright.
         File(rootfs, "etc/apt/sources.list").writeText(
-            "deb http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted\n" +
-                "deb http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted\n",
+            "# See http://help.ubuntu.com/community/UpgradeNotes for how to upgrade to\n" +
+                "# newer versions of the distribution.\n",
         )
+        File(rootfs, "etc/apt/sources.list.d").mkdirs()
+        File(rootfs, "etc/apt/sources.list.d/ubuntu.sources").writeText(NOBLE_SOURCES)
         File(rootfs, "etc").mkdirs()
         File(rootfs, "etc/resolv.conf").writeText("nameserver 1.1.1.1\n")
         return rootfs
@@ -129,6 +154,9 @@ class ProvisionDoctorTest {
     @Test
     fun `x86 archive sources are named as the wrong flavour`() {
         val rootfs = healthyRootfs()
+        // Assert on the one-line format alone: drop the deb822 fixture, whose healthy
+        // ports.ubuntu.com stanzas would otherwise mask the bad sources.list below.
+        File(rootfs, "etc/apt/sources.list.d/ubuntu.sources").delete()
         File(rootfs, "etc/apt/sources.list").writeText(
             "deb http://archive.ubuntu.com/ubuntu jammy main\n" +
                 "deb http://security.ubuntu.com/ubuntu jammy-security main\n",
@@ -142,9 +170,111 @@ class ProvisionDoctorTest {
     @Test
     fun `an empty sources list fails with the reason`() {
         val rootfs = healthyRootfs()
+        // Assert on the one-line format alone: drop the deb822 fixture, whose healthy
+        // ports.ubuntu.com stanzas would otherwise mask the bad sources.list below.
+        File(rootfs, "etc/apt/sources.list.d/ubuntu.sources").delete()
         File(rootfs, "etc/apt/sources.list").writeText("# nothing here\n")
         val report = doctor(shippedBinaries(), rootfs, tmp.root, includeNetwork = false)
-        assertTrue(report.checks.first { it.id == "apt-sources" }.detail.contains("No active 'deb' lines"))
+        assertTrue(report.checks.first { it.id == "apt-sources" }.detail.contains("No enabled apt source"))
+    }
+
+    @Test
+    fun `noble deb822 sources pass even though sources list has no deb line`() {
+        // THE regression this pins: Ubuntu 24.04 moved apt sources to the deb822 format.
+        // healthyRootfs() is now shaped exactly like the real pinned rootfs - a
+        // comment-only sources.list plus sources.list.d/ubuntu.sources - and must PASS.
+        val rootfs = healthyRootfs()
+        val report = doctor(shippedBinaries(), rootfs, tmp.root, includeNetwork = false)
+        val sources = report.checks.first { it.id == "apt-sources" }
+        assertEquals(CheckState.PASS, sources.state)
+        assertTrue(sources.detail, sources.detail.contains("ports.ubuntu.com"))
+        assertTrue(sources.detail, sources.detail.contains("ubuntu.sources"))
+        assertTrue("a healthy noble rootfs must not block provisioning", report.ok)
+    }
+
+    @Test
+    fun `a legacy one-line sources list still passes - imported jammy rootfs stays supported`() {
+        val rootfs = healthyRootfs()
+        File(rootfs, "etc/apt/sources.list.d/ubuntu.sources").delete()
+        File(rootfs, "etc/apt/sources.list").writeText(
+            "deb http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted\n" +
+                "deb http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted\n",
+        )
+        val report = doctor(shippedBinaries(), rootfs, tmp.root, includeNetwork = false)
+        val sources = report.checks.first { it.id == "apt-sources" }
+        assertEquals(CheckState.PASS, sources.state)
+        assertTrue(sources.detail, sources.detail.contains("2 source(s)"))
+        assertTrue(report.ok)
+    }
+
+    @Test
+    fun `deb822 sources on the x86 archive are named as the wrong flavour`() {
+        val rootfs = healthyRootfs()
+        File(rootfs, "etc/apt/sources.list.d/ubuntu.sources").writeText(
+            "Types: deb\n" +
+                "URIs: http://archive.ubuntu.com/ubuntu/\n" +
+                "Suites: noble\n" +
+                "Components: main\n",
+        )
+        val report = doctor(shippedBinaries(), rootfs, tmp.root, includeNetwork = false)
+        assertFalse(report.ok)
+        assertEquals("apt-sources", report.firstBlockingFailure!!.id)
+        assertTrue(report.checks.first { it.id == "apt-sources" }.detail.contains("ports.ubuntu.com"))
+    }
+
+    @Test
+    fun `a deb822 stanza with no enabled deb type does not count as a source`() {
+        // deb822 disables a stanza by commenting out its Types: line; counting it would
+        // let Provision proceed against a rootfs apt cannot actually download from.
+        val rootfs = healthyRootfs()
+        File(rootfs, "etc/apt/sources.list.d/ubuntu.sources").writeText(
+            "#Types: deb\n" +
+                "URIs: http://ports.ubuntu.com/ubuntu-ports/\n" +
+                "Suites: noble\n" +
+                "Components: main\n",
+        )
+        val report = doctor(shippedBinaries(), rootfs, tmp.root, includeNetwork = false)
+        assertFalse(report.ok)
+        assertEquals("apt-sources", report.firstBlockingFailure!!.id)
+        assertTrue(
+            report.checks.first { it.id == "apt-sources" }.detail.contains("No enabled apt source"),
+        )
+    }
+
+    @Test
+    fun `a deb-src-only stanza is not an enabled binary source`() {
+        // "deb" must be matched as a TOKEN, not a substring: `Types: deb-src` offers
+        // source packages only, so apt still has no binary archive to install from.
+        val rootfs = healthyRootfs()
+        File(rootfs, "etc/apt/sources.list.d/ubuntu.sources").writeText(
+            "Types: deb-src\n" +
+                "URIs: http://ports.ubuntu.com/ubuntu-ports/\n" +
+                "Suites: noble\n" +
+                "Components: main\n",
+        )
+        val report = doctor(shippedBinaries(), rootfs, tmp.root, includeNetwork = false)
+        assertFalse(report.ok)
+        assertEquals("apt-sources", report.firstBlockingFailure!!.id)
+        // ...while a stanza carrying BOTH types does count.
+        File(rootfs, "etc/apt/sources.list.d/ubuntu.sources").writeText(
+            "Types: deb deb-src\n" +
+                "URIs: http://ports.ubuntu.com/ubuntu-ports/\n" +
+                "Suites: noble\n" +
+                "Components: main\n",
+        )
+        val both = doctor(shippedBinaries(), rootfs, tmp.root, includeNetwork = false)
+        assertEquals(CheckState.PASS, both.checks.first { it.id == "apt-sources" }.state)
+        assertTrue(both.ok)
+    }
+
+    @Test
+    fun `the doctor probes the noble Release file - the suite the pinned rootfs uses`() {
+        // Probing jammy's Release while shipping a noble rootfs would report on an
+        // archive this rootfs never talks to.
+        assertTrue(
+            ProvisionDoctor.PORTS_RELEASE_URL,
+            ProvisionDoctor.PORTS_RELEASE_URL.contains("/dists/noble/Release"),
+        )
     }
 
     @Test
@@ -194,7 +324,10 @@ class ProvisionDoctorTest {
     fun `provision refuses through the doctor without invoking apt`() {
         val runner = FakeProot()
         val rootfs = healthyRootfs()
-        File(rootfs, "etc/apt/sources.list").writeText("deb http://archive.ubuntu.com/ubuntu jammy main\n")
+        // Assert on the one-line format alone: drop the deb822 fixture, whose healthy
+        // ports.ubuntu.com stanzas would otherwise mask the bad sources.list below.
+        File(rootfs, "etc/apt/sources.list.d/ubuntu.sources").delete()
+        File(rootfs, "etc/apt/sources.list").writeText("deb http://archive.ubuntu.com/ubuntu noble main\n")
         val log = dev.win11we.shell.ui.terminal.LogBuffer()
         val result = RootfsProvisioner.provision(
             binaries = shippedBinaries(),
@@ -336,7 +469,10 @@ class ProvisionDoctorTest {
     fun `the smoke test is skipped, not faked, when an earlier prerequisite already failed`() {
         val runner = FakeProot()
         val rootfs = healthyRootfs()
-        File(rootfs, "etc/apt/sources.list").writeText("deb http://archive.ubuntu.com/ubuntu jammy main\n")
+        // Assert on the one-line format alone: drop the deb822 fixture, whose healthy
+        // ports.ubuntu.com stanzas would otherwise mask the bad sources.list below.
+        File(rootfs, "etc/apt/sources.list.d/ubuntu.sources").delete()
+        File(rootfs, "etc/apt/sources.list").writeText("deb http://archive.ubuntu.com/ubuntu noble main\n")
         val report = doctor(shippedBinaries(), rootfs, tmp.root, includeNetwork = false, runner = runner)
         val smoke = report.checks.first { it.id == "proot-smoke" }
         assertEquals(CheckState.WARN, smoke.state)

@@ -261,13 +261,15 @@ class FirefoxSessionTest {
     fun `the pinned manifest entry is the verified Mozilla release`() {
         val artifact = RuntimeManifest.FIREFOX_ESR
         assertEquals("firefox-esr", artifact.id)
-        assertTrue(artifact.url.startsWith("https://archive.mozilla.org/pub/firefox/releases/140.17.0esr/"))
-        assertTrue(artifact.url.endsWith("/linux-aarch64/en-US/firefox-140.17.0esr.tar.xz"))
+        assertTrue(artifact.url.startsWith("https://archive.mozilla.org/pub/firefox/releases/153.5.0esr/"))
+        assertTrue(artifact.url.endsWith("/linux-aarch64/en-US/firefox-153.5.0esr.tar.xz"))
         assertEquals(64, artifact.sha256.length)
-        // SHA-256 of the release tarball whose SHA-512 matches Mozilla's SHA512SUMS (2026-10-10).
-        assertEquals("dd579f48405a7065f0f643ddb71a8de0f48a9d984c2783dee2ca173081850084", artifact.sha256)
-        assertEquals(66_921_712L, artifact.sizeBytes)
-        assertEquals("firefox-140.17.0esr.tar.xz", artifact.fileName)
+        // SHA-256 of the release tarball whose SHA-512 matches Mozilla's SHA512SUMS
+        // (8e8635cc...01bc5a54, verified byte-for-byte 2026-10-15). 153.5.0esr is the
+        // live ESR branch; the previously pinned 140.17.0esr is past security support.
+        assertEquals("6579949c1d2d98f0d045cec780fa24752b57984f6e52d189ccfe003cf97f3d0b", artifact.sha256)
+        assertEquals(74_115_684L, artifact.sizeBytes)
+        assertEquals("firefox-153.5.0esr.tar.xz", artifact.fileName)
         assertTrue("needs the rootfs to be a working install", artifact.incompleteAlone)
         assertTrue(RuntimeManifest.ALL.contains(artifact))
         assertEquals(4, RuntimeManifest.ALL.size)

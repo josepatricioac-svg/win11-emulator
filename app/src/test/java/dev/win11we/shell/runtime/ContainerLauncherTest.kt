@@ -211,6 +211,33 @@ class ContainerLauncherTest {
     }
 
     @Test
+    fun `WinePayload payloadGap separates a loader from a payload that can build a prefix`() {
+        // `isProvisioned` answers "is there a loader"; `payloadGap` answers the question
+        // Initialize prefix actually depends on: can wineboot run? wineboot is a Windows
+        // PE shipped by libwine, so a rootfs with only the loader is NOT enough - and
+        // saying so up front beats a wineboot failure with no explanation.
+        val bare = tmp.newFolder("gap-rootfs")
+        assertNotNull("nothing installed at all", WinePayload.payloadGap(bare))
+        assertTrue(WinePayload.payloadGap(bare)!!.contains("no Wine loader"))
+
+        File(bare, "usr/lib/wine").mkdirs()
+        File(bare, "usr/lib/wine/wine64").writeText("elf")
+        assertTrue("the loader alone satisfies isProvisioned...", WinePayload.isProvisioned(bare))
+        val gap = WinePayload.payloadGap(bare)
+        assertNotNull("...but NOT payloadGap: libwine is missing", gap)
+        assertTrue(gap!!, gap.contains("libwine"))
+
+        // Either libwine marker is enough: the wineserver wrapper...
+        File(bare, "usr/lib/wine/wineserver").writeText("#!/bin/sh\n")
+        assertNull(WinePayload.payloadGap(bare))
+        // ...or the builtin tree that carries wineboot.exe.
+        File(bare, "usr/lib/wine/wineserver").delete()
+        assertNotNull(WinePayload.payloadGap(bare))
+        File(bare, "usr/lib/aarch64-linux-gnu/wine").mkdirs()
+        assertNull(WinePayload.payloadGap(bare))
+    }
+
+    @Test
     fun `refuses an empty guest command`() {
         val result = launcher().start(request(command = emptyList()))
         assertEquals(LaunchFailure.NO_COMMAND, result.failure)

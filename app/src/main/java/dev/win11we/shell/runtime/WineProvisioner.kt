@@ -23,10 +23,12 @@ import java.io.File
  *    from ports.ubuntu.com - the same "pinned core, distro-resolved deps"
  *    contract the browser provisioning documents.
  * 2. **apt fallback**: with no downloaded debs, `apt-get install wine64 wine`
- *    fetches exactly those versions from the jammy archive the rootfs already
+ *    fetches exactly those versions from the noble archive the rootfs already
  *    points at (the pins in [RuntimeManifest] were taken from that archive's
  *    Packages index), so the fallback is the same software, just without the
- *    offline guarantee.
+ *    offline guarantee. `--no-install-recommends` still pulls `libwine`, because
+ *    it is a hard `Depends` of wine64 - and it must, since that is where
+ *    `wineboot` and every builtin DLL live (see [WinePayload.payloadGap]).
  *
  * Pure command building + the [ProcessRunner] seam, unit-tested like
  * [RootfsProvisioner]; the post-check is [WinePayload.isProvisioned] - exit 0
@@ -162,8 +164,11 @@ object WineProvisioner {
             log.add(TerminalLine(if (outcome.succeeded) LineKind.OUTPUT else LineKind.ERROR, line))
         }
         // The disk is the verdict: exit 0 without the launcher binary installed
-        // is a failure with a name, not a green tick.
+        // is a failure with a name, not a green tick. `payloadGap` goes one step
+        // further than the loader check: a Wine that installed its loader but not
+        // `libwine` cannot run wineboot, so it cannot build a prefix either.
         val payload = WinePayload.launcherIn(rootfsDir)
+        val gap = WinePayload.payloadGap(rootfsDir)
         return when {
             !outcome.succeeded -> {
                 val verdict = if (outcome.exitCode == null) {
@@ -174,15 +179,14 @@ object WineProvisioner {
                 log.add(TerminalLine(LineKind.SYSTEM, "$verdict - last ${tail.size} output line(s) above"))
                 ProvisionResult(false, "$verdict: ${tail.lastOrNull() ?: "no output"}", tail)
             }
-            payload == null -> {
-                val message = "dpkg/apt exited 0 but no Wine launcher exists in the rootfs " +
-                    "(looked for ${WinePayload.CANDIDATES.joinToString()}) - treating as FAILED."
+            gap != null -> {
+                val message = "dpkg/apt exited 0 but the Wine payload is incomplete: $gap - treating as FAILED."
                 log.add(TerminalLine(LineKind.ERROR, message))
                 ProvisionResult(false, message, tail)
             }
             else -> {
-                log.add(TerminalLine(LineKind.SYSTEM, "Wine payload ready at ${payload.absolutePath}"))
-                ProvisionResult(true, "Wine payload installed (${payload.absolutePath}). Prefixes can now be created.", tail)
+                log.add(TerminalLine(LineKind.SYSTEM, "Wine payload ready at ${payload?.absolutePath}"))
+                ProvisionResult(true, "Wine payload installed (${payload?.absolutePath}). Prefixes can now be created.", tail)
             }
         }
     }

@@ -46,7 +46,7 @@ object DesktopBrowserCatalogue {
         BrowserEngine.DesktopBrowser(
             id = "desktop:firefox-esr",
             label = "Firefox ESR (Linux arm64)",
-            detail = "Native arm64 build from the Ubuntu 22.04 rootfs, X11 + PulseAudio. Full desktop profile, " +
+            detail = "Native arm64 build from the Ubuntu 24.04 rootfs, X11 + PulseAudio. Full desktop profile, " +
                 "extensions and sidebar - the closest thing to a PC Firefox on this device.",
             license = "MPL-2.0",
             requirement = "R1 proot + R3 rootfs, Firefox and GUI libs + D1 X server",

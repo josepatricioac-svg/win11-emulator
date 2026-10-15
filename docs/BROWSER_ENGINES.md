@@ -9,7 +9,7 @@ the app must own the X server, the processes and the downloads.
 
 | Family | How it runs | Desktop features | Verdict for this project |
 | --- | --- | --- | --- |
-| **Linux arm64 native** (Firefox ESR, Chromium) | `proot` + Ubuntu 22.04 arm64 rootfs → X11 to our own X server | Full: profiles, extensions, sidebars, devtools | **Primary path.** Same machinery as Wine, no emulation, no GPL entanglement |
+| **Linux arm64 native** (Firefox ESR, Chromium) | `proot` + Ubuntu 24.04 arm64 rootfs → X11 to our own X server | Full: profiles, extensions, sidebars, devtools | **Primary path.** Same machinery as Wine, no emulation, no GPL entanglement |
 | **Windows arm64/x64** (Edge arm64, Firefox x64) | Edge arm64: `proot` + Wine (native arm64 PE, no box64).<br>Firefox x64: `proot` + Wine + **box64** | Full, plus vendor AI sidebars | Edge arm64 is the interesting one; Firefox x64 via box64 is the slow fallback |
 | ~~Android browser via intent~~ | ~~`ACTION_VIEW` out of the shell~~ | Mobile feature set only | **REMOVED (owner decision, 2026-10-14)**: detection, intents and the `<queries>` manifest block are gone - a not-ready engine is blocked and named, never rerouted off-device |
 
@@ -58,9 +58,11 @@ Everything that can exist without the vendored native binaries now exists; the e
 unlocks itself the moment the runtime is complete:
 
 1. **Pinned artifact (R3)**: `RuntimeManifest.FIREFOX_ESR` — Mozilla's official
-   self-contained `linux-aarch64` build, 140.17.0esr, SHA-256
-   `dd579f48…850084` (the download's SHA-512 was verified against Mozilla's own
-   `SHA512SUMS` before the SHA-256 was pinned; retrieved 2026-10-10). It appears in
+   self-contained `linux-aarch64` build, 153.5.0esr, SHA-256
+   `6579949c…f97f3d0b` (the download's SHA-512 was verified byte-for-byte against
+   Mozilla's own `SHA512SUMS` before the SHA-256 was pinned; retrieved 2026-10-15).
+   153.5.0esr is the live ESR branch - the previously pinned 140.17.0esr is the last
+   release of a branch now past its security-support window. It appears in
    Settings ▸ Storage ▸ Runtime download with the usual resume/hash/space/cancel
    contract, and extracts **in-app** (pure-Kotlin TAR + xz-java, `--strip-components=1`)
    to `<rootfs>/opt/firefox-esr` — no proot needed for the unpack, verified against the
@@ -145,8 +147,10 @@ Honest limits while gated (each named by the readiness message, nothing silent):
   may ship systemd-resolved's dangling symlink, which no bind can fix). The pinned
   ubuntu-base already points apt at `http://ports.ubuntu.com/ubuntu-ports` (correct for
   arm64, and plain http, so it works before `ca-certificates` exists), and
-  `apt-get update` runs first. The pinned list is verified against the jammy arm64
-  index and pinned by a test: one wrong name (`libdbus-glib-1-2-2`, an analogy with
+  `apt-get update` runs first. The pinned list is verified against the NOBLE (24.04)
+  arm64 index and pinned by a test - three names changed with noble's 64-bit `time_t`
+  transition (`libgtk-3-0t64`, `libasound2t64`, `libxt6t64`; the jammy spellings do not
+  exist there and one bad name fails the whole install with exit 100): one wrong name (`libdbus-glib-1-2-2`, an analogy with
   `libdbus-1-3` that does not exist - the real package is `libdbus-glib-1-2`) failed
   the whole install with exit 100 on a real device. The pinned list also installs `x11-apps`,
   `x11-utils` (xeyes/xclock/xdpyinfo) and `libgtk-3-bin` (`gtk-query-settings`),
@@ -227,7 +231,7 @@ Honest limits while gated (each named by the readiness message, nothing silent):
    plumbed. Smallest risk, best extension story, clean licence.
 2. Do we pursue **Edge Windows/arm64** at all, given the proprietary licence and the D2
    dependency? (It is the only route to a Copilot sidebar.)
-3. Rootfs flavour for the browser path: the Ubuntu 22.04 rootfs from R3 is enough for
+3. Rootfs flavour for the browser path: the Ubuntu 24.04 rootfs from R3 is enough for
    Firefox ESR once the GTK3/dbus-glib stack is provisioned (same dependency step Wine
    needs, R4/P2); Chromium may want a newer mesa/libGL than the rootfs ships.
 

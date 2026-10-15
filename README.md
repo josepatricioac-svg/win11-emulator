@@ -37,7 +37,7 @@ Jetpack Compose UI. One self-contained APK, no Termux, no XSDL, no adb, no root.
 └──────────────────────────────────┬───────────────────────────────────────────────┘
                                    │ abstract unix socket /tmp/.X11-unix/X100
         ┌──────────────────────────┴──────────────────────┐   (DISPLAY=:100; proot
-        │ proot jail: Ubuntu 22.04 arm64 rootfs           │    passes the abstract
+        │ proot jail: Ubuntu 24.04 arm64 rootfs           │    passes the abstract
         │  ├ Firefox ESR (native arm64)                   │    namespace through)
         │  │   /dev/shm bind · seccomp off · SW GL        │  child processes of THIS
         │  └ box64 → wine64 (arm64 Wine 9)                │  app, killed by proot
@@ -291,8 +291,8 @@ zero exit code without the output is a failure.
 
 Settings ▸ Storage ▸ **Runtime download** lists the pinned artifacts with their size,
 SHA-256 prefix and URL, plus Download / Resume / Cancel / Import / Extract / Remove and a
-free-space check for the whole set. The manifest covers the Ubuntu 22.04.5 arm64 rootfs,
-the two Wine 9.0 loader `.deb`s and **Firefox ESR 140.17.0 (linux-aarch64)** - the
+free-space check for the whole set. The manifest covers the Ubuntu 24.04.5 arm64 rootfs,
+the two Wine 9.0 loader `.deb`s and **Firefox ESR 153.5.0 (linux-aarch64)** - the
 desktop browser engine, whose pin was anchored to Mozilla's own SHA512SUMS before the
 SHA-256 was recorded.
 
@@ -687,7 +687,7 @@ app/src/main/java/dev/win11we/shell/
   runtime/download/TarExtractor.kt pure-Kotlin TAR reader (gzip + xz) - the on-device extraction engine
   runtime/DesktopBrowserLauncher.kt readiness worker (named missing step) + the gated launch path
   runtime/ContainerService.kt  foreground service, notification, Stop all, RuntimePaths/RuntimeHolder
-  runtime/download/Artifact.kt   pinned manifest (Ubuntu 22.04.5 arm64, Wine 9.0 debs) + real hashes
+  runtime/download/Artifact.kt   pinned manifest (Ubuntu 24.04.5 arm64, Wine 9.0 debs) + real hashes
   runtime/download/Downloader.kt resume/hash/space/cancel logic + https Transfer seam
   runtime/download/RootfsManager.kt per-artifact state machine, SAF import, extract gate
   x11/X11.kt                 wire primitives, spec-accurate opcodes, events, masks (D1a/D1c)

@@ -261,3 +261,92 @@ shell window within the font-cache window; resize re-lays-out GTK; dropdowns
 appear aligned; close terminates the session window (WM_DELETE path); the
 RUNNING-unmapped pill shows during the first-run cache build; xeyes/xclock
 self-test rows now visibly open (and auto-close) as shell windows.
+
+## Snapshot 2026-10-15 — rootfs/Wine release mismatch: the real cause of "Wine prefix not found"
+
+Owner report: "the rootfs is not available, which makes the container not find the wine
+prefix" + "I need the browser firefox ESR to install". Investigated against the live
+upstreams by actually downloading every pinned artifact; **all four URLs are alive and all
+four hashes match the pins byte-for-byte**, so nothing was "unavailable" at the CDN. The
+breakage was a release mismatch inside the manifest itself.
+
+**Root cause (verified, not inferred).** The rootfs was pinned to jammy (22.04.5) while both
+Wine `.deb`s were pinned from **noble** (24.04). `dpkg-deb -f` on the real artifacts:
+`wine64_9.0~repack-4build3_arm64.deb` declares `Depends: libc6 (>= 2.38)`. jammy ships
+libc6 2.35; noble ships 2.39. So on a jammy rootfs:
+- `dpkg -i /mnt/wine-debs/*.deb` fails on the unsatisfiable libc6 dependency,
+- `apt-get -f install` cannot repair it (jammy's own `wine64` is 6.0.3, a different package),
+- `libwine` never installs, so `/usr/lib/wine/wine64` never lands,
+- `WinePayload.launcherIn` returns null → `WinePrefixManager.create` refuses before
+  `wineboot` → no `system.reg`/`user.reg`/`drive_c` → `ContainerLauncher.validate` reports
+  `PREFIX_MISSING`. The refusal text names the prefix, which is why the symptom read as a
+  missing prefix rather than an uninstallable payload.
+
+**Fixes landed:**
+1. `RuntimeManifest.ROOTFS` → **ubuntu-base-24.04.5-base-arm64.tar.gz**, sha256
+   `a91d5a93…f05914f2`, 29,936,675 B (downloaded and hash-verified against Ubuntu's own
+   `SHA256SUMS`). The rootfs and the Wine debs are now the same release, which is what makes
+   the pinned debs installable at all. Pinned by a new `RuntimeTest`
+   (`the pinned rootfs and the pinned Wine debs are the SAME Ubuntu release`) so they cannot
+   drift apart silently again.
+2. **`ProvisionDoctor.checkSourcesList` now understands deb822.** This was a second,
+   independent blocker that the rootfs bump would have walked straight into: noble's
+   `/etc/apt/sources.list` is 270 bytes of pure comment with **no `deb` line**, and the real
+   sources live in `etc/apt/sources.list.d/ubuntu.sources` (`Types:`/`URIs:`/`Suites:`). The
+   old check reported "No active 'deb' lines" and hard-FAILED (blocking) on a perfectly
+   healthy noble rootfs, so Provision could never reach apt. The check now reads BOTH formats,
+   counts only *enabled* `deb` stanzas (`Types:` matched as a TOKEN, so `deb-src` alone does
+   not count), and keeps the one-line path working for imported jammy rootfses.
+   `PORTS_RELEASE_URL` moved jammy → noble for the same reason.
+   Verified by compiling and running the new parser standalone against the **real extracted
+   noble and jammy trees**: noble PASS (2 sources), jammy PASS (10 sources), plus 8 synthetic
+   cases (x86 archive, disabled stanza, CRLF, lowercase field names, multi-URI, mixed formats,
+   deb-src-only, deb+deb-src).
+3. **`BROWSER_PACKAGES` renamed for noble's 64-bit `time_t` transition.** Checked against the
+   noble main+universe binary-arm64 `Packages` index: `libgtk-3-0`, `libasound2` and `libxt6`
+   **do not exist** in noble arm64 — they are `libgtk-3-0t64`, `libasound2t64`, `libxt6t64`.
+   One wrong name fails the whole `apt-get install` with exit 100 (the same failure mode the
+   `libdbus-glib-1-2-2` incident is documented for). The other 15 names are unchanged.
+   `RuntimeTest`'s pin follows.
+4. **Firefox ESR 140.17.0esr → 153.5.0esr** (linux-aarch64). Mozilla's `product-details`
+   reports `FIREFOX_ESR = 153.5.0esr`; 140.17.0esr is the last release of a branch now past
+   its security-support window, so the old pin was shipping a browser that no longer receives
+   fixes. SHA-512 verified byte-for-byte against Mozilla's `SHA512SUMS`
+   (`8e8635cc…01bc5a54`), then SHA-256 `6579949c…f97f3d0b` computed from the verified
+   tarball (74,115,684 B). Highest versioned symbol in `libxul.so` is GLIBC 2.28, so it runs
+   on noble's glibc 2.39. Tar shape unchanged (53 entries, `firefox/` root, launcher mode
+   0755, `libxul.so` intact) → the existing `--strip-components=1` install path is unaffected.
+5. **`WinePayload` made honest about what Ubuntu actually ships.** Inspecting the real `.deb`
+   file lists: Ubuntu provides **no `/usr/bin/wine64`** — `wine64` installs
+   `/usr/lib/wine/wine64` + `wineserver64`; `libwine` installs `/usr/lib/wine/wineserver` and
+   the builtins incl. `wineboot.exe` (a Windows PE, at
+   `/usr/lib/aarch64-linux-gnu/wine/aarch64-unix/`); the bare names users type (`wine`,
+   `wineboot`, `wineserver`, `regedit`, …) come from `update-alternatives` in the `wine`
+   package's postinst — and `wine64` is **not** among them. New `WinePayload.payloadGap`
+   separates "a loader exists" from "wineboot can actually run" (i.e. `libwine` is present),
+   and is wired into both `WinePrefixManager.create` and `WineProvisioner`'s disk verdict, so
+   a half-installed payload is named instead of failing later at wineboot. Test fixtures that
+   modelled a payload as a single made-up `usr/bin/wine64` were made faithful.
+
+**Harness note:** no JDK/Gradle in this sandbox, so the off-Gradle harness could not be run.
+Instead: (a) every pinned artifact was re-downloaded and hash-verified against the
+publisher's own checksum data; (b) the new deb822 parser was compiled and executed standalone
+against the real extracted rootfs trees (10/10 checks); (c) all touched main sources were
+compiled with kotlinc and their error histogram is now **identical to the pre-change HEAD
+baseline** (the residual errors are kotlinc 1.3 failing on Kotlin 2.x syntax that already
+existed at HEAD). That comparison caught two genuine defects in this change before commit —
+a `listFiles {}` type-inference failure and a `/*` written inside a KDoc, which Kotlin treats
+as a *nested* block-comment opener and which left the comment unclosed. GitHub Actions
+`build-apk` remains the authoritative gate.
+
+**Still open / deliberately NOT changed here** (the repo's "decision 3b"): the guest command
+name and the box64 wrap. `ProotCommand.selfTestPlan`, `SelfTestRunner` and
+`ContainerService.request` still invoke `wine64`, which does not exist on Ubuntu (see 5) and
+so will exit 127; and `ContainerLauncher.needsBox64` prefixes box64 onto any command starting
+with `wine`, but the pinned payload is a **native arm64** ELF, which box64 (an x86_64→arm64
+translator) cannot exec. `wineboot`/`wineserver` themselves are fine — the alternatives system
+does create those. Fixing this means choosing the x86_64-Windows-app story (wine's own box64
+integration vs. an x86_64 wine payload under box64), so it is flagged rather than guessed.
+Firefox ESR does not touch any of it: it is native arm64, needs no Wine prefix and no box64.
+
+versionName 0.1.0-d2a.2.

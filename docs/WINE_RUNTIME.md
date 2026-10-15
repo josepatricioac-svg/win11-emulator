@@ -38,7 +38,7 @@ Start refuses with `PREFIX_MISSING` and the whole chain quoted.
   killed earlier provisioning must not wedge dpkg (same self-heal as the browser
   provision).
 - **Fallback**: `apt-get install -y --no-install-recommends wine64 wine` — the
-  manifest pins were taken from the jammy `Packages` index, so apt fetches
+  manifest pins were taken from the noble `Packages` index, so apt fetches
   exactly those versions; the difference is only the offline guarantee.
 - Runs in the shared fake-root proot prefix (`-0`, short options, no `--` — the
   vendored fork's argument rules), with the doctor's pre-flight (host checks +

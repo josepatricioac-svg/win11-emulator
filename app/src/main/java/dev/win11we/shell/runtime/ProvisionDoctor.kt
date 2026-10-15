@@ -82,8 +82,16 @@ object ProvisionDoctor {
     const val MIN_FREE_MB = 400L
     const val LOW_FREE_MB = 800L
 
-    /** The index apt fetches first; probed over https (the app trusts system CAs). */
-    const val PORTS_RELEASE_URL = "https://ports.ubuntu.com/ubuntu-ports/dists/jammy/Release"
+    /**
+     * The index apt fetches first; probed over https (the app trusts system CAs).
+     * Must be the SAME release as [dev.win11we.shell.runtime.download.RuntimeManifest.ROOTFS]
+     * - the pinned rootfs is noble (24.04), so probing jammy's Release file would report
+     * on an archive this rootfs never talks to.
+     */
+    const val PORTS_RELEASE_URL = "https://ports.ubuntu.com/ubuntu-ports/dists/noble/Release"
+
+    /** Field separator inside a deb822 value list; declared before its users. */
+    private val WHITESPACE = Regex("\\s+")
 
     private const val EM_AARCH64 = 183 // 0xB7
     private const val EM_X86_64 = 62 // 0x3E
@@ -234,37 +242,98 @@ object ProvisionDoctor {
 
     /**
      * 4. arm64 packages live on ports.ubuntu.com, not archive.ubuntu.com. The
-     * pinned ubuntu-base ships the right sources.list; an imported or edited
-     * rootfs may not, and apt would then 404 every index.
+     * pinned ubuntu-base ships the right sources; an imported or edited rootfs
+     * may not, and apt would then 404 every index.
+     *
+     * BOTH apt source formats are read, because which one a rootfs uses depends on
+     * its release:
+     * - `etc/apt/sources.list` - the classic one-line format (`deb <uri> <suite> <comp>`).
+     *   Ubuntu <= 22.04 ships this.
+     * - `etc/apt/sources.list.d/` `*.sources` files - the deb822 format (`Types:`/`URIs:`/
+     *   `Suites:` stanzas). **Ubuntu 24.04 (noble) ships ONLY this**: its
+     *   `/etc/apt/sources.list` is 270 bytes of pure comment with no `deb` line at all,
+     *   and the real sources are `sources.list.d/ubuntu.sources`. Judging only
+     *   sources.list therefore reported "No active 'deb' lines" and BLOCKED provisioning
+     *   on a perfectly healthy noble rootfs.
+     * A stanza is only counted when it is enabled (`Types:` contains `deb`; deb822
+     * comments with `#` and an absent `Types:` both mean disabled).
      */
     private fun checkSourcesList(rootfsDir: File): DoctorCheck {
         val sources = File(rootfsDir, "etc/apt/sources.list")
-        val text = runCatching { if (sources.isFile) sources.readText() else "" }.getOrDefault("")
-        val debLines = text.lineSequence().filter { it.trimStart().startsWith("deb ") }.toList()
+        val oneLine = runCatching { if (sources.isFile) sources.readText() else "" }.getOrDefault("")
+        val debLines = oneLine.lineSequence().filter { it.trimStart().startsWith("deb ") }.toList()
+
+        val sourcesDir = File(rootfsDir, "etc/apt/sources.list.d")
+        val deb822Files: List<File> = runCatching {
+            sourcesDir.listFiles()?.filter { it.isFile && it.name.endsWith(".sources") }?.sortedBy { it.name }
+        }.getOrNull() ?: emptyList()
+        val deb822 = deb822Files.flatMap { deb822Uris(it) }
+
+        val uris = debLines + deb822
+        val where = when {
+            debLines.isNotEmpty() && deb822.isNotEmpty() ->
+                "${sources.name} (${debLines.size} deb line(s)) + ${deb822Files.size} .sources file(s)"
+            deb822.isNotEmpty() -> deb822Files.joinToString(", ") { "sources.list.d/${it.name}" }
+            else -> sources.absolutePath
+        }
         return when {
-            debLines.isEmpty() -> DoctorCheck(
+            uris.isEmpty() -> DoctorCheck(
                 "apt-sources",
-                "apt sources.list",
+                "apt sources",
                 CheckState.FAIL,
-                "No active 'deb' lines in ${sources.absolutePath} - apt has nothing to download from.",
+                "No enabled apt source: no active 'deb' line in ${sources.absolutePath} and no " +
+                    "'deb'-type stanza in ${sourcesDir.absolutePath}/*.sources - apt has nothing to download from.",
             )
-            debLines.any { "ports.ubuntu.com" in it } ->
-                DoctorCheck("apt-sources", "apt sources.list", CheckState.PASS, "${debLines.size} deb lines, ports.ubuntu.com")
-            debLines.any { "archive.ubuntu.com" in it || "security.ubuntu.com" in it } -> DoctorCheck(
+            uris.any { "ports.ubuntu.com" in it } ->
+                DoctorCheck("apt-sources", "apt sources", CheckState.PASS, "${uris.size} source(s) in $where, ports.ubuntu.com")
+            uris.any { "archive.ubuntu.com" in it || "security.ubuntu.com" in it } -> DoctorCheck(
                 "apt-sources",
-                "apt sources.list",
+                "apt sources",
                 CheckState.FAIL,
-                "sources.list points at the x86 archive (archive/security.ubuntu.com); arm64 packages live on " +
-                    "ports.ubuntu.com. This rootfs is the wrong flavour or its sources were edited.",
+                "apt sources in $where point at the x86 archive (archive/security.ubuntu.com); arm64 packages " +
+                    "live on ports.ubuntu.com. This rootfs is the wrong flavour or its sources were edited.",
             )
             else -> DoctorCheck(
                 "apt-sources",
-                "apt sources.list",
+                "apt sources",
                 CheckState.WARN,
-                "sources.list has ${debLines.size} deb lines but none name ports.ubuntu.com - check they serve arm64.",
+                "apt sources in $where have ${uris.size} entr${if (uris.size == 1) "y" else "ies"} but none name " +
+                    "ports.ubuntu.com - check they serve arm64.",
             )
         }
     }
+
+    /**
+     * The `URIs:` of every ENABLED `deb` stanza in one deb822 `.sources` file.
+     * Stanzas are blank-line separated; `#` comments are dropped; a stanza with no
+     * `Types:` is disabled by definition. `Types:` is matched TOKEN-wise, not by
+     * substring: `deb-src` (source packages only) must NOT count as `deb`, or a
+     * rootfs apt cannot fetch binaries from would be reported healthy.
+     * One line per returned URI so the caller's counts stay meaningful.
+     */
+    private fun deb822Uris(file: File): List<String> {
+        val text = runCatching { file.readText() }.getOrDefault("")
+        return text.split("\n\n", "\r\n\r\n")
+            .map { stanza ->
+                stanza.lineSequence()
+                    .map { it.trimEnd('\r') }
+                    .filter { it.isNotBlank() && !it.trimStart().startsWith("#") }
+                    .toList()
+            }
+            .filter { lines -> lines.any { it.fieldIs("Types") && it.fieldValue().hasDebType() } }
+            .flatMap { lines -> lines.filter { it.fieldIs("URIs") }.flatMap { it.fieldValue().split(WHITESPACE) } }
+            .filter { it.isNotBlank() }
+    }
+
+    /** True when a whitespace-separated `Types:` value contains the binary `deb` token. */
+    private fun String.hasDebType(): Boolean = split(WHITESPACE).any { it.equals("deb", ignoreCase = true) }
+
+    /** True when this deb822 line's field name is [name] (case-insensitive, per the spec). */
+    private fun String.fieldIs(name: String): Boolean =
+        substringBefore(':', "").trim().equals(name, ignoreCase = true)
+
+    /** Everything after the first ':' on a deb822 line, trimmed. */
+    private fun String.fieldValue(): String = substringAfter(':', "").trim()
 
     /** 5. Guest DNS: a real, non-empty resolv.conf (provision rewrites it anyway, so a bad state is a warning). */
     private fun checkResolvConf(rootfsDir: File): DoctorCheck {

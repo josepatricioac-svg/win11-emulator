@@ -93,21 +93,37 @@ the X11 core protocol; the ones the server dispatches are pinned by `XProtocolTe
 
 No new libraries: `HttpURLConnection`, `MessageDigest` and the Storage Access Framework
 (`OpenDocument`) only. The manifest pins these artifacts; hashes were read from the
-publishers' own checksum data on **2026-10-07**:
+publishers' own checksum data and **re-verified by downloading each artifact on
+2026-10-15** (all four returned HTTP 200 with a byte-exact SHA-256 match):
 
 | Artifact | Source of the hash | SHA-256 | Size |
 | --- | --- | --- | --- |
-| `ubuntu-base-22.04.5-base-arm64.tar.gz` | `https://cdimage.ubuntu.com/ubuntu-base/releases/22.04.5/release/SHA256SUMS` | `075d4abd2817a5023ab0a82f5cb314c5ec0aa64a9c0b40fd3154ca3bfdae979f` | 27,671,306 B |
+| `ubuntu-base-24.04.5-base-arm64.tar.gz` | `https://cdimage.ubuntu.com/ubuntu-base/releases/24.04.5/release/SHA256SUMS` | `a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2` | 29,936,675 B |
 | `wine64_9.0~repack-4build3_arm64.deb` | Ubuntu `noble/universe/binary-arm64` `Packages` index, SHA256 field | `d44c0266f404ad59944ef7245d3162affa6415ee58193c5fa7cdc1aa105a46bd` | 244,164 B |
 | `wine_9.0~repack-4build3_all.deb` | same index | `5606f0f5677ac0fb882e3fdc8ce03a60232cdf2930e912ed3e42db2b9e0d5f7f` | 51,966 B |
-| `firefox-140.17.0esr.tar.xz` (linux-aarch64) | Mozilla's own `SHA512SUMS` for the 140.17.0esr release verified the download (SHA-512 `6cac72ee…fba2a3366f…` matched); the SHA-256 pin was then computed from that verified tarball. Retrieved **2026-10-10** from `https://archive.mozilla.org/pub/firefox/releases/140.17.0esr/linux-aarch64/en-US/` | `dd579f48405a7065f0f643ddb71a8de0f48a9d984c2783dee2ca173081850084` | 66,921,712 B |
+| `firefox-153.5.0esr.tar.xz` (linux-aarch64) | Mozilla's own `SHA512SUMS` for the 153.5.0esr release verified the download (SHA-512 `8e8635cc…01bc5a54` matched byte-for-byte); the SHA-256 pin was then computed from that verified tarball. Retrieved **2026-10-15** from `https://archive.mozilla.org/pub/firefox/releases/153.5.0esr/linux-aarch64/en-US/` | `6579949c1d2d98f0d045cec780fa24752b57984f6e52d189ccfe003cf97f3d0b` | 74,115,684 B |
+
+**The rootfs and the Wine `.deb`s must be the SAME Ubuntu release.** The rootfs was
+22.04.5 (jammy) while both Wine debs above are **noble** builds: `wine64` declares
+`Depends: libc6 (>= 2.38)` and jammy ships libc6 2.35, so that dependency could never be
+satisfied - `dpkg -i` failed, `apt-get -f install` could not repair it (jammy's own wine64
+is 6.0.3, a different package), no Wine payload ever landed, `wineboot` could not run, and
+no prefix could be created. That surfaced as a misleading *"Wine prefix not found"*. The
+rootfs is now noble 24.04.5 (libc6 2.39), which is the release these debs were built for.
+A test (`RuntimeTest`) now pins the pairing so the two cannot drift apart again.
+
+Firefox ESR moved 140.17.0esr -> **153.5.0esr**: 153 is the current ESR branch (per
+Mozilla's `product-details` `FIREFOX_ESR`), and 140.17.0esr is the last release of a branch
+now past its security-support window. The linux-aarch64 build needs only GLIBC >= 2.28
+(highest versioned symbol in `libxul.so`), so it is comfortable on noble's glibc 2.39.
 
 Licences: Ubuntu base rootfs is a collection of packages under their own licences
 (mostly GPL-2.0+/LGPL-2.1+/MIT/BSD); Wine is LGPL-2.1+; **Firefox ESR is MPL-2.0**.
 They are **downloaded at runtime from the publisher**, never redistributed inside this
 APK, so no source-offer duty attaches to the APK itself. The two Wine `.deb`s are the
-loader/front-end packages only — the real payload (`wine-development` plus its library
-tree) still has to be provisioned inside the rootfs, which is why they are flagged
+loader/front-end packages only — the real payload (`libwine`, which carries `wineboot` and
+every builtin DLL, plus its library tree) still has to be provisioned inside the rootfs,
+which is why they are flagged
 `incompleteAlone` in the UI. Mozilla's Firefox tarball is self-contained (bundles its
 own libs) but links the rootfs's GTK3/dbus-glib/ALSA stack, which the bare Ubuntu base
 does not ship — the readiness check reports that provisioning step explicitly instead
@@ -134,7 +150,7 @@ No new libraries: `ContainerService` uses `androidx.core` (`NotificationCompat`,
 | `libtalloc.so` | Termux `libtalloc_2.5.0_aarch64.deb` (deb sha256 `556591f43bb773ad8777e1a29522640866a55f95dab71914418b94a8c58ad5a7`), talloc 2.5.0 from samba.org; SONAME respelled `libtalloc.so.2`→`libtalloc.so` (same-length byte patch in `.dynstr`) | LGPL-3.0+ | `160d39bc0d7ed946f22310d1d6f20addda21b02b0972dffe929fe49951543941` | vendored; proot's only dynamic dep besides libc/libdl |
 | `libbox64.so` | box64 (ptitSeb), tag `v0.4.4`, built by `.github/workflows/build-native.yml` (NDK, `-DANDROID=ON -DARM_DYNAREC=ON -DANDROID_PLATFORM=android-28`, RelWithDebInfo, `llvm-strip`ped), auto-committed 2026-10-12 (`fe5e346`) | MIT | `bec2a61f2c2bee8607d41e6d5b992580ccb9cad878cc6e0a255f539957823710` | vendored; only x86/x64 Wine guests exec it (the native arm64 Firefox path does not) |
 | `libproot-loader32.so` | proot | **GPL-2.0** | — | deliberately not built (arm64-only rootfs); optional role |
-| Ubuntu 22.04 arm64 rootfs, Wine 9.x, Firefox ESR | R3 runtime download | per-package / LGPL-2.1+ / MPL-2.0 | pinned in `RuntimeManifest` | not bundled in the APK |
+| Ubuntu 24.04 arm64 rootfs, Wine 9.x, Firefox ESR | R3 runtime download | per-package / LGPL-2.1+ / MPL-2.0 | pinned in `RuntimeManifest` | not bundled in the APK |
 
 **Library addition (R3 extraction):** `org.tukaani:xz:1.10` (xz-java) — **public domain** —
 pure-Java XZ/LZMA2 decoder, because the JDK has gzip but no xz and Mozilla ships
@@ -163,7 +179,7 @@ the GPL licence text and a source offer, which must accompany the vendored artef
 
 ## Planned (not yet in the APK)
 
-proot, Box64, Wine, an Ubuntu 22.04 arm64 rootfs, an X server implementation,
+proot, Box64, Wine, an Ubuntu 24.04 arm64 rootfs, an X server implementation,
 PulseAudio, Liberation/Carlito/Caladea/Noto fonts — licences to be recorded here
 when they land (steps R1–R4, D1–D2, P1). GPL/LGPL components will be discussed
 before being added.

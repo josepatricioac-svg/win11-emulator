@@ -34,17 +34,30 @@ object RootfsProvisioner {
     /** How many trailing apt lines a failure reports in the card and the shared log. */
     const val TAIL_LINES = 30
 
-    /** The Firefox ESR runtime set; apt resolves the transitive closure. */
+    /**
+     * The Firefox ESR runtime set; apt resolves the transitive closure.
+     *
+     * Names are for the **noble (24.04)** rootfs, which is what [RuntimeManifest.ROOTFS]
+     * pins. Noble completed the 64-bit `time_t` transition, so three of these packages
+     * were RENAMED with a `t64` suffix and the jammy names no longer exist there:
+     * `libgtk-3-0` -> `libgtk-3-0t64`, `libasound2` -> `libasound2t64`,
+     * `libxt6` -> `libxt6t64`. Verified against the noble main+universe binary-arm64
+     * `Packages` index on 2026-10-15 (the jammy names return nothing). One wrong name
+     * fails the WHOLE `apt-get install` with exit 100 - that is exactly what
+     * `libdbus-glib-1-2-2` did on a real device - so this list is pinned by
+     * `RuntimeTest` and must be re-verified against the index whenever the rootfs
+     * release changes.
+     */
     val BROWSER_PACKAGES = listOf(
-        "libgtk-3-0", // GTK3 + gdk-pixbuf, pango, cairo, atk, the X11 libs...
+        "libgtk-3-0t64", // GTK3 + gdk-pixbuf, pango, cairo, atk, the X11 libs... (noble: t64)
         // libdbus-glib-1-2 (NOT libdbus-glib-1-2-2: the "-N" suffix convention of
-        // libdbus-1-3 does not carry over - verified against the jammy arm64 index
-        // on 2026-10-12, where the suffixed name does not exist and one bad name
-        // made the whole apt-get install fail with exit 100).
+        // libdbus-1-3 does not carry over - verified against the arm64 index, where the
+        // suffixed name does not exist and one bad name made the whole apt-get install
+        // fail with exit 100). Unchanged by the t64 transition.
         "libdbus-glib-1-2", // Firefox's D-Bus bindings
         "libdbus-1-3",
-        "libasound2", // audio backend (PulseAudio bridge arrives with P1)
-        "libxt6", // X Toolkit, still used by Gecko
+        "libasound2t64", // audio backend (noble: t64; PulseAudio bridge arrives with P1)
+        "libxt6t64", // X Toolkit, still used by Gecko (noble: t64)
         "libx11-xcb1",
         "libegl1", // probed by Gecko; software rendering falls back cleanly
         "libgl1",
@@ -53,7 +66,7 @@ object RootfsProvisioner {
         // gtk-query-settings: the self-test's GTK3 probe. xeyes/xclock are core X11
         // and Xaw, so they can pass while GTK3 - the toolkit Firefox is built on -
         // still dies opening the display. This one binary (a few hundred KB, and its
-        // only dependency is the libgtk-3-0 already listed) calls gtk_init() and
+        // only dependency is the libgtk-3-0t64 already listed) calls gtk_init() and
         // prints GTK's own diagnosis when the server answers something it cannot use.
         "libgtk-3-bin",
         // The guest window manager: the X server runs pass-through (the shell

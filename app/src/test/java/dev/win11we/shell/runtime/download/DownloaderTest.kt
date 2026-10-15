@@ -213,7 +213,7 @@ class DownloaderTest {
             assertTrue(artifact.requiredFreeBytes > artifact.sizeBytes / 2)
             assertEquals(artifact, RuntimeManifest.byId(artifact.id))
         }
-        assertEquals("ubuntu-base-22.04.5-base-arm64.tar.gz", RuntimeManifest.ROOTFS.fileName)
+        assertEquals("ubuntu-base-24.04.5-base-arm64.tar.gz", RuntimeManifest.ROOTFS.fileName)
         assertTrue(RuntimeManifest.ROOTFS.url.startsWith("https://cdimage.ubuntu.com/"))
         RuntimeManifest.ALL.forEach { artifact ->
             assertTrue("${artifact.id} must be https", artifact.url.startsWith("https://"))
@@ -226,7 +226,7 @@ class DownloaderTest {
     fun `size formatting is readable`() {
         assertEquals("512 B", DownloadSession.formatBytes(512))
         assertEquals("27 KB", DownloadSession.formatBytes(27 * 1024))
-        assertEquals("26.4 MB", DownloadSession.formatBytes(27_671_306))
+        assertEquals("28.5 MB", DownloadSession.formatBytes(29_936_675))
         assertEquals("1.50 GB", DownloadSession.formatBytes(1536L * 1024 * 1024))
     }
 }

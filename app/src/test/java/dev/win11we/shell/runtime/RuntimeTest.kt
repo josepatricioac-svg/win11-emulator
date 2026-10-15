@@ -1,5 +1,6 @@
 package dev.win11we.shell.runtime
 
+import dev.win11we.shell.runtime.download.RuntimeManifest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.fail
@@ -393,18 +394,22 @@ class ProotCommandTest {
     }
 
     @Test
-    fun `the pinned package list is exactly the names verified against jammy arm64`() {
+    fun `the pinned package list is exactly the names verified against noble arm64`() {
         // One wrong name fails the whole apt-get install (exit 100, "Unable to locate
         // package"), which is what libdbus-glib-1-2-2 did on a real device. Every name
-        // here was checked against the jammy main+universe binary-arm64 Packages index
-        // on 2026-10-12; changing the list means re-checking and editing this pin.
+        // here was checked against the NOBLE (24.04) main+universe binary-arm64 Packages
+        // index on 2026-10-15; changing the list means re-checking and editing this pin.
+        //
+        // The three *t64 names are the 24.04 64-bit-time_t transition renames: jammy's
+        // libgtk-3-0 / libasound2 / libxt6 DO NOT EXIST in noble, so shipping the jammy
+        // names against the noble rootfs failed the entire install with exit 100.
         assertEquals(
             listOf(
-                "libgtk-3-0",
+                "libgtk-3-0t64",
                 "libdbus-glib-1-2",
                 "libdbus-1-3",
-                "libasound2",
-                "libxt6",
+                "libasound2t64",
+                "libxt6t64",
                 "libx11-xcb1",
                 "libegl1",
                 "libgl1",
@@ -421,6 +426,33 @@ class ProotCommandTest {
             ),
             RootfsProvisioner.BROWSER_PACKAGES,
         )
+    }
+
+    @Test
+    fun `the pinned rootfs and the pinned Wine debs are the SAME Ubuntu release`() {
+        // The bug this pins shut: the rootfs was jammy (22.04, libc6 2.35) while the two
+        // Wine debs were noble builds declaring "libc6 (>= 2.38)". That dependency is
+        // unsatisfiable on jammy, so dpkg -i failed, apt -f could not repair it, no Wine
+        // payload ever landed, wineboot could not run, and the user saw a misleading
+        // "Wine prefix not found". A release mismatch is not visible in either pin alone,
+        // so assert the pairing itself: one rootfs URL, and Wine from the matching suite.
+        val rootfs = RuntimeManifest.ROOTFS
+        assertTrue(
+            "rootfs must be the noble (24.04) base image, got ${rootfs.url}",
+            rootfs.url.contains("/ubuntu-base/releases/24.04"),
+        )
+        assertTrue(rootfs.label.contains("24.04"))
+        listOf(RuntimeManifest.WINE64_DEB, RuntimeManifest.WINE_ALL_DEB).forEach { deb ->
+            assertTrue(
+                "${deb.id} must come from the noble pool (same release as the rootfs), got ${deb.url}",
+                deb.url.contains("/pool/universe/w/wine/"),
+            )
+            assertTrue(
+                "${deb.id} is a 9.0~repack-4build3 build, which is noble's wine; a jammy wine " +
+                    "would be 6.0.3 and would not match the rootfs",
+                deb.url.contains("9.0~repack-4build3"),
+            )
+        }
     }
 
     @Test

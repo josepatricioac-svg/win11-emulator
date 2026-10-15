@@ -47,23 +47,41 @@ data class Artifact(
  */
 object RuntimeManifest {
 
-    /** Ubuntu 22.04.5 base rootfs, arm64. Hash from Ubuntu's published SHA256SUMS. */
+    /**
+     * Ubuntu 24.04.5 (noble) base rootfs, arm64. Hash from Ubuntu's published SHA256SUMS
+     * for the 24.04.5 release (retrieved 2026-10-15, download verified byte-for-byte).
+     *
+     * WHY 24.04 AND NOT 22.04 - the two pinned Wine `.deb`s below are **noble** builds:
+     * `wine64` declares `Depends: libc6 (>= 2.38)`, and jammy (22.04) ships libc6 2.35.
+     * On a jammy rootfs that dependency is unsatisfiable, so `dpkg -i` fails and
+     * `apt-get -f install` cannot repair it (jammy's own wine64 is 6.0.3, a different
+     * package). No Wine payload then ever lands in the rootfs, so `wineboot` cannot run,
+     * so no prefix can be created - which surfaces as the misleading
+     * "Wine prefix not found" refusal. Noble ships libc6 2.39 and wine 9.0~repack-4build3,
+     * i.e. exactly the pinned debs. The rootfs and the Wine payload must be one release.
+     */
     val ROOTFS = Artifact(
         id = "rootfs",
-        label = "Ubuntu 22.04.5 base rootfs (arm64)",
-        url = "https://cdimage.ubuntu.com/ubuntu-base/releases/22.04.5/release/" +
-            "ubuntu-base-22.04.5-base-arm64.tar.gz",
-        sha256 = "075d4abd2817a5023ab0a82f5cb314c5ec0aa64a9c0b40fd3154ca3bfdae979f",
-        sizeBytes = 27_671_306L,
-        requiredFreeBytes = 1_500L * 1024 * 1024, // ~26 MB file, ~1.4 GB unpacked
+        label = "Ubuntu 24.04.5 base rootfs (arm64)",
+        url = "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04.5/release/" +
+            "ubuntu-base-24.04.5-base-arm64.tar.gz",
+        sha256 = "a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2",
+        sizeBytes = 29_936_675L,
+        requiredFreeBytes = 1_500L * 1024 * 1024, // ~29 MB file, ~1.5 GB unpacked
         description = "The glibc userland proot jails into. Unpacked with tar into <files>/rootfs.",
     )
 
     /**
-     * Ubuntu 24.04's Wine 9.0 arm64 loader packages. Hashes from the archive's own
-     * `Packages` index (SHA256 field). [Artifact.incompleteAlone] is true: these are the
-     * front-ends, the real payload (`wine-development` + libraries) and their dependency
-     * tree still have to be provisioned inside the rootfs (R4/P2).
+     * Ubuntu 24.04's Wine 9.0 arm64 loader packages - the SAME release as [ROOTFS], which
+     * is what makes them installable (see ROOTFS's note on `libc6 (>= 2.38)`). Hashes from
+     * the noble archive's own `Packages` index (SHA256 field).
+     *
+     * [Artifact.incompleteAlone] is true, and worth being precise about: `wine64` carries
+     * ONLY the binary loader (`/usr/lib/wine/wine64`, `/usr/lib/wine/wineserver64`). The
+     * real payload - `libwine (= 9.0~repack-4build3)`, which is where `wineboot` and every
+     * builtin DLL live - is a hard dependency resolved by apt from the noble archive. A
+     * prefix cannot be built without it, so a Wine install that only unpacked these two
+     * debs would still fail at `wineboot`.
      */
     val WINE64_DEB = Artifact(
         id = "wine64-deb",
@@ -72,7 +90,8 @@ object RuntimeManifest {
         sha256 = "d44c0266f404ad59944ef7245d3162affa6415ee58193c5fa7cdc1aa105a46bd",
         sizeBytes = 244_164L,
         requiredFreeBytes = 200L * 1024 * 1024,
-        description = "Wine 9.x arm64 loader. Needs wine-development and its libraries inside the rootfs.",
+        description = "Wine 9.x arm64 binary loader. Depends on libc6 (>= 2.38) and libwine, which apt " +
+            "resolves inside the rootfs - libwine is where wineboot and the builtins live.",
         incompleteAlone = true,
     )
 
@@ -88,21 +107,27 @@ object RuntimeManifest {
     )
 
     /**
-     * Mozilla's official self-contained Firefox ESR for linux-aarch64 (bundles its
-     * own libs; links the rootfs's GTK3 stack). The SHA-256 was computed from the
-     * release tarball after its SHA-512 was verified against Mozilla's own
-     * `SHA512SUMS` file for 140.17.0esr (retrieved 2026-10-10; see
-     * docs/THIRD_PARTY.md). Unpacked with the guest's tar+xz to
+     * Firefox ESR for linux-aarch64: Mozilla's official self-contained build (bundles its
+     * own libs; links the rootfs's GTK3 stack). 153.5.0esr is the CURRENT ESR branch as of
+     * 2026-10-15 (per Mozilla's product-details `FIREFOX_ESR`); the previously pinned
+     * 140.17.0esr is the last release of a branch that is now past its security-support
+     * window, so staying on it meant shipping a browser that no longer receives fixes.
+     *
+     * The SHA-256 was computed from the release tarball AFTER its SHA-512 was verified
+     * byte-for-byte against Mozilla's own `SHA512SUMS` for 153.5.0esr
+     * (`8e8635cc…01bc5a54`, retrieved 2026-10-15; see docs/THIRD_PARTY.md). The build
+     * needs only GLIBC >= 2.28 (highest versioned symbol in `libxul.so`), so it is happy
+     * on the noble rootfs's glibc 2.39. Unpacked with the guest's tar+xz to
      * `<rootfs>/opt/firefox-esr` (tarball root `firefox/` stripped).
      */
     val FIREFOX_ESR = Artifact(
         id = "firefox-esr",
-        label = "Firefox ESR 140.17.0 (linux-aarch64)",
-        url = "https://archive.mozilla.org/pub/firefox/releases/140.17.0esr/" +
-            "linux-aarch64/en-US/firefox-140.17.0esr.tar.xz",
-        sha256 = "dd579f48405a7065f0f643ddb71a8de0f48a9d984c2783dee2ca173081850084",
-        sizeBytes = 66_921_712L,
-        requiredFreeBytes = 500L * 1024 * 1024, // ~64 MB file, ~260 MB unpacked
+        label = "Firefox ESR 153.5.0 (linux-aarch64)",
+        url = "https://archive.mozilla.org/pub/firefox/releases/153.5.0esr/" +
+            "linux-aarch64/en-US/firefox-153.5.0esr.tar.xz",
+        sha256 = "6579949c1d2d98f0d045cec780fa24752b57984f6e52d189ccfe003cf97f3d0b",
+        sizeBytes = 74_115_684L,
+        requiredFreeBytes = 550L * 1024 * 1024, // ~71 MB file, ~290 MB unpacked
         description = "The desktop browser engine: unpacks into the rootfs, runs under proot on the " +
             "shell's X server (:100). Needs the rootfs GUI libraries (same provisioning step as Wine).",
         incompleteAlone = true,

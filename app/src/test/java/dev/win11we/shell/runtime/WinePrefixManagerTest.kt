@@ -52,9 +52,20 @@ class WinePrefixManagerTest {
     private lateinit var prefix: File
     private lateinit var container: Container
 
+    /**
+     * A FAITHFUL noble arm64 Wine payload, matching the real .deb contents rather than
+     * a single made-up file: the loader from `wine64` at /usr/lib/wine/wine64, and the
+     * `libwine` half that actually carries wineboot + the builtins
+     * (/usr/lib/wine/wineserver and /usr/lib/aarch64-linux-gnu/wine). A fixture with the
+     * loader alone would pass a file check yet could never run wineboot - which is the
+     * exact gap [WinePayload.payloadGap] exists to name.
+     */
     private fun writeWinePayload() {
-        File(rootfs, "usr/bin").mkdirs()
-        File(rootfs, "usr/bin/wine64").writeText("#!/bin/sh\n")
+        File(rootfs, "usr/lib/wine").mkdirs()
+        File(rootfs, "usr/lib/wine/wine64").writeText("elf")
+        File(rootfs, "usr/lib/wine/wineserver").writeText("#!/bin/sh\n")
+        File(rootfs, "usr/lib/aarch64-linux-gnu/wine/aarch64-unix").mkdirs()
+        File(rootfs, "usr/lib/aarch64-linux-gnu/wine/aarch64-unix/wineboot.exe.so").writeText("elf")
     }
 
     private fun writeHealthyPrefix(dir: File = prefix, arch: String = "win64") {
@@ -223,7 +234,7 @@ class WinePrefixManagerTest {
         val result = WinePrefixManager.create(NativeBinaries(tmp.newFolder("lib")), rootfs, container, ":100")
         assertFalse(result.success)
         assertNull(result.state)
-        assertTrue(result.message.contains("No Wine payload"))
+        assertTrue(result.message, result.message.contains("No usable Wine payload"))
         assertTrue(result.message.contains("Install Wine payload"))
     }
 

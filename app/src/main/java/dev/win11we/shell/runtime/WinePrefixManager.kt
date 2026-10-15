@@ -268,11 +268,12 @@ object WinePrefixManager {
         timeoutMillis: Long = 10 * 60 * 1000L,
     ): PrefixOpResult {
         val prefixDir = File(container.prefixPath)
-        if (WinePayload.launcherIn(rootfsDir) == null) {
+        val gap = WinePayload.payloadGap(rootfsDir)
+        if (gap != null) {
             return PrefixOpResult(
                 false, null,
-                "No Wine payload in the rootfs (${WinePayload.CANDIDATES.first()} absent) - " +
-                    "install Wine first (Container Manager ▸ Install Wine payload). wineboot cannot run without it.",
+                "No usable Wine payload in the rootfs: $gap - install Wine first " +
+                    "(Container Manager ▸ Install Wine payload). wineboot cannot run without it.",
             )
         }
         val prepare = binaries.prepare(NativeBinaries.REQUIRED_PROOT_ONLY)

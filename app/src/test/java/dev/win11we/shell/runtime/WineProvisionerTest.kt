@@ -144,18 +144,25 @@ class WineProvisionerTest {
         val runner = FakeProot()
         val result = WineProvisioner.provision(binaries(), rootfs, filesDir, downloadDir, LogBuffer(), runner)
         assertFalse(result.success)
-        assertTrue(result.message.contains("no Wine launcher"))
+        assertTrue(result.message, result.message.contains("no Wine loader"))
     }
 
     @Test
     fun `provision succeeds when the payload lands on disk`() {
         val runner = FakeProot(onRealRun = {
-            File(rootfs, "usr/bin/wine64").writeText("#!/bin/sh\n")
+            // What apt/dpkg really leave behind for wine64 + libwine on noble arm64:
+            // the loader in /usr/lib/wine (NOT /usr/bin - Ubuntu ships no
+            // /usr/bin/wine64) plus libwine's wineserver wrapper and builtin tree,
+            // without which wineboot cannot run and no prefix can be built.
+            File(rootfs, "usr/lib/wine").mkdirs()
+            File(rootfs, "usr/lib/wine/wine64").writeText("elf")
+            File(rootfs, "usr/lib/wine/wineserver").writeText("#!/bin/sh\n")
+            File(rootfs, "usr/lib/aarch64-linux-gnu/wine").mkdirs()
         })
         val log = LogBuffer()
         val result = WineProvisioner.provision(binaries(), rootfs, filesDir, downloadDir, log, runner)
         assertTrue(result.message, result.success)
-        assertTrue(result.message.contains("wine64"))
+        assertTrue(result.message, result.message.contains("usr/lib/wine/wine64"))
         assertTrue(log.tail(50).contains("Wine payload ready"))
         // The real pass really ran through the shared fake-root prefix (one apt command).
         assertTrue(runner.commands.any { it.last().contains("dpkg --configure -a") })
