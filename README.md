@@ -236,7 +236,7 @@ fails if that ever changes silently:
 | Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Firefox ESR is **fully plumbed and hardened**: pinned R3 artifact, readiness checks that name the missing piece, proot launch plan through R2's launcher on the shell's X server, a private D-Bus session so a second URL reaches the *running* instance, a Provision **doctor**, and the Phase-2A fixes: `/dev/shm` bind (1777), `PROOT_NO_SECCOMP=1`, sandbox-off env, software-rendering prefs (the no-GLX white-screen guard), resolv.conf DNS. Chromium/Electron **under Wine** get the same class of fixes as a pure launch plan (`WineBrowserLaunch`: `--no-sandbox --disable-gpu --disable-dev-shm-usage --disable-setuid-sandbox …` on `:100`). Until the runtime is provisioned on-device, Open refuses with the named missing step (Android-browser fallback was removed - nothing leaves the emulator); Edge/Chromium stay listed with their gating steps | device provisioning (Firefox ESR), **R1/R2/R3 + D2 + BYO installer** (Edge/Chromium) |
 | Terminal `wine`/`box64`/`proot`/`cmd` | Answer "not available yet" and name the step | R2 pty executor |
 | Task Manager container rows | Absent (no processes to show) | R2 |
-| Diagnostics wine64 self-test | Command lines are built and shown, not executed; the `proot --version` and `box64 --version` probes have real vendored binaries to run | wine provisioning (payload + prefix) |
+| Diagnostics Wine self-test rows | `box64 --version` really runs against the vendored binary. The two Wine rows really exec the provisioned payload's real loader (`/usr/lib/wine/wine64 --version`, `… cmd /c echo hello` with the output asserted), and **SKIP with the reason named** - no rootfs, or no Wine payload ("Install Wine payload") - instead of failing as a mystery red exit-127 | wine provisioning (payload + prefix) |
 
 The native payload is **fully vendored**: `libproot.so` + `libproot-loader.so`
 (termux/proot `v5.1.107.96`, GPL-2.0, owner-approved for the browser milestone, exec'd
@@ -283,9 +283,10 @@ block. A summary card reports `n passed, n failed, n skipped` and refuses to cla
 written to the shared log (Terminal ▸ `log`).
 
 The rule the tests enforce: a step whose prerequisites are missing is **skipped with the
-reason named** (no `libbox64.so`, no `libproot.so`, no rootfs, rootfs not unpacked) and
-never counted as a pass — and `wine64 cmd /c echo hello` must actually print `hello`; a
-zero exit code without the output is a failure.
+reason named** (no `libbox64.so`, no `libproot.so`, no rootfs, rootfs not unpacked, no Wine
+payload in the rootfs) and never counted as a pass — and `wine64 cmd /c echo hello` (the
+payload's resolved loader path, box64 only for an x86_64 payload) must actually print
+`hello`; a zero exit code without the output is a failure.
 
 ## Runtime download (R3)
 
@@ -345,9 +346,14 @@ unit-tested with a fake `ProcessLauncher`:
    (which includes the fail-closed SHA-256 verdicts), `ROOTFS_MISSING`, `PREFIX_MISSING`,
    `NO_COMMAND`, `ALREADY_RUNNING`, `SPAWN_FAILED`.
 2. **Build the command**: `proot -r <rootfs> --link2symlink --kill-on-exit
-   -b <prefix>:/root/.wine -b <drive>:/mnt/<letter> … -w /root -- box64 wine64 cmd`
-   (short options on purpose: the vendored termux/proot rejects a detached `--rootfs <path>`).
-   box64 is inserted only for Windows payloads (`wine*`, `*.exe`), not for native commands.
+   -b <prefix>:/root/.wine -b <drive>:/mnt/<letter> … -w /root /usr/lib/wine/wine64 cmd`
+   (short options on purpose: the vendored termux/proot rejects a detached `--rootfs <path>`
+   and has no `--` marker). Wine commands are **payload-driven**: a bare `wine64` - which
+   Ubuntu never puts on the guest PATH (no alternatives entry; the pinned debs install
+   `/usr/lib/wine/wine64`) - is resolved to the provisioned loader's real guest path, and
+   box64 is placed in front ONLY when that loader's ELF header says x86_64. The pinned
+   arm64-native Wine payload runs without box64, which cannot carry an aarch64 ELF; the
+   legacy `.exe` rule and native commands are unchanged.
 3. **Build the environment**: `WineEnvironment.build()` plus this container's
    `PROOT_LOADER`/`PROOT_LOADER_32`, sorted so Diagnostics can diff it.
 4. **Stream** stdout/stderr into the shared `LogBuffer` (Terminal `log` and Diagnostics
@@ -483,6 +489,11 @@ whole lifetime belongs to this process:
 - **Input/clipboard sync**: touch/mouse/keyboard/IME flow Compose → `XInput` →
   connections in-process (no sockets through the UI, no second focus), and the
   P1 clipboard bridge ties Android's clipboard to PRIMARY/CLIPBOARD.
+- **Android 12+ phantom-process killer**: guest processes are children of the
+  app uid and count against the system's phantom cap (surplus gets SIGKILLed).
+  The app keeps the count low (E10S off, one session at a time,
+  `--kill-on-exit`, the stop order above); the risk, the optional user-side
+  adb toggles and the symptom mapping are documented in `docs/WINE_RUNTIME.md` §7.
 
 ## Terminal
 

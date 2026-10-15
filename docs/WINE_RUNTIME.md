@@ -13,11 +13,13 @@ that has not been certified there.
 pinned Wine 9.0 debs (R3 download)          <files>/downloads/wine*.deb
         │  WineProvisioner  (dpkg -i + apt -f, or apt fallback; disk-verified)
         ▼
-rootfs payload                               <rootfs>/usr/bin/wine64
-        │  WinePrefixManager.create  (wineboot --init && wineserver -w)
+rootfs payload                               <rootfs>/usr/lib/wine/wine64  (the pinned debs
+        │  WinePrefixManager.create           install NO /usr/bin entry; the alternatives
+        │  (wineboot --init && wineserver -w)  cover wine/wineboot/wineserver, not wine64)
         ▼
 ONE isolated prefix per container            <files>/containers/<id>/prefix
-        │  ContainerLauncher (validate → proot → box64 → wine64 …)
+        │  ContainerLauncher (validate → proot → [box64 ONLY for an x86_64
+        │   payload - ELF-header rule] → the resolved wine loader …)
         ▼
 guest windows on the embedded display        DISPLAY=:100  (x11/, in-process)
 ```
@@ -145,7 +147,8 @@ unit-tested): the hardened argv (`--no-sandbox`, `--disable-setuid-sandbox`,
 each flag mapped to its named failure mode in the KDoc; `environmentAdditions()`
 (CHROME_DEVEL_SANDBOX pointed at a path that must not exist); and
 `request(...)` composing the complete `RuntimeRequest` (container's isolated
-prefix, box64 auto-inserted by the launcher, DNS + shm binds). This is the
+prefix, the symbolic `wine64` loader resolved at spawn - box64 only for an
+x86_64 payload, per the ELF-header rule - , DNS + shm binds). This is the
 launch plan the BYO-installer step (PIPELINE_PLAN step 4, Edge/Chromium)
 executes; installing the browser .exe into a prefix has no UI yet, and nothing
 pretends otherwise.
@@ -171,12 +174,16 @@ remains the authoritative gate.
 2. Settings ▸ Storage ▸ Runtime download: ROOTFS + FIREFOX_ESR + both WINE
    debs → extract → Provision (browser stack).
 3. Container Manager: **Install Wine payload** → expect "Wine payload ready at
-   …/usr/bin/wine64" (Terminal ▸ log carries the dpkg/apt lines).
+   …/usr/lib/wine/wine64" (the pinned debs' real loader path - Ubuntu installs
+   no /usr/bin entry; Terminal ▸ log carries the dpkg/apt lines).
 4. Container Manager ▸ create container "Office" ▸ **Initialize prefix** →
    expect state chip **Ready** (first run: wineboot on arm64-native Wine, tens
    of seconds). Diagnostics ▸ Run self-test: rows 2/3 (`wine64 --version`,
-   `wine64 cmd /c echo hello`) must now PASS — they were SKIPPED before.
-5. Start the container → `wine64 cmd` window on :100; `echo hello` inside.
+   `wine64 cmd /c echo hello` - both exec'ing the RESOLVED loader path, no
+   box64 in front of the native arm64 payload) must now PASS — before the
+   payload exists they SKIP with the reason named.
+5. Start the container → a `cmd` window on :100 (the launch line in Terminal ▸
+   log shows the resolved `/usr/lib/wine/wine64`); `echo hello` inside.
 6. Browser ▸ Firefox ESR ▸ open example.com: the session pill shows the launch
    (and, until the first window maps, "N client(s) connected, no window mapped
    yet"), then **Firefox opens as its own shell window** - drag it, resize it
@@ -190,3 +197,55 @@ remains the authoritative gate.
    again — this is the corruption round-trip.
 8. Anything failing: Terminal ▸ log + the protocol-trace lines + the row's
    exact command, as always.
+
+## 7. The Android phantom-process killer (Android 12+) — known risk, documented on purpose
+
+Android 12 (API 31) added **phantom process monitoring**: child processes of an
+app's uid that are not themselves app processes are tracked by
+`ActivityManager`, and once their number passes a system cap (stock: 32,
+counting the app's own processes) the surplus is **SIGKILLed**; some builds
+also kill phantoms for excess CPU. The rule exists to stop runaway process
+trees from draining the battery — and a proot emulator is exactly what it
+watches for. The app's own foreground-service state lowers the *app* process's
+oom_adj but does **not** exempt phantom children.
+
+Why this app is exposed: every guest process is a child of the app uid — the
+proot supervisor(s), the guest tree (`bash`, `dbus-daemon`, Firefox or
+`wineserver` + one process per Windows app). A multi-process Firefox or a Wine
+prefix running several apps can approach the cap on its own; exceeding it
+looks, from inside the app, like "the session died" — SIGKILL leaves no exit
+path the app can log beyond the child disappearing.
+
+What the app already does to keep the count low (each is a real mitigation,
+not a promise):
+
+- `MOZ_FORCE_DISABLE_E10S=1` — Firefox ESR collapses to one process instead of
+  a parent + content + GPU + socket tree (this was a first-load speed fix; it
+  is also the single biggest phantom-count saving).
+- One guest session at a time (the browser session refuses `ALREADY_RUNNING`
+  rather than stacking a second Firefox tree).
+- proot `--kill-on-exit` + the `SessionLifecycle` stop order (`wineserver -k`
+  → guests → X server) — no orphans linger to consume the phantom budget
+  after a session ends, and Android reaps the whole cgroup if the app process
+  itself dies.
+- Phase 4 plans (idle SIGSTOP of minimised/background containers, lazy Wine
+  start, configurable idle shutdown) shrink the resident count further.
+
+Optional device-side toggles for users who hit the cap anyway — these need
+`adb` **once, by the user's own choice**; the app itself never requires adb
+(that project rule is about the app's own operation, and stays):
+
+```
+adb shell settings put global settings_enable_monitor_phantom_procs false
+adb shell device_config put activity_manager max_phantom_processes 2147483647
+```
+
+Honest caveats: the first disables the monitor persistently (removing a system
+safety net against runaway children — the user's trade-off to make); the
+second may need re-applying after a reboot on some builds; OEM battery layers
+(Samsung "sleeping apps", MIUI battery saver, …) kill independently of both
+and need their own per-app exemption in the system settings. Symptom mapping
+for a device report: guest windows vanish with no app-level error and
+Terminal ▸ log simply stops mid-stream ⇒ suspect the phantom killer (or the
+OOM reaper — `logcat -b events | grep am_kill` distinguishes them for a user
+who has adb).

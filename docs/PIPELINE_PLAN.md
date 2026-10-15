@@ -87,6 +87,19 @@ arm64-native Wine 9.0 — R4 `cmd /c echo hello` and builtin Notepad run as arm6
 PEs without translation; **real x86_64 Windows apps** need either wine's box64
 integration or an x86_64 wine payload under box64 (Winlator recipe).
 
+**Part-decided (2026-10-16, owner chose "payload-driven"):** the *invocation*
+half is implemented — `WinePayload.guestLauncherPath` resolves the bare
+`wine64` (which Ubuntu never puts on PATH) to the provisioned loader's real
+guest path, and `ContainerLauncher.needsBox64` / `SelfTestRunner` decide box64
+from that loader's ELF `e_machine`: arm64 → native (box64 cannot carry an
+aarch64 ELF), x86_64 → box64 prepended automatically. Wine *sessions* are
+recognised structurally (`guestPrefix == /root/.wine`) so the `wineserver -k`
+sweep no longer depends on the box64 rule. The remaining open half — which
+x86_64 Windows-app payload to pin (wine's own box64 integration vs an x86_64
+wine payload under box64) — is deferred until x86_64 apps are prioritised;
+the day such a payload is provisioned, the ELF rule engages box64 with no
+further launcher work.
+
 Done-when: `wine64 cmd /c echo hello` prints "hello" (output asserted, not exit
 code); `explorer.exe /desktop` opens on :100; Notepad.exe + one real Windows app
 open as shell windows — certified from the owner's device run.

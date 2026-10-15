@@ -7,8 +7,13 @@
 `app/src/main/jniLibs/arm64-v8a/` and **executed in place from `nativeLibraryDir`**:
 
 ```
-applicationInfo.nativeLibraryDir/libproot.so   -r … -b <prefix>:/root/.wine … -- box64 … wine64 …
+applicationInfo.nativeLibraryDir/libproot.so   -r … -b <prefix>:/root/.wine … [box64] /usr/lib/wine/wine64 …
 ```
+
+(the guest command follows the last option directly - this fork has NO `--` marker; box64
+is prepended only when the provisioned Wine loader's ELF header says x86_64, and the bare
+name `wine64` is resolved to the payload's real guest path first - see
+`WinePayload.guestLauncherPath`)
 
 Three build settings make that work and are already in `app/build.gradle.kts`:
 
@@ -98,7 +103,9 @@ Consequences, both enforced in code:
   would misparse (e.g. a guest `-v 1` would be read as proot's own verbose
   option and silently change what runs). Every caller passes an absolute path
   (`/bin/bash`, `/usr/bin/apt-get`, `/opt/firefox-esr/firefox`) or a bare program
-  name (`box64`, `wine64`), which proot resolves through the guest `PATH`.
+  name proot resolves through the guest `PATH` (`box64`, `wineboot`, `wineserver` -
+  but NOT `wine64`: Ubuntu's alternatives do not create it, so wine commands are
+  resolved to the payload's real loader path first, `WinePayload.guestLauncherPath`).
 
 ### How the vendored proot was built (exact recipe, reproduced once in a 1 GB sandbox)
 
@@ -256,7 +263,7 @@ R2 then reuses `ProotCommand.build()` and `WineEnvironment.build()` (with
 | Inventory / permissions / `PrepareResult` | done; `prepare(required)` is now per-launch: box64 is only required for x86/x64 guests (`ContainerLauncher.requiredFor`) |
 | `ProcessRunner` seam + `--version` probes with explicit env | done; probe/self-test environments now carry `LD_LIBRARY_PATH` + `PROOT_LOADER*` (libtalloc resolution) |
 | proot command line incl. fixed prefix bind + extra drives | done; `guestPrefix` parameter added for non-Wine sessions (Firefox binds `/root/.mozilla`) |
-| R4's self-test plan (box64, `wine64 --version`, `wine64 cmd /c echo hello`) | plan built + tested; `proot --version` now really runs once installed; wine steps wait on box64 + wine provisioning |
+| R4's self-test plan (box64, `wine64 --version`, `wine64 cmd /c echo hello`) | plan built + tested; `proot --version` now really runs once installed; the wine rows exec the payload's resolved loader (`ProotCommand.selfTestPlan` requires the path - no bare `wine64` default) and SKIP with the reason named until a payload exists |
 | Diagnostics window | done (now shows the vendored proot set incl. libtalloc) |
 | R2 launch path (validate -> command -> env -> stream -> status) | done; validates the per-guest binary set |
 | R2 `ContainerService` (foreground, Stop all, kills children on destroy) | done; the Firefox session also runs through it |

@@ -359,3 +359,87 @@ integration vs. an x86_64 wine payload under box64), so it is flagged rather tha
 Firefox ESR does not touch any of it: it is native arm64, needs no Wine prefix and no box64.
 
 versionName 0.1.0-d2a.2.
+
+## Snapshot 2026-10-16 — payload-driven Wine invocation (the flagged 3b call, part-decided) + phantom-killer docs + harness rebuilt wider
+
+Owner decisions on record (2026-10-16): the Wine invocation fix is
+**payload-driven** (option chosen over the Winlator-recipe-now, name-only and
+defer options); the owner's device run of the previous APK **failed somewhere
+in the playbook** — the failing rows/logs were requested and are still
+outstanding, so nothing here claims the device chain works.
+
+**What changed (code):**
+1. `runtime/ElfHeader.kt` (new): the ELF `e_machine` reader extracted from
+   `ProvisionDoctor` (which now delegates). The extraction paid for itself
+   immediately: `ElfHeaderTest`'s big-endian case caught a latent byte-swap in
+   the original BE branch (`(hi shl 8) or lo` where byte 18 is the HIGH byte of
+   a BE header). Every real payload here is LE, so it was dormant — fixed, not
+   deleted, because a wrong answer on a defensive path is still a bug.
+2. `WinePayload` grew the invocation facts: `guestLauncherPath` (the loader's
+   GUEST path — Ubuntu's alternatives never create `wine64`, the pinned debs
+   install `/usr/lib/wine/wine64`), `launcherArch` (ELF header → ARM64 /
+   X86_64 / UNKNOWN — never the name), `resolveGuestCommand` (replaces a BARE
+   `wine64` only, only when a payload exists on disk; `wineboot`/`wineserver`/
+   path-forms untouched).
+3. `ContainerLauncher`: `needsBox64`/`requiredFor` take the rootfs and answer
+   from the payload's ELF arch (arm64/unknown → NO box64 — a translator is
+   never prepended on a guess; x86_64 → box64, engaged automatically the day
+   such a payload is pinned). `buildCommand` resolves the loader before
+   wrapping. `runningWineRequests` switched to the STRUCTURAL signal
+   (`guestPrefix == /root/.wine`) — with the old box64-rule filter, a native
+   arm64 wine session would have skipped the shutdown `wineserver -k` sweep and
+   corrupted prefixes on app exit.
+4. `SelfTestRunner`: the wine rows exec the resolved loader (box64 prepended
+   only for an x86_64 payload), and a rootfs WITHOUT a Wine payload now SKIPs
+   rows 2/3 naming "Install Wine payload" — per R4's skip-with-reason rule,
+   instead of a misleading red exit-127. `ProotCommand.selfTestPlan` now
+   REQUIRES the loader path (no default spelling to drift).
+5. KDoc truth pass: `WineProvisioner` (verdict is `launcherIn`+`payloadGap`,
+   not `/usr/bin/wine64`), `ContainerService.request` (symbolic default),
+   `WineBrowserLaunch` (box64 only for x86_64 payloads; x86/x64 browser exes
+   honestly noted as needing the open 3b payload), `DiagnosticsScreen`.
+
+**Tests:** new `ElfHeaderTest` (6: LE/BE e_machine, non-ELF, truncated,
+missing/dir); `ContainerLauncherTest` +8/rewritten 2 (x86_64 payload → box64
+in front + resolved tail; arm64 payload → NO box64; no payload → nothing
+resolved/translated; `needsBox64` payload-driven incl. null-rootfs and
+wineboot; `requiredFor` gates box64 on arch; `runningWineRequests` structural
+incl. the Firefox-shaped exclusion; `guestLauncherPath`/`launcherArch`/
+`resolveGuestCommand` suites with FAITHFUL ELF fixtures at the real Ubuntu
+loader path); `SelfTestRunnerTest` +2/updated pins (resolved paths in the
+command lines, arm64 → no box64, x86_64 → box64 before the loader, no-payload
+→ SKIPPED naming Install Wine payload); `RuntimeTest` selfTestPlan pin follows
+the required loader parameter. Deliberate pin rewrites are named here because
+they changed EXPECTED behaviour, not to make red green.
+
+**Harness (this sandbox, rebuilt from scratch — not in the repo):** kotlinc
+2.1.10 + JDK 17 + android.jar 34 + desktop Compose 1.8.2 jars (runtime, ui,
+ui-unit/geometry/graphics/text/util, foundation(+layout), material3,
+animation) + androidx core/collection/annotation jars + xz + the REAL compose
+compiler plugin for BOTH main and test compiles (a test compile without the
+plugin mismatches @Composable lambda signatures — `Function1` vs `Function2` —
+at runtime) + stubs (R with all 14 referenced ids NON-ZERO because
+RoadmapGatingTest asserts `iconRes != 0`, BuildConfig, MainActivity,
+LocalContext). Result: **728 tests green, 0 failures** — runtime + download +
+container + ALL x11 wire suites + window (minus AnimationCurveTest, which
+needs WindowLayer internals) + settings + explorer/notepad/taskmanager/
+terminal/browser/settings UI-state suites. Excluded vs Gradle's 644+:
+Robolectric (opt-in there too), WindowLayer/Frame/screen composables, theme.
+Sandbox gotcha worth recording: tool-typed `"$ARENA_WORKSPACE"/...` literals are
+rewritten to the tenant session path, but file CONTENTS are not — scripts must
+derive paths via `$(cd dir && pwd -P)` (relative to the workspace root), or
+`find`/`ls` inside them see a phantom FS. Also: keep "$ARENA_WORKSPACE" under the
+~10k-file snapshot cap (prune extracted SDK trees to the single jars needed),
+or per-call restores come back partially empty.
+
+**Docs:** README (R2 command-build rule, R4 skip list + gating-table row,
+phantom-killer bullet in Session lifecycle), WINE_RUNTIME (§1 chain, §4,
+playbook steps 3–5, new §7 phantom-process killer with the honest adb-toggle
+caveats), NATIVE_RUNTIME (exec-model diagram — also fixed its stale `--`
+marker in the example line, bare-names rule, R4 status row), PIPELINE_PLAN
+(3b part-decided note). versionName 0.1.0-d2a.3.
+
+**Not done / blocked:** device certification of ANY of it (owner's failing run
+logs outstanding — that reprioritises everything else); push to GitHub blocked
+in this sandbox (no credentials — commits are local until the owner pushes or
+provides a PAT); the x86_64 Windows-app payload choice (3b proper) stays open.
