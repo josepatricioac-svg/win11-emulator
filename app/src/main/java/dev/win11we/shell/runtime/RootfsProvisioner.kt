@@ -19,7 +19,7 @@ data class ProvisionResult(
  * library tree) can run: GTK3 + its X11 stack, D-Bus, ALSA, fonts, CA certs.
  *
  * Why apt inside the jail instead of pinned `.deb` artifacts: the dependency
- * closure of libgtk-3-0 is 60+ packages that Ubuntu re-publishes with every
+ * closure of libgtk-3-0t64 is 60+ packages that Ubuntu re-publishes with every
  * point release; pinning each one would be a maintenance trap. The R3
  * fail-closed contract still covers everything the shell itself downloads
  * (rootfs, Firefox); provisioning resolves distro-side dependencies the same

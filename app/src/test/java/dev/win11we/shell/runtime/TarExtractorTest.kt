@@ -309,7 +309,7 @@ class RootfsProvisionerTest {
      * healthy jail, and the real provisioning command answers [aptOutcome].
      */
     private class FakeRunner(
-        private val aptOutcome: RunOutcome = RunOutcome(0, "Reading package lists... Done\nSetting up libgtk-3-0 (3.24.33) ...\n", ""),
+        private val aptOutcome: RunOutcome = RunOutcome(0, "Reading package lists... Done\nSetting up libgtk-3-0t64 (3.24.41-4ubuntu1) ...\n", ""),
     ) : ProcessRunner {
         val commands = mutableListOf<List<String>>()
         val environments = mutableListOf<Map<String, String>>()
@@ -391,7 +391,7 @@ class RootfsProvisionerTest {
         val installAt = script.indexOf(" install -y ")
         assertTrue("apt-get update must run before install", updateAt in 0 until installAt)
         assertEquals("every apt-get call needs the sandbox/dpkg options", 3, Regex("APT::Sandbox::User=root").findAll(script).count())
-        assertTrue(script.contains("--no-install-recommends libgtk-3-0"))
+        assertTrue(script.contains("--no-install-recommends libgtk-3-0t64"))
         assertTrue(script.contains("ca-certificates"))
         assertTrue(script.contains("fonts-dejavu-core"))
         // The X self-test's clients ship in the same provisioning pass, so the
@@ -465,7 +465,7 @@ class RootfsProvisionerTest {
         assertTrue(env["PATH"]!!.contains("/sbin"))
         assertTrue(env["PATH"]!!.contains("/usr/sbin"))
         assertFalse("no Android host paths in the guest environment", env["PATH"]!!.contains("/system/bin"))
-        assertTrue(log.snapshot().any { it.text.contains("Setting up libgtk-3-0") })
+        assertTrue(log.snapshot().any { it.text.contains("Setting up libgtk-3-0t64") })
         // The guest DNS file was written for the bind...
         val resolv = File(tmp.root, "tmp/resolv.conf")
         assertTrue(resolv.isFile)
@@ -497,7 +497,7 @@ class RootfsProvisionerTest {
 
     @Test
     fun `an apt failure is reported with its exit code and last output line`() {
-        val runner = FakeRunner(RunOutcome(100, "", "E: Unable to locate package libgtk-3-0"))
+        val runner = FakeRunner(RunOutcome(100, "", "E: Unable to locate package libgtk-3-0t64"))
         val result = dev.win11we.shell.runtime.RootfsProvisioner.provision(
             binaries = shippedBinaries(),
             rootfsDir = extractedRootfs(),
@@ -508,7 +508,7 @@ class RootfsProvisionerTest {
         assertFalse(result.success)
         assertTrue(result.message.contains("exit 100"))
         assertTrue(result.message.contains("Unable to locate package"))
-        assertEquals(listOf("E: Unable to locate package libgtk-3-0"), result.tailLines)
+        assertEquals(listOf("E: Unable to locate package libgtk-3-0t64"), result.tailLines)
     }
 
     @Test

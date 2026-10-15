@@ -337,7 +337,16 @@ baseline** (the residual errors are kotlinc 1.3 failing on Kotlin 2.x syntax tha
 existed at HEAD). That comparison caught two genuine defects in this change before commit —
 a `listFiles {}` type-inference failure and a `/*` written inside a KDoc, which Kotlin treats
 as a *nested* block-comment opener and which left the comment unclosed. GitHub Actions
-`build-apk` remains the authoritative gate.
+`build-apk` remains the authoritative gate - and it earned that title: the first push of
+this change came back **727 tests completed, 1 failed**. The failure was a pin this
+snapshot had missed, `XSelfTestTest`'s
+`BROWSER_PACKAGES.contains("libgtk-3-0")` - an exact list-membership check, so unlike
+`TarExtractorTest`'s substring assertion it could not be satisfied accidentally by the
+`…0t64` name. Fixed, and that weak substring pin
+(`"--no-install-recommends libgtk-3-0"`, which passes for BOTH spellings and would never
+have caught a revert to jammy) was tightened to the t64 name at the same time, along with
+the fake-apt-output fixtures, so the suite now really pins the rename instead of
+tolerating it.
 
 **Still open / deliberately NOT changed here** (the repo's "decision 3b"): the guest command
 name and the box64 wrap. `ProotCommand.selfTestPlan`, `SelfTestRunner` and

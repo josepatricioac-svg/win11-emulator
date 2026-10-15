@@ -37,7 +37,7 @@ class PackageLockRecoveryTest {
 
     @Test
     fun `an orphaned apt-get is found - the exact device failure`() {
-        val root = proc(6895 to "/usr/bin/apt-get -o APT::Sandbox::User=root install -y libgtk-3-0")
+        val root = proc(6895 to "/usr/bin/apt-get -o APT::Sandbox::User=root install -y libgtk-3-0t64")
         val holders = PackageLockRecovery.holders(root)
         assertEquals(listOf(6895), holders.map { it.pid })
         assertTrue(holders.single().cmdline.contains("apt-get"))
@@ -93,7 +93,7 @@ class PackageLockRecoveryTest {
 
     @Test
     fun `recover kills every holder and reports each one honestly`() {
-        val root = proc(6895 to "/usr/bin/apt-get install -y libgtk-3-0", 6900 to "dpkg --configure -a")
+        val root = proc(6895 to "/usr/bin/apt-get install -y libgtk-3-0t64", 6900 to "dpkg --configure -a")
         val killed = mutableListOf<Int>()
         val lines = PackageLockRecovery.recover(root) { pid -> killed += pid; true }
         assertEquals(listOf(6895, 6900), killed)

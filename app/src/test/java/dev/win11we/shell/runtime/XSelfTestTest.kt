@@ -334,7 +334,12 @@ class XSelfTestTest {
             "the self-test's GTK3 probe comes from libgtk-3-bin, so Provision must install it",
             RootfsProvisioner.BROWSER_PACKAGES.contains("libgtk-3-bin"),
         )
-        assertTrue(RootfsProvisioner.BROWSER_PACKAGES.contains("libgtk-3-0"))
+        // noble's 64-bit time_t transition renamed this package: the jammy spelling
+        // libgtk-3-0 does not exist in the 24.04 arm64 index, and one wrong name fails
+        // the whole apt-get install with exit 100. Membership is exact, so this pin
+        // catches a silent revert to the jammy name (a substring check would not:
+        // "libgtk-3-0t64".contains("libgtk-3-0") is true).
+        assertTrue(RootfsProvisioner.BROWSER_PACKAGES.contains("libgtk-3-0t64"))
     }
 
     @Test
