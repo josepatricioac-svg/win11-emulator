@@ -129,9 +129,34 @@ own libs) but links the rootfs's GTK3/dbus-glib/ALSA stack, which the bare Ubunt
 does not ship — the readiness check reports that provisioning step explicitly instead
 of failing silently.
 
+### The prebuilt desktop runtime bundle (added 2026-10-16)
+
+`win11we-rootfs-bundle-noble-arm64-<v>.tar.xz` - ONE artifact replacing the
+rootfs + Wine-debs + on-device-apt + Firefox assembly: the noble arm64 rootfs with the
+browser's GTK3/X11/font/CA stack, Wine 9 (loader + libwine), Firefox ESR at
+`/opt/firefox-esr`, a warm fontconfig cache, and a wineboot-initialised prefix template.
+
+| Aspect | Fact |
+| --- | --- |
+| Built by | `.github/workflows/build-rootfs-bundle.yml` (`workflow_dispatch` only) on a native arm64 runner (`ubuntu-24.04-arm`, chroot - no qemu), script in `ci/rootfs-bundle/` |
+| Hosted at | THIS repo's GitHub Releases (tag `rootfs-bundle-<v>`) - no third-party hosting |
+| Input verification | ubuntu-base against the same SHA-256 the app manifest pins (`ci/rootfs-bundle/pins.env`, cross-pinned by `RuntimeTest`); Firefox against Mozilla's own `SHA512SUMS` at build time; the bundle's promise re-checked on disk before packing |
+| Output pinning | the workflow AUTO-COMMITS the archive's SHA-256/size/URL into `RuntimeManifest.ROOTFS_BUNDLE` (the `libbox64.so` contract); until then the row is a placeholder and every fetch is refused - fail closed |
+| Provenance record | `/opt/win11we/bundle-manifest.txt` inside the image (build date, every input URL + hash, `dpkg-query` version list) and the release notes |
+
+Licence chain for redistributing the bundle on GitHub Releases: the Ubuntu packages carry
+their own per-package copyright texts INSIDE the image (`/usr/share/doc/*/copyright` -
+GPL/LGPL/MIT/BSD families; the source offer is the Ubuntu archive itself); Wine is
+LGPL-2.1+ (source: the Ubuntu archive); **Firefox ESR is an UNMODIFIED official Mozilla
+build (MPL-2.0)** - redistributed byte-identical, attributed, with its download URL and
+hashes recorded in the bundle manifest and release notes, and no Firefox name/logo
+alteration anywhere; MPL-2.0 permits binary redistribution with the source availability
+notice, which the manifest provides. No Microsoft asset of any kind is in the bundle
+(Wine's builtin `*.exe` files are Wine's own clean-room LGPL code, not Windows binaries).
+
 A download whose SHA-256 does not match the pin is deleted and never unpacked. Extraction
-is refused until proot's tar is available (R1 binaries), because unpacking a rootfs needs
-`proot --rootfs / -0 tar` for device nodes and root ownership.
+runs in-app through the pure-Kotlin TAR reader (no root, no native tar, no proot needed);
+device nodes are skipped because proot emulates the standard `/dev` entries at runtime.
 
 ### R2 additions (container runtime)
 

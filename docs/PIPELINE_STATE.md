@@ -452,3 +452,62 @@ test-count numbers the pass changed (README: 742 pure-JVM / 748 with the 6
 opt-in Robolectric, 728 off-Gradle harness, 270 x11; X_SERVER.md: the same 270
 with the three suites the old list omitted) - measured by annotation count,
 the repo's documented method.
+
+## Snapshot 2026-10-16 (2) — the prebuilt runtime bundle (owner pivot: "an easier installation")
+
+Owner report + directive: the container kept saying *Wine prefix missing*, the
+browser install had no visible progress and was slow (on-device apt inside proot
+is ptrace-slow by nature); pivot to ONE pre-installed artifact with everything
+(packages, Wine, Firefox ESR only). Implemented end to end this session:
+
+- **Builder** (`ci/rootfs-bundle/`): `build.sh` (native-arm64 chroot: pinned
+  ubuntu-base → apt with the app's exact package lists → Mozilla-verified
+  Firefox → fc-cache → bounded wineboot prefix template → provenance manifest →
+  on-disk promise check → tar.xz), `pins.env` + `packages.env` (cross-pinned
+  against `RuntimeManifest`/`BROWSER_PACKAGES`/`WINE_PACKAGES` by `RuntimeTest`
+  via a repo-root walk, so the bundle cannot drift from the app), `patch_pin.py`
+  (the auto-pin patcher; fails loudly on any pattern miss).
+- **Workflow** (`.github/workflows/build-rootfs-bundle.yml`): dispatch-only,
+  `ubuntu-24.04-arm`, publishes to Releases (tag `rootfs-bundle-<v>`),
+  auto-commits the sha256/size/URL into `Artifact.kt` and re-triggers build-apk
+  — the exact libbox64 vendoring contract.
+- **App**: `ROOTFS_BUNDLE` manifest row (placeholder ⇒ `NOT_PINNED` refusal on
+  download AND import, zero bytes requested - test-pinned); bundle `READY` only
+  when rootfs+Firefox+libgtk-3+Wine loader+manifest are ALL on disk (a
+  hand-assembled lookalike does not wear the badge - pinned); bundle Remove
+  clears the whole rootfs tree; `TarExtractor` reports honest progress
+  (compressed bytes counted UNDER the gzip/xz decoder, final call = 100%,
+  monotonic - pinned) which the Runtime download card now renders during
+  EXTRACTING too; one-tap Firefox setup prefers the bundle, falls back to
+  components with the reason logged, and skips apt when the GUI stack exists;
+  `WinePrefixManager.create` copies the bundle's prefix template host-side
+  (symlinks as links, modes preserved, `.update-lock` never propagated) with a
+  READY-validated fallback to wineboot (three pinned cases: clean copy with NO
+  guest process run, incomplete template → wineboot, wrong-arch template →
+  fallback).
+- **Tests**: +18 new/rewritten across RuntimeTest (bundle contract, free-space
+  = max(paths) not sum, CI cross-pins incl. dispatch-only + arm-runner +
+  patch_pin), DownloaderTest/RootfsManagerTest (placeholder refusals, whole-
+  promise READY, provenance demotion, progress publication, bundle Remove),
+  TarExtractorTest (progress), WinePrefixManagerTest (template trio +
+  templatePrefixIn); the `extractor` seam grew a progress callback (injectors
+  updated); FirefoxSessionTest's `ALL.size` pin follows the manifest (4 → 5).
+  **Harness: 741 tests green, 0 failures.**
+- **Docs**: README (Runtime download rewritten bundle-first, gating rows,
+  prefix Create bullet), WINE_RUNTIME (Create + playbook steps 2-4),
+  BROWSER_ENGINES (readiness item 2), THIRD_PARTY (bundle section: hosting,
+  verification chain, licence chain incl. the unmodified-MPL-Firefox note; also
+  fixed its stale "extraction needs proot's tar" claim), NATIVE_RUNTIME (status
+  row), PIPELINE_PLAN (the pivot section). versionName 0.1.0-bundle.1.
+
+**Sandbox notes (this session):** the workspace snapshot DROPPED `repo/.git`
+between turns (sensitive-path exclusion) — recovered by re-cloning and moving
+`.git` back; all pushed work was safe. Harness `run.sh` is now self-locating
+(`dirname $0`) and `cd`s to the repo before the JUnit run (RuntimeTest's
+repo-root walk needs it). Commits are pushed in-turn whenever possible.
+
+**Blocked on:** the first `build-rootfs-bundle` dispatch run (owner click, or an
+actions-write token for the API) — until it auto-commits the pin, the bundle row
+honestly refuses and the component path remains the way. Device certification of
+EVERYTHING (bundle path, wine invocation fix from snapshot 2026-10-16, browser)
+still outstanding; the owner's earlier failing-run logs were never received.

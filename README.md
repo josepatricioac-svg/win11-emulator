@@ -231,9 +231,9 @@ fails if that ever changes silently:
 
 | Thing | State today | Unlocked by |
 | --- | --- | --- |
-| Container Manager (Wine) | Real UI, real persisted containers, and the **Prefix Manager**: *Install Wine payload* provisions the rootfs from the pinned Wine 9.0 debs (apt-resolved deps, disk-verified), *Initialize prefix* runs `wineboot --init && wineserver -w` for exactly one container's isolated prefix, *Repair* clears stale locks and re-runs wineboot. Start still validates binaries → rootfs → prefix and refuses with the whole chain named | device provisioning (rootfs download + payload install) |
+| Container Manager (Wine) | Real UI, real persisted containers, and the **Prefix Manager**: *Install Wine payload* provisions the rootfs from the pinned Wine 9.0 debs (apt-resolved deps, disk-verified), *Initialize prefix* copies the runtime bundle's prefix template (seconds) or runs `wineboot --init && wineserver -w` on a component install, for exactly one container's isolated prefix; *Repair* clears stale locks and re-runs wineboot. Start still validates binaries → rootfs → prefix and refuses with the whole chain named | the **runtime bundle** (one download + extract), or component provisioning (rootfs download + payload install) |
 | Wine prefix, `wineboot`, installing apps | Prefixes are created/validated/repaired by `WinePrefixManager` (registry-header + `#arch` validation, `.update-lock` cleanup, graceful `wineserver -k` on app exit via `SessionLifecycle`); a prefix that was never initialised is still refused at launch. What has NO UI yet: installing arbitrary Windows apps into a prefix (`Start` runs `wine64 cmd`; the hardened browser-exe plan lives in `WineBrowserLaunch.request`, unwired) | a BYO-installer flow (PIPELINE_PLAN step 4) |
-| Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Firefox ESR is **fully plumbed and hardened**: pinned R3 artifact, readiness checks that name the missing piece, proot launch plan through R2's launcher on the shell's X server, a private D-Bus session so a second URL reaches the *running* instance, a Provision **doctor**, and the Phase-2A fixes: `/dev/shm` bind (1777), `PROOT_NO_SECCOMP=1`, sandbox-off env, software-rendering prefs (the no-GLX white-screen guard), resolv.conf DNS. Chromium/Electron **under Wine** get the same class of fixes as a pure launch plan (`WineBrowserLaunch`: `--no-sandbox --disable-gpu --disable-dev-shm-usage --disable-setuid-sandbox …` on `:100`). Until the runtime is provisioned on-device, Open refuses with the named missing step (Android-browser fallback was removed - nothing leaves the emulator); Edge/Chromium stay listed with their gating steps | device provisioning (Firefox ESR), **R1/R2/R3 + D2 + BYO installer** (Edge/Chromium) |
+| Desktop browsers (Firefox ESR, Edge arm64, Chromium) | Firefox ESR is **fully plumbed and hardened**: pinned R3 artifact, readiness checks that name the missing piece, proot launch plan through R2's launcher on the shell's X server, a private D-Bus session so a second URL reaches the *running* instance, a Provision **doctor**, and the Phase-2A fixes: `/dev/shm` bind (1777), `PROOT_NO_SECCOMP=1`, sandbox-off env, software-rendering prefs (the no-GLX white-screen guard), resolv.conf DNS. Chromium/Electron **under Wine** get the same class of fixes as a pure launch plan (`WineBrowserLaunch`: `--no-sandbox --disable-gpu --disable-dev-shm-usage --disable-setuid-sandbox …` on `:100`). Until the runtime is provisioned on-device, Open refuses with the named missing step (Android-browser fallback was removed - nothing leaves the emulator); Edge/Chromium stay listed with their gating steps | the **runtime bundle** or component device provisioning (Firefox ESR), **R1/R2/R3 + D2 + BYO installer** (Edge/Chromium) |
 | Terminal `wine`/`box64`/`proot`/`cmd` | Answer "not available yet" and name the step | R2 pty executor |
 | Task Manager container rows | Absent (no processes to show) | R2 |
 | Diagnostics Wine self-test rows | `box64 --version` really runs against the vendored binary. The two Wine rows really exec the provisioned payload's real loader (`/usr/lib/wine/wine64 --version`, `… cmd /c echo hello` with the output asserted), and **SKIP with the reason named** - no rootfs, or no Wine payload ("Install Wine payload") - instead of failing as a mystery red exit-127 | wine provisioning (payload + prefix) |
@@ -292,10 +292,36 @@ payload's resolved loader path, box64 only for an x86_64 payload) must actually 
 
 Settings ▸ Storage ▸ **Runtime download** lists the pinned artifacts with their size,
 SHA-256 prefix and URL, plus Download / Resume / Cancel / Import / Extract / Remove and a
-free-space check for the whole set. The manifest covers the Ubuntu 24.04.5 arm64 rootfs,
+free-space check for the whole set (the set requirement is the more expensive of the two
+ALTERNATIVE install paths, not their sum). The manifest covers the **prebuilt Desktop
+runtime bundle** plus the four component artifacts: the Ubuntu 24.04.5 arm64 rootfs,
 the two Wine 9.0 loader `.deb`s and **Firefox ESR 153.5.0 (linux-aarch64)** - the
 desktop browser engine, whose pin was anchored to Mozilla's own SHA512SUMS before the
 SHA-256 was recorded.
+
+**The bundle is the easy install (owner directive, 2026-10-16):** ONE pinned `.tar.xz`
+carrying the noble arm64 rootfs with the browser's GTK3/X11/font/CA stack, Wine 9
+(loader + libwine), Firefox ESR at `/opt/firefox-esr`, a warm fontconfig cache and a
+wineboot-initialised **prefix template** - so there is no on-device `apt` (ptrace-slow
+inside proot, and its progress was only visible as log lines), no separate Firefox
+install step, and *Initialize prefix* becomes a seconds-long file copy instead of a
+wineboot run. It is built by `.github/workflows/build-rootfs-bundle.yml`
+(`workflow_dispatch` only) on a **native arm64 runner** (chroot, no qemu) from the
+publisher-verified inputs pinned in `ci/rootfs-bundle/` - the base rootfs against the
+SAME SHA-256 the manifest pins (cross-pinned by `RuntimeTest`, so the two cannot
+drift), Firefox against Mozilla's own SHA512SUMS at build time - and the bundle's
+promise is re-checked on disk before packing. The workflow publishes to this repo's
+Releases and **auto-commits the SHA-256/size pin** into the manifest, the exact
+contract that vendored `libbox64.so`. Until that first run, the row is a
+**placeholder and every fetch is refused** (fail closed - a zero hash is never a pin);
+the component rows below it remain the working install path, and the one-tap *Firefox
+setup* prefers the bundle when pinned, falls back to components (named in the log,
+never silently), and skips apt entirely when the GUI stack is already in the rootfs.
+Extraction reports honest progress (the TAR reader counts compressed bytes under the
+xz decoder, so the bar is real even for the multi-GB bundle), and a bundle rootfs is
+only READY when its WHOLE promise is on disk - rootfs unpacked, Firefox, libgtk-3, the
+Wine loader and the bundle's own provenance manifest (`/opt/win11we/bundle-manifest.txt`,
+which records every input hash and installed package version).
 
 Rules the code enforces (all unit-tested): a file is written to `<name>.part` and only
 promoted to its real name after its SHA-256 matches the pin; a mismatch deletes the
@@ -436,7 +462,9 @@ workers; the logic itself is pure and unit-tested):
   prefix, and the host's `~/.wine` is never involved. The environment is fully
   explicit (`WINEARCH` from the container arch, `WINEDLLOVERRIDES=mscoree,mshtml=`
   so Gecko/Mono are never auto-downloaded, `DISPLAY=:100` - the embedded server).
-- **Create** = `wineboot --init && wineserver -w` inside the usual proot jail
+- **Create** = the runtime bundle's prefix template copied host-side (seconds, no
+  guest run - wineboot already ran at bundle build time), else `wineboot --init &&
+  wineserver -w` inside the usual proot jail
   (wineboot initialises; `wineserver -w` waits for the server that wineboot started
   to exit - the registry files only land on disk when wineserver flushes). Success
   means the **verdict is READY**, not merely "exit 0".

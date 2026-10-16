@@ -75,9 +75,15 @@ all. `WINEARCH` comes from the container arch, `WINEDLLOVERRIDES=mscoree,mshtml=
 identical at init time and at run time, because both use
 `WineEnvironment.build`.
 
-**Create**: `wineboot --init && wineserver -w` in the usual jail. `wineserver -w`
-is not decoration: wineserver writes the registry files when it exits, so the
-wait is what makes "prefix exists on disk" true. Success = the post-run
+**Create**: the runtime bundle's **prefix template first** - when
+`/opt/win11we/prefix-template` exists in the rootfs (the bundle runs
+`wineboot --init` at BUILD time, natively, once for every device), create is a
+host-side file copy (seconds, no proot, no guest run; symlinks copied as links,
+modes preserved, a `.update-lock` is never propagated). A copy that does not
+validate as READY falls back to the real `wineboot --init && wineserver -w` in
+the usual jail - a half prefix is never returned. `wineserver -w` is not
+decoration on that path: wineserver writes the registry files when it exits, so
+the wait is what makes "prefix exists on disk" true. Success = the post-run
 **inspection verdict is READY**, not "exit 0".
 
 **Validate (`inspect`)** — the four honest states:
@@ -171,14 +177,21 @@ remains the authoritative gate.
 1. Install the CI debug APK (arm64, Android 9+). Cold start: the Win11 shell
    comes up; the embedded X server is already running underneath (nothing to
    open). Guest apps - step 6 - open as regular shell windows (D2).
-2. Settings ▸ Storage ▸ Runtime download: ROOTFS + FIREFOX_ESR + both WINE
-   debs → extract → Provision (browser stack).
-3. Container Manager: **Install Wine payload** → expect "Wine payload ready at
+2. Settings ▸ Storage ▸ Runtime download — **the easy path**: the *Desktop
+   runtime bundle* row → Download (one pinned archive, progress bar) →
+   Extract (progress bar; no apt, no separate Firefox step). The row is a
+   refused placeholder until the first `build-rootfs-bundle` CI run pins it —
+   until then use the component path: ROOTFS + FIREFOX_ESR + both WINE debs →
+   extract → Provision (browser stack).
+3. Container Manager: **Install Wine payload** — only on the COMPONENT path
+   (the bundle already carries Wine) → expect "Wine payload ready at
    …/usr/lib/wine/wine64" (the pinned debs' real loader path - Ubuntu installs
    no /usr/bin entry; Terminal ▸ log carries the dpkg/apt lines).
 4. Container Manager ▸ create container "Office" ▸ **Initialize prefix** →
-   expect state chip **Ready** (first run: wineboot on arm64-native Wine, tens
-   of seconds). Diagnostics ▸ Run self-test: rows 2/3 (`wine64 --version`,
+   expect state chip **Ready** — on a bundle rootfs this is the template COPY
+   (seconds; the log says "copying the runtime bundle's prefix template"); on a
+   component rootfs it is wineboot on arm64-native Wine (tens of seconds).
+   Diagnostics ▸ Run self-test: rows 2/3 (`wine64 --version`,
    `wine64 cmd /c echo hello` - both exec'ing the RESOLVED loader path, no
    box64 in front of the native arm64 payload) must now PASS — before the
    payload exists they SKIP with the reason named.

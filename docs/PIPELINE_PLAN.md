@@ -129,3 +129,24 @@ tests + CI. Owner may re-prioritise at any checkpoint.
 - Every step ships wire/unit tests; no feature is called done behind a stub.
 - Exact commands + real output reported per step; unverifiable items stated plainly.
 - Security note: the owner rotates the GitHub PAT that appeared in plaintext chat.
+
+## Owner pivot (2026-10-16): the prebuilt runtime bundle — "an easier installation"
+
+Owner report: the container still said *Wine prefix missing*, the browser install
+showed no progress and "is taking a while" (on-device apt inside proot is
+ptrace-slow by nature). Directive: pivot to a pre-installed artifact carrying
+everything (packages, Wine, and Firefox ESR as the only browser).
+
+Implemented as the **Desktop runtime bundle** (this repo, 2026-10-16):
+
+| Piece | What it is |
+| --- | --- |
+| `ci/rootfs-bundle/{build.sh,pins.env,packages.env,patch_pin.py}` | The builder: pinned+hash-verified ubuntu-base, chroot apt (the app's own BROWSER_PACKAGES + WINE_PACKAGES, cross-pinned by `RuntimeTest`), Mozilla-SHA512SUMS-verified Firefox ESR → `/opt/firefox-esr`, `fc-cache -f`, bounded `wineboot --init` prefix template, provenance manifest, on-disk promise check, `tar + xz -9e -T0` |
+| `.github/workflows/build-rootfs-bundle.yml` | `workflow_dispatch` only; native `ubuntu-24.04-arm` runner (chroot, no qemu); publishes to Releases; AUTO-COMMITS the sha256/size/URL pin into `Artifact.kt` (the libbox64 contract); re-triggers build-apk |
+| `RuntimeManifest.ROOTFS_BUNDLE` | The manifest row: **placeholder until the first CI build** - download/import refuse with the step named (fail closed, `DownloadOutcome.NOT_PINNED`); READY only when the WHOLE promise is on disk (rootfs + Firefox + libgtk-3 + Wine loader + `/opt/win11we/bundle-manifest.txt`) |
+| App UX | Bundle row first; extraction progress bar (the TAR reader counts compressed bytes under the decoder); one-tap *Firefox setup* prefers the bundle, falls back to components (named in the log), skips apt when the stack exists; `Initialize prefix` copies the bundle template (seconds, no wineboot) with a validated-READY fallback to the real wineboot |
+
+Done-when: one `build-rootfs-bundle` dispatch run publishes + auto-pins the
+bundle; on the owner's device: Download ▸ Extract ▸ Browser ▸ Firefox ESR ▸ Open
+works with NO apt step, and Initialize prefix reports "copied … from the
+runtime bundle's template". The component path stays intact as the repair route.

@@ -70,9 +70,13 @@ unlocks itself the moment the runtime is complete:
 2. **Readiness (`DesktopEngineReadiness`)**: a guarded low-priority worker evaluates
    the proot binary set (pinned + exec'able — **vendored 2026-10-10**: proot v5.1.107.96
    + loader + libtalloc; box64 is NOT required for this native-arm64 guest) → rootfs
-   extracted → Firefox installed → GTK3 stack provisioned (one-tap **Provision** card in
-   Runtime download runs `RootfsProvisioner`: apt-get inside proot), and publishes a
-   Compose-state snapshot. The Browser window's catalogue card shows **Ready** or the
+   extracted → Firefox installed → GTK3 stack provisioned, and publishes a
+   Compose-state snapshot. The **prebuilt runtime bundle** (Runtime download's first
+   row, built by the `build-rootfs-bundle` CI workflow) satisfies rootfs + Firefox +
+   GTK3 stack + Wine in ONE download+extract, so readiness needs no on-device apt at
+   all; the one-tap **Provision** card (`RootfsProvisioner`: apt-get inside proot)
+   remains the component-path/repair route, and the one-tap *Firefox setup* skips it
+   entirely when the GUI stack is already in the rootfs. The Browser window's catalogue card shows **Ready** or the
    exact missing step; no disk I/O ever runs during composition (crash-safety rules 1–2).
 3. **Launch (`FirefoxSession` + `DesktopBrowserLauncher`)**: pure, unit-tested command
    and environment plans. The session runs through R2's `ContainerLauncher` —
