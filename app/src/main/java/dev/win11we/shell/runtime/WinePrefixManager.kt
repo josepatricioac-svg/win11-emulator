@@ -2,6 +2,7 @@ package dev.win11we.shell.runtime
 
 import dev.win11we.shell.container.Container
 import dev.win11we.shell.container.WineEnvironment
+import dev.win11we.shell.runtime.download.RuntimeManifest
 import dev.win11we.shell.ui.terminal.LineKind
 import dev.win11we.shell.ui.terminal.LogBuffer
 import dev.win11we.shell.ui.terminal.TerminalLine
@@ -166,6 +167,54 @@ object WinePrefixManager {
     /** The files [repair] removes before re-running wineboot. */
     fun staleFiles(prefixDir: File): List<File> = listOf(File(prefixDir, UPDATE_LOCK)).filter { it.exists() }
 
+    // ---------------------------------------------------- the bundle template
+
+    /**
+     * The runtime bundle's prefix template: `wineboot --init` already ran for it
+     * at BUNDLE BUILD time (natively, in CI - not through proot's ptrace), so
+     * [copyPrefixTemplate] turns "Initialize prefix" into a seconds-long host
+     * file copy. Only a template that itself validates as an initialised prefix
+     * counts; anything less falls back to the real wineboot run.
+     */
+    fun templatePrefixIn(rootfsDir: File): File? {
+        val dir = File(rootfsDir, RuntimeManifest.RootfsBundle.TEMPLATE_GUEST_PATH.removePrefix("/"))
+        return dir.takeIf { WinePayload.prefixLooksInitialised(it) }
+    }
+
+    /**
+     * Host-side recursive copy of [templateDir] into the container's prefix dir.
+     * Symlinks are copied AS LINKS (a prefix's `dosdevices` entries point at
+     * guest paths that must not be dereferenced on the host), file modes are
+     * preserved, and [UPDATE_LOCK] is never propagated - a lock copied from the
+     * template would block the first wineserver start.
+     *
+     * @return the number of files copied.
+     */
+    fun copyPrefixTemplate(templateDir: File, prefixDir: File): Int {
+        var copied = 0
+        prefixDir.mkdirs()
+        templateDir.walkTopDown().forEach { source ->
+            val relative = source.relativeTo(templateDir).path
+            if (relative.isEmpty()) return@forEach
+            if (source.name == UPDATE_LOCK) return@forEach
+            val target = File(prefixDir, relative)
+            if (source.isDirectory) {
+                target.mkdirs()
+            } else {
+                target.parentFile?.mkdirs()
+                java.nio.file.Files.copy(
+                    source.toPath(),
+                    target.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.COPY_ATTRIBUTES,
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS,
+                )
+                copied++
+            }
+        }
+        return copied
+    }
+
     /**
      * Host-side repair step: drop the stale update lock and make sure the
      * prefix tree is rwx for the app uid (a `chmod`-style accident during a
@@ -274,6 +323,43 @@ object WinePrefixManager {
                 false, null,
                 "No usable Wine payload in the rootfs: $gap - install Wine first " +
                     "(Container Manager ▸ Install Wine payload). wineboot cannot run without it.",
+            )
+        }
+        // The runtime bundle ships a wineboot-initialised prefix template: copying
+        // it is a seconds-long HOST file copy with no proot/wineboot run at all.
+        // Anything less than a validated READY copy falls through to the real
+        // wineboot below - a half prefix is never returned.
+        val template = templatePrefixIn(rootfsDir)
+        if (template != null) {
+            prefixDir.mkdirs()
+            repairFiles(prefixDir).forEach { line ->
+                log?.add(TerminalLine(LineKind.SYSTEM, "prefix[${container.id}]: $line"))
+            }
+            log?.add(
+                TerminalLine(
+                    LineKind.SYSTEM,
+                    "prefix[${container.id}]: copying the runtime bundle's prefix template " +
+                        "(${template.absolutePath}) - wineboot already ran at bundle build time",
+                ),
+            )
+            val copied = runCatching { copyPrefixTemplate(template, prefixDir) }
+            val templateReport = inspect(container.id, prefixDir, container.arch.wineArch)
+            if (copied.isSuccess && templateReport.state == PrefixState.READY) {
+                return PrefixOpResult(
+                    true,
+                    templateReport.state,
+                    "Prefix ready at ${prefixDir.absolutePath} - copied ${copied.getOrDefault(0)} file(s) " +
+                        "from the runtime bundle's template (no wineboot run needed).",
+                    listOf("prefix template copy: ${copied.getOrDefault(0)} files"),
+                )
+            }
+            log?.add(
+                TerminalLine(
+                    LineKind.ERROR,
+                    "prefix[${container.id}]: template copy did not produce a READY prefix " +
+                        "(${copied.exceptionOrNull()?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: templateReport.state.label})" +
+                        " - falling back to wineboot",
+                ),
             )
         }
         val prepare = binaries.prepare(NativeBinaries.REQUIRED_PROOT_ONLY)

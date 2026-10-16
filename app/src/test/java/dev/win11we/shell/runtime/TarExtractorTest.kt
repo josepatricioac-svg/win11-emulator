@@ -193,6 +193,30 @@ class TarExtractorTest {
         assertEquals("yes", File(tmp.root, "out/gz-inside").readText())
     }
 
+    @Test
+    fun `extractTo reports honest progress against the archive's own length`() {
+        // The UI's extraction bar rides on this: compressed bytes consumed from the
+        // archive file over that file's length - honest for a multi-GB bundle
+        // because the counter sits UNDER the gzip/xz decoder.
+        val raw = Tars.archive(
+            Tars.file("one", "a".toByteArray()),
+            Tars.file("two", ByteArray(100_000)),
+        )
+        val gz = ByteArrayOutputStream()
+        GZIPOutputStream(gz).use { it.write(raw) }
+        val archive = File(tmp.root, "progress.tar.gz").also { it.writeBytes(gz.toByteArray()) }
+        val calls = mutableListOf<Pair<Long, Long>>()
+        val result = TarExtractor.open(archive).extractTo(File(tmp.root, "out-progress")) { read, total ->
+            calls += read to total
+        }
+        assertTrue(result.success)
+        assertTrue("progress is reported at least once per entry", calls.size >= 2)
+        assertTrue(calls.all { (_, total) -> total == archive.length() })
+        val reads = calls.map { it.first }
+        assertEquals("compressed byte counts never go backwards", reads, reads.sorted())
+        assertEquals("the gzip source is fully consumed at the end", archive.length(), calls.last().first)
+    }
+
     /**
      * Regression: JDK BufferedInputStream.skip() legally skips LESS than asked
      * (it only advances within its current buffer). A bare skip() for the 512-byte
@@ -234,7 +258,7 @@ class TarExtractorTest {
         val bytes = Tars.archive(Tars.file("a", ByteArray(2048)), Tars.file("b", ByteArray(2048)))
         val archive = File(tmp.root, "cancel.tar").also { it.writeBytes(bytes) }
         var calls = 0
-        val result = TarExtractor.open(archive).extractTo(File(tmp.root, "out")) { calls++ >= 1 }
+        val result = TarExtractor.open(archive).extractTo(File(tmp.root, "out"), cancelled = { calls++ >= 1 })
         assertFalse(result.complete)
         assertEquals("cancelled", result.error)
     }

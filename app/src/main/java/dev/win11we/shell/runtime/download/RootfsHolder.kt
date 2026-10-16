@@ -34,20 +34,25 @@ object RootfsHolder {
             // app's own TAR reader (gzip via the JDK, xz via org.tukaani). Device
             // nodes are skipped - proot emulates the standard /dev entries at
             // runtime, which is how every proot-based distro extracts a rootfs.
-            extractor = { archive, rootfsDir -> extract(archive, rootfsDir) },
+            extractor = { archive, rootfsDir, onProgress -> extract(archive, rootfsDir, onProgress) },
         )
     }
 
-    private fun extract(archive: File, rootfsDir: File): Boolean = runCatching {
+    private fun extract(archive: File, rootfsDir: File, onProgress: (Float) -> Unit): Boolean = runCatching {
         val log: (String) -> Unit = { line -> SharedLog.buffer.add(TerminalLine(LineKind.SYSTEM, line)) }
+        // Real progress: the TAR reader counts the COMPRESSED bytes it consumes from
+        // the archive file, so the fraction is honest even for the multi-GB bundle.
+        val progress: (Long, Long) -> Unit = { read, total ->
+            if (total > 0 && read >= 0) onProgress((read.toFloat() / total).coerceIn(0f, 1f))
+        }
         val result = when {
             // Mozilla's Firefox tarball unpacks into the rootfs, top dir stripped.
             archive.name.startsWith("firefox-") && archive.name.endsWith(".tar.xz") -> {
                 val dest = File(rootfsDir, "opt/firefox-esr")
                 dest.mkdirs()
-                TarExtractor.open(archive, log).extractTo(dest, stripComponents = 1)
+                TarExtractor.open(archive, log).extractTo(dest, stripComponents = 1, progress = progress)
             }
-            else -> TarExtractor.open(archive, log).extractTo(rootfsDir)
+            else -> TarExtractor.open(archive, log).extractTo(rootfsDir, progress = progress)
         }
         log(
             "${archive.name}: ${result.files} files, ${result.directories} dirs, " +

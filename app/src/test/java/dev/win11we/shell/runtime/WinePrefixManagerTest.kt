@@ -297,6 +297,79 @@ class WinePrefixManagerTest {
         assertTrue(result.message.contains("still"))
     }
 
+    // --- the runtime bundle's prefix template (create without running anything) ---
+
+    private fun prootBinaries(): NativeBinaries {
+        val lib = tmp.newFolder("lib-${System.nanoTime()}")
+        listOf(BinaryRole.PROOT, BinaryRole.PROOT_LOADER, BinaryRole.TALLOC).forEach { role ->
+            File(lib, role.fileName).writeBytes(ByteArray(64) { 0x41 })
+        }
+        return NativeBinaries(
+            lib,
+            BinaryRole.entries.filter { File(lib, it.fileName).isFile }
+                .associate { it.fileName to NativeBinaries.sha256(File(lib, it.fileName))!! },
+        )
+    }
+
+    private fun writeTemplate(arch: String = "win64"): File {
+        val template = File(rootfs, "opt/win11we/prefix-template")
+        writeHealthyPrefix(template, arch = arch)
+        File(template, "dosdevices").mkdirs()
+        File(template, "drive_c/windows").mkdirs()
+        File(template, "drive_c/windows/system.reg").writeText("# WINE REGISTRY Version 2\n")
+        return template
+    }
+
+    @Test
+    fun `create copies the bundle template - no proot, no wineboot, READY verdict`() {
+        writeWinePayload()
+        val template = writeTemplate()
+        File(template, ".update-lock").writeText("a stale lock the template must never propagate")
+        val runner = PrefixFakeRunner(exitCode = 99) // any guest execution would fail the test
+        val log = LogBuffer()
+        val result = WinePrefixManager.create(prootBinaries(), rootfs, container, ":100", log = log, runner = runner)
+        assertTrue(result.message, result.success)
+        assertEquals(PrefixState.READY, result.state)
+        assertTrue("no guest process may run for a template copy", runner.commands.isEmpty())
+        assertTrue(result.message, result.message.contains("template"))
+        // The copy is complete, nested dirs included...
+        assertTrue(File(prefix, "system.reg").isFile)
+        assertTrue(File(prefix, "drive_c/windows/system.reg").isFile)
+        // ...and the lock is NOT propagated - a copied lock would wedge wineserver.
+        assertFalse(File(prefix, ".update-lock").exists())
+    }
+
+    @Test
+    fun `an incomplete template falls back to the real wineboot run`() {
+        writeWinePayload()
+        File(rootfs, "opt/win11we/prefix-template").mkdirs() // exists, never initialised
+        assertNull(WinePrefixManager.templatePrefixIn(rootfs))
+        val runner = PrefixFakeRunner(simulateWinebootInto = prefix)
+        val result = WinePrefixManager.create(prootBinaries(), rootfs, container, ":100", runner = runner)
+        assertTrue(result.message, result.success)
+        assertEquals("wineboot must have run", 1, runner.commands.size)
+    }
+
+    @Test
+    fun `a template that copies to a non-READY prefix falls back to wineboot`() {
+        writeWinePayload()
+        writeTemplate(arch = "win32") // wrong arch for this win64 container: inspect demotes it
+        val runner = PrefixFakeRunner(simulateWinebootInto = prefix)
+        val log = LogBuffer()
+        val result = WinePrefixManager.create(prootBinaries(), rootfs, container, ":100", log = log, runner = runner)
+        assertTrue(result.message, result.success)
+        assertEquals(PrefixState.READY, result.state)
+        assertEquals("wineboot ran as the fallback", 1, runner.commands.size)
+        assertTrue(log.tail(20).contains("falling back to wineboot"))
+    }
+
+    @Test
+    fun `templatePrefixIn answers the bundle path only for an initialised template`() {
+        assertNull(WinePrefixManager.templatePrefixIn(rootfs))
+        val template = writeTemplate()
+        assertEquals(template, WinePrefixManager.templatePrefixIn(rootfs))
+    }
+
     // --- killServers / destroy ----------------------------------------------------
 
     @Test

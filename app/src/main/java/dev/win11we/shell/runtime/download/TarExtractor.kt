@@ -34,8 +34,38 @@ class TarExtractor(
     /** Already-decompressed tar stream (gzip via [GZIPInputStream], xz via org.tukaani). */
     input: InputStream,
     private val log: (String) -> Unit = {},
+    /** Counts the COMPRESSED bytes pulled from the archive file - the progress denominator. */
+    private val counter: Counter? = null,
+    /** The archive file's length in bytes; -1 when unknown (stream-constructed). */
+    private val sourceLength: Long = -1L,
 ) {
     private val stream = BufferedInputStream(input, 64 * 1024)
+
+    /** Shared read counter between the counting wrapper and [extractTo]'s progress reports. */
+    class Counter {
+        @Volatile
+        var bytesRead: Long = 0
+    }
+
+    /** Counts every byte read from the underlying archive file (pre-decompression). */
+    private class CountingInput(
+        private val inner: InputStream,
+        private val counter: Counter,
+    ) : InputStream() {
+        override fun read(): Int {
+            val byte = inner.read()
+            if (byte >= 0) counter.bytesRead += 1
+            return byte
+        }
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            val read = inner.read(buffer, offset, length)
+            if (read > 0) counter.bytesRead += read
+            return read
+        }
+
+        override fun close() = inner.close()
+    }
 
     data class Result(
         val files: Int,
@@ -55,6 +85,12 @@ class TarExtractor(
         target: File,
         stripComponents: Int = 0,
         cancelled: () -> Boolean = { false },
+        /**
+         * Progress as (compressed bytes consumed, archive length); the archive length
+         * is -1 when the extractor was stream-constructed. Called once per entry -
+         * cheap enough for a 3 GB rootfs, honest because it counts real source bytes.
+         */
+        progress: (Long, Long) -> Unit = { _, _ -> },
     ): Result {
         var files = 0
         var dirs = 0
@@ -73,6 +109,7 @@ class TarExtractor(
             while (true) {
                 if (cancelled()) return Result(files, dirs, symlinks, hardlinks, skipped, false, "cancelled")
                 if (!readFully(header)) break
+                progress(counter?.bytesRead ?: -1L, sourceLength)
                 if (header.all { it == 0.toByte() }) {
                     if (++zeroBlocks >= 2) break
                     continue
@@ -179,6 +216,9 @@ class TarExtractor(
                     }
                 }
             }
+            // Final report: the compressed source is fully consumed at this point,
+            // so the UI's last fraction is an honest 100%, not a stalled 97.
+            progress(counter?.bytesRead ?: -1L, sourceLength)
             return Result(files, dirs, symlinks, hardlinks, skipped, true, null)
         } catch (error: CorruptArchive) {
             return Result(files, dirs, symlinks, hardlinks, skipped, false, error.message)
@@ -324,13 +364,15 @@ class TarExtractor(
     companion object {
         /** Convenience for the two archive shapes R3 ships: ubuntu-base (.tar.gz) and Firefox (.tar.xz). */
         fun open(archive: File, log: (String) -> Unit = {}): TarExtractor {
-            val input = archive.inputStream().buffered()
+            val counter = Counter()
+            val length = archive.length()
+            val input = CountingInput(archive.inputStream().buffered(), counter)
             return when {
                 archive.name.endsWith(".tar.gz") || archive.name.endsWith(".tgz") ->
-                    TarExtractor(GZIPInputStream(input), log)
+                    TarExtractor(GZIPInputStream(input), log, counter, length)
                 archive.name.endsWith(".tar.xz") ->
-                    TarExtractor(org.tukaani.xz.XZInputStream(input), log)
-                else -> TarExtractor(input, log)
+                    TarExtractor(org.tukaani.xz.XZInputStream(input), log, counter, length)
+                else -> TarExtractor(input, log, counter, length)
             }
         }
     }

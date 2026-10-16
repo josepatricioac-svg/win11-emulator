@@ -1,0 +1,142 @@
+name: build-rootfs-bundle
+
+# Manual only (workflow_dispatch), so it can never affect build-apk.
+#
+# Builds the PREBUILT desktop runtime bundle - noble arm64 rootfs + the browser's
+# GTK3/X11/font/CA stack + Wine 9 (loader + libwine) + Firefox ESR + a warm
+# fontconfig cache + a wineboot-initialised prefix template - as ONE .tar.xz on a
+# NATIVE arm64 runner (chroot, no qemu). It replaces the four-step on-device
+# assembly (rootfs + debs + ptrace-slow apt provisioning + Firefox) with one
+# pinned download and one in-app extraction.
+#
+# Fail-closed contract (the libbox64 vendoring pattern): every input is verified
+# at build time (ubuntu-base against the SHA-256 pinned in ci/rootfs-bundle/
+# pins.env - cross-pinned against RuntimeManifest by RuntimeTest; Firefox against
+# Mozilla's own SHA512SUMS), the bundle's promise is re-checked on disk before
+# packing, and the workflow AUTO-COMMITS the archive's SHA-256/size/URL into
+# Artifact.kt (placeholder = false) on the target branch. Until that commit
+# exists the app's manifest row is a placeholder and download/import REFUSE -
+# an unpinned bundle is never fetched, never extracted, never trusted.
+#
+# Licensing: Ubuntu packages carry their own copyright texts inside the image,
+# Wine is LGPL-2.1+, and the embedded Firefox ESR is an UNMODIFIED official
+# Mozilla build (MPL-2.0) whose provenance (URL + SHA-512 + SHA-256) is recorded
+# in the bundle's /opt/win11we/bundle-manifest.txt and the release notes.
+# See docs/THIRD_PARTY.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_version:
+        description: 'Bundle version (release tag rootfs-bundle-<v>, asset name suffix)'
+        required: false
+        default: 'v1'
+      firefox_esr_version:
+        description: 'Firefox ESR version to embed (verified against Mozilla SHA512SUMS at build time)'
+        required: false
+        default: '153.5.0esr'
+      with_prefix_template:
+        description: 'Run wineboot --init at build time and embed the prefix template'
+        type: boolean
+        required: false
+        default: true
+      commit_pin:
+        description: 'Auto-commit the SHA-256/size/URL pin into Artifact.kt'
+        type: boolean
+        required: false
+        default: true
+      target_branch:
+        description: 'Branch the pin is committed to'
+        required: false
+        default: 'main'
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    name: rootfs bundle (noble arm64) + auto-pin
+    # Native arm64: the bundle's apt/dpkg/fc-cache/wineboot all run inside an
+    # arm64 chroot. Under qemu on x86 that is 10-50x slower (the same emulation
+    # tax the on-device proot path pays - the whole reason this bundle exists).
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    permissions:
+      contents: write # publishes the release + commits the pin
+    env:
+      BUNDLE_VERSION: ${{ inputs.bundle_version }}
+      FIREFOX_VERSION: ${{ inputs.firefox_esr_version }}
+      WITH_PREFIX_TEMPLATE: ${{ inputs.with_prefix_template }}
+      TARGET_BRANCH: ${{ inputs.target_branch }}
+    steps:
+      - name: Checkout the branch that will receive the pin
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch }}
+
+      - name: Build the bundle (verified inputs, chroot apt, fc-cache, wineboot template, xz)
+        run: |
+          mkdir -p "$RUNNER_TEMP/bundle"
+          OUT="$RUNNER_TEMP/bundle" bash ci/rootfs-bundle/build.sh
+
+      - name: Publish to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP/bundle"
+          NAME="win11we-rootfs-bundle-noble-arm64-$BUNDLE_VERSION.tar.xz"
+          TAG="rootfs-bundle-$BUNDLE_VERSION"
+          {
+            echo "Prebuilt desktop runtime bundle ($BUNDLE_VERSION, noble arm64)."
+            echo
+            echo "- sha256: \`$(cat "$NAME.sha256")\`"
+            echo "- size: $(cat "$NAME.size") bytes"
+            echo
+            echo "Contents and provenance (from the embedded /opt/win11we/bundle-manifest.txt):"
+            echo
+            echo '```'
+            head -40 bundle-manifest.txt
+            echo '```'
+            echo
+            echo "Licences: Ubuntu packages carry their own copyright texts inside the image;"
+            echo "Wine is LGPL-2.1+; Firefox ESR is an unmodified official Mozilla build (MPL-2.0)."
+            echo "See docs/THIRD_PARTY.md."
+          } > notes.md
+          gh release create "$TAG" --title "Desktop runtime bundle $BUNDLE_VERSION (noble arm64)" \
+            --notes-file notes.md --target "$TARGET_BRANCH" --latest=false || true
+          gh release upload "$TAG" "$NAME" --clobber
+
+      - name: Auto-commit the pin (archive + pin land together, or not at all)
+        if: ${{ inputs.commit_pin }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 ci/rootfs-bundle/patch_pin.py "$RUNNER_TEMP/bundle" "$BUNDLE_VERSION" "$GITHUB_WORKSPACE"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/dev/win11we/shell/runtime/download/Artifact.kt
+          if git diff --cached --quiet; then
+            echo "The pin is unchanged - nothing to commit."
+            exit 0
+          fi
+          SHA="$(cat "$RUNNER_TEMP/bundle/win11we-rootfs-bundle-noble-arm64-$BUNDLE_VERSION.tar.xz.sha256")"
+          git commit -m "runtime: rootfs bundle $BUNDLE_VERSION built + pinned (sha256 ${SHA:0:16}...)" \
+            -m "Produced by .github/workflows/build-rootfs-bundle.yml on a native arm64 runner from publisher-verified inputs (ubuntu-base 24.04.5 pin + Mozilla SHA512SUMS). Released as rootfs-bundle-$BUNDLE_VERSION. The pin and the archive land together - fail closed, the libbox64 contract."
+          # Retry once through a rebase if the branch moved while we built.
+          git push origin "HEAD:$TARGET_BRANCH" || {
+            git pull --rebase origin "$TARGET_BRANCH"
+            git push origin "HEAD:$TARGET_BRANCH"
+          }
+          echo "Pushed to $TARGET_BRANCH - build-apk will validate the APK with the new pin."
+
+      - name: Upload the bundle as a workflow artifact (backup copy)
+        uses: actions/upload-artifact@v4
+        with:
+          name: win11we-rootfs-bundle-${{ inputs.bundle_version }}
+          path: |
+            ${{ runner.temp }}/bundle/*.tar.xz
+            ${{ runner.temp }}/bundle/*.sha256
+            ${{ runner.temp }}/bundle/*.size
+            ${{ runner.temp }}/bundle/bundle-manifest.txt
+          retention-days: 14

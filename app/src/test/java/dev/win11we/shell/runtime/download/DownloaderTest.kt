@@ -2,6 +2,7 @@ package dev.win11we.shell.runtime.download
 
 import dev.win11we.shell.ui.terminal.LogBuffer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -259,7 +260,7 @@ class RootfsManagerTest {
 
     private fun manager(
         transfer: Transfer = FakeTransfer(payload),
-        extractor: (File, File) -> Boolean = { _, _ -> false },
+        extractor: (File, File, (Float) -> Unit) -> Boolean = { _, _, _ -> false },
         free: Long = Long.MAX_VALUE,
     ) = RootfsManager(
         downloadDir = downloads,
@@ -280,7 +281,7 @@ class RootfsManagerTest {
 
     @Test
     fun `download then extract reaches ready when the extractor works`() {
-        val manager = manager(extractor = { archive, target ->
+        val manager = manager(extractor = { archive, target, _ ->
             File(target, "bin").mkdirs()
             File(target, "usr").mkdirs()
             archive.isFile
@@ -304,7 +305,7 @@ class RootfsManagerTest {
 
     @Test
     fun `extract refuses an archive whose hash does not match`() {
-        val manager = manager(extractor = { _, _ -> true })
+        val manager = manager(extractor = { _, _, _ -> true })
         artifact.targetFile(downloads).writeBytes("tampered".toByteArray())
         assertFalse(manager.extract(artifact))
         assertEquals(ArtifactState.FAILED, manager.stateOf(artifact.id))
@@ -378,7 +379,7 @@ class RootfsManagerTest {
 
     @Test
     fun `remove deletes the archive the partial and the unpacked rootfs`() {
-        val manager = manager(extractor = { _, target ->
+        val manager = manager(extractor = { _, target, _ ->
             File(target, "bin").mkdirs(); File(target, "usr").mkdirs(); true
         })
         manager.download(artifact)
@@ -406,6 +407,112 @@ class RootfsManagerTest {
         assertTrue(text.contains("downloading"))
         assertTrue(text.contains("VERIFIED"))
         assertTrue(text.contains("extract"))
+    }
+
+    // --- the prebuilt runtime bundle -------------------------------------------
+
+    private fun bundleManager(
+        transfer: Transfer = FakeTransfer(payload),
+        extractor: (File, File, (Float) -> Unit) -> Boolean = { _, _, _ -> false },
+    ) = RootfsManager(
+        downloadDir = downloads,
+        rootfsDir = rootfsDir,
+        session = DownloadSession(transfer, FreeSpaceProvider { Long.MAX_VALUE }),
+        log = LogBuffer(),
+        artifacts = listOf(RuntimeManifest.ROOTFS_BUNDLE),
+        extractor = extractor,
+    )
+
+    /** The bundle's whole on-disk promise: every marker the readiness checks read. */
+    private fun writeBundleTree(withManifest: Boolean = true) {
+        File(rootfsDir, "bin").mkdirs()
+        File(rootfsDir, "usr").mkdirs()
+        File(rootfsDir, "opt/firefox-esr").mkdirs()
+        File(rootfsDir, "opt/firefox-esr/firefox").writeText("#!/bin/sh\n")
+        File(rootfsDir, "usr/lib/aarch64-linux-gnu").mkdirs()
+        File(rootfsDir, "usr/lib/aarch64-linux-gnu/libgtk-3.so.0").writeText("elf")
+        File(rootfsDir, "usr/lib/wine").mkdirs()
+        File(rootfsDir, "usr/lib/wine/wine64").writeText("elf")
+        if (withManifest) {
+            File(rootfsDir, "opt/win11we").mkdirs()
+            File(rootfsDir, "opt/win11we/bundle-manifest.txt")
+                .writeText("win11we desktop runtime bundle v1\n")
+        }
+    }
+
+    @Test
+    fun `a placeholder bundle row refuses download AND import, naming the CI step`() {
+        val bundle = RuntimeManifest.ROOTFS_BUNDLE
+        assertTrue("this test pins the pre-first-build state; after the CI pin lands, flip it", bundle.placeholder)
+        val transfer = FakeTransfer(payload)
+        val manager = bundleManager(transfer = transfer)
+
+        val result = manager.download(bundle)
+        assertFalse(result.success)
+        assertEquals(DownloadOutcome.NOT_PINNED, result.outcome)
+        assertTrue(result.message, result.message.contains("build-rootfs-bundle"))
+        assertTrue("the refusal must say WHY, not read like a bug", result.message.contains("fail closed"))
+        assertTrue("not one byte may be requested for an unpinned artifact", transfer.ranges.isEmpty())
+
+        val imported = manager.import(bundle, ByteArrayInputStream("x".toByteArray()), "bundle.tar.xz")
+        assertEquals(DownloadOutcome.NOT_PINNED, imported.outcome)
+        assertEquals(ArtifactState.NOT_DOWNLOADED, manager.stateOf(bundle.id))
+    }
+
+    @Test
+    fun `the bundle row scans READY only when its WHOLE promise is on disk`() {
+        val manager = bundleManager()
+        manager.rescan()
+        assertEquals(ArtifactState.NOT_DOWNLOADED, manager.stateOf(RuntimeManifest.ROOTFS_BUNDLE.id))
+
+        writeBundleTree()
+        manager.rescan()
+        assertEquals(ArtifactState.READY, manager.stateOf(RuntimeManifest.ROOTFS_BUNDLE.id))
+
+        // One missing piece - here the Wine payload - demotes it again: the row
+        // never claims a runtime that is not there.
+        File(rootfsDir, "usr/lib/wine/wine64").delete()
+        manager.invalidateScan()
+        manager.rescan()
+        assertNotEquals(ArtifactState.READY, manager.stateOf(RuntimeManifest.ROOTFS_BUNDLE.id))
+    }
+
+    @Test
+    fun `a rootfs that merely looks like the bundle is not the bundle - provenance counts`() {
+        writeBundleTree(withManifest = false)
+        val manager = bundleManager()
+        manager.rescan()
+        assertNotEquals(
+            "no /opt/win11we/bundle-manifest.txt, no bundle verdict - a hand-assembled " +
+                "rootfs must not wear the bundle's READY badge",
+            ArtifactState.READY,
+            manager.stateOf(RuntimeManifest.ROOTFS_BUNDLE.id),
+        )
+    }
+
+    @Test
+    fun `extract publishes the extractor's progress fractions and lands at 100 percent`() {
+        lateinit var mgr: RootfsManager
+        val observed = mutableListOf<Float>()
+        mgr = manager(extractor = { _, target, onProgress ->
+            onProgress(0.5f)
+            observed += mgr.progress[artifact.id] ?: -1f
+            File(target, "bin").mkdirs()
+            File(target, "usr").mkdirs()
+            true
+        })
+        mgr.download(artifact)
+        assertTrue(mgr.extract(artifact))
+        assertEquals("the fraction must land in the observable state map", listOf(0.5f), observed)
+        assertEquals(1f, mgr.progress[artifact.id])
+    }
+
+    @Test
+    fun `removing the bundle removes the whole rootfs tree, exactly like the rootfs row`() {
+        writeBundleTree()
+        assertTrue(rootfsDir.isDirectory)
+        bundleManager().remove(RuntimeManifest.ROOTFS_BUNDLE)
+        assertFalse(rootfsDir.exists())
     }
 }
 

@@ -17,6 +17,9 @@ enum class DownloadOutcome {
     NOT_ENOUGH_SPACE,
     NETWORK_ERROR,
     RESUME_NOT_SUPPORTED,
+
+    /** The manifest row has no real pin yet ([Artifact.placeholder]) - refused, never guessed. */
+    NOT_PINNED,
 }
 
 data class DownloadResult(

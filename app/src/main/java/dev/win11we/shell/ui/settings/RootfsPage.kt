@@ -110,9 +110,11 @@ fun RootfsPage(modifier: Modifier = Modifier) {
         Text(
             text = "Hashes are pinned from the publishers' own checksums (Ubuntu SHA256SUMS, the Ubuntu " +
                 "archive Packages index, Mozilla's SHA512SUMS). A download that does not match is deleted, " +
-                "never unpacked. Extraction runs in-app (no root, no native tar): the Ubuntu rootfs and " +
-                "Firefox's .tar.xz are unpacked by the shell's own TAR reader; device nodes are emulated " +
-                "by proot at runtime.",
+                "never unpacked. Extraction runs in-app (no root, no native tar): the Ubuntu rootfs, the " +
+                "prebuilt bundle and Firefox's .tar.xz are unpacked by the shell's own TAR reader; device " +
+                "nodes are emulated by proot at runtime. The prebuilt bundle is produced by the " +
+                "build-rootfs-bundle CI workflow from those same publisher-verified inputs, and its hash is " +
+                "auto-committed (the libbox64 contract); an unbuilt placeholder row refuses every fetch.",
             color = TextTertiary,
             fontSize = 11.sp,
         )
@@ -140,6 +142,36 @@ private fun runFirefoxSetup(context: android.content.Context, rootfs: RootfsMana
         log.add(dev.win11we.shell.ui.terminal.TerminalLine(dev.win11we.shell.ui.terminal.LineKind.SYSTEM, "firefox setup: $line"))
 
     val rootfsArtifact = dev.win11we.shell.runtime.download.RuntimeManifest.ROOTFS
+
+    // The prebuilt runtime bundle is the RECOMMENDED path once its CI pin exists:
+    // one download + one extraction replaces rootfs+Firefox downloads AND the
+    // ptrace-slow on-device apt provisioning. A bundle failure falls through to
+    // the component steps below, named in the log - never silently.
+    val bundle = dev.win11we.shell.runtime.download.RuntimeManifest.ROOTFS_BUNDLE
+    if (!bundle.placeholder && !rootfs.rootfsReady) {
+        var bundleReady = rootfs.stateOf(bundle.id) == ArtifactState.READY
+        if (!bundleReady && rootfs.stateOf(bundle.id) != ArtifactState.VERIFIED) {
+            step("downloading the prebuilt desktop runtime bundle (rootfs + GUI stack + Wine + Firefox ESR)")
+            val download = rootfs.download(bundle)
+            if (!download.success) {
+                step("bundle download failed (${download.message}) - falling back to the component path")
+            }
+        }
+        if (!bundleReady && rootfs.stateOf(bundle.id) == ArtifactState.VERIFIED) {
+            step("extracting the bundle (the Runtime download card shows progress)")
+            if (rootfs.extract(bundle)) {
+                bundleReady = true
+            } else {
+                step("bundle extraction failed - falling back to the component path")
+            }
+        }
+        if (bundleReady) {
+            return "Firefox ESR is ready - open the Browser window, pick Firefox ESR and press Open. " +
+                "The bundle also carries the Wine payload: Container Manager ▸ Initialize prefix copies " +
+                "its prefix template (seconds, no wineboot run)." to emptyList()
+        }
+    }
+
     if (!rootfs.rootfsReady) {
         if (rootfs.stateOf(rootfsArtifact.id) != ArtifactState.VERIFIED) {
             step("downloading the Ubuntu rootfs (27 MB)")
@@ -163,9 +195,15 @@ private fun runFirefoxSetup(context: android.content.Context, rootfs: RootfsMana
             return "Firefox install failed: ${rootfs.messages[firefox.id] ?: "see Terminal ▸ log"}" to emptyList()
         }
     }
-    step("provisioning GTK3/fonts/CA certs with apt inside proot (several minutes)")
-    val provision = RootfsProvisioner.provision(binaries, rootfs.rootfsDir, appContext.filesDir, log)
-    if (!provision.success) return "Provisioning failed: ${provision.message}" to provision.tailLines
+    if (FirefoxSession.guiLibrariesPresent(rootfs.rootfsDir)) {
+        // The bundle (or a previous provision) already installed the stack: apt
+        // inside proot is minutes of ptrace for nothing.
+        step("GUI stack already present in the rootfs - skipping apt provisioning")
+    } else {
+        step("provisioning GTK3/fonts/CA certs with apt inside proot (several minutes)")
+        val provision = RootfsProvisioner.provision(binaries, rootfs.rootfsDir, appContext.filesDir, log)
+        if (!provision.success) return "Provisioning failed: ${provision.message}" to provision.tailLines
+    }
     return "Firefox ESR is ready - open the Browser window, pick Firefox ESR and press Open." to emptyList()
 }
 
@@ -421,13 +459,15 @@ private fun ArtifactCard(
         Spacer(Modifier.height(4.dp))
         Text(artifact.description, color = TextTertiary, fontSize = 11.sp)
         Text(
-            text = "${artifact.sizeLabel()} · sha256 ${artifact.sha256.take(16)}… · ${artifact.url}",
+            text = "${artifact.sizeLabel()} · sha256 " +
+                (if (artifact.placeholder) "NOT PINNED YET (CI build pending)" else "${artifact.sha256.take(16)}…") +
+                " · ${artifact.url}",
             color = TextTertiary,
             fontSize = 10.sp,
             fontFamily = FontFamily.Monospace,
         )
 
-        if (state == ArtifactState.DOWNLOADING) {
+        if (state == ArtifactState.DOWNLOADING || state == ArtifactState.EXTRACTING) {
             Spacer(Modifier.height(8.dp))
             Box(Modifier.fillMaxWidth().height(5.dp).clip(CircleShape).background(Color(0x22FFFFFF))) {
                 Box(
@@ -444,6 +484,17 @@ private fun ArtifactCard(
             Spacer(Modifier.height(6.dp))
             Text(message, color = ErrorRed, fontSize = 11.sp)
         }
+        if (artifact.placeholder) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "Not built yet: the build-rootfs-bundle CI workflow (Actions ▸ build-rootfs-bundle ▸ Run " +
+                    "workflow) produces this archive and auto-commits its SHA-256 pin - the contract that " +
+                    "vendored libbox64.so. Until then Download/Import refuse (fail closed); the component " +
+                    "rows below are the working install path.",
+                color = WarnAmber,
+                fontSize = 10.5.sp,
+            )
+        }
         if (artifact.incompleteAlone) {
             Spacer(Modifier.height(6.dp))
             Text(
@@ -458,13 +509,21 @@ private fun ArtifactCard(
             when (state) {
                 ArtifactState.DOWNLOADING -> Chip("Cancel", destructive = true) { rootfs.cancel() }
                 ArtifactState.NOT_DOWNLOADED, ArtifactState.PARTIAL, ArtifactState.FAILED -> {
-                    Chip(if (state == ArtifactState.PARTIAL) "Resume" else "Download") {
-                        onWorker("download") { rootfs.download(artifact) }
+                    if (artifact.placeholder) {
+                        // Nothing to fetch until the CI build pins it - a Download button
+                        // that can only refuse is a lie with extra steps.
+                        Chip("Waiting for first CI build") {}
+                    } else {
+                        Chip(if (state == ArtifactState.PARTIAL) "Resume" else "Download") {
+                            onWorker("download") { rootfs.download(artifact) }
+                        }
+                        Chip("Import...") { onImport() }
                     }
-                    Chip("Import...") { onImport() }
                 }
                 ArtifactState.VERIFIED -> {
-                    if (artifact.id == dev.win11we.shell.runtime.download.RuntimeManifest.ROOTFS.id) {
+                    if (artifact.id == dev.win11we.shell.runtime.download.RuntimeManifest.ROOTFS.id ||
+                        artifact.id == dev.win11we.shell.runtime.download.RuntimeManifest.ROOTFS_BUNDLE.id
+                    ) {
                         Chip("Extract") { onWorker("extract") { rootfs.extract(artifact) } }
                     }
                     Chip("Re-verify") { onWorker("verify") { rootfs.download(artifact) } }

@@ -18,6 +18,14 @@ data class Artifact(
     val description: String,
     /** True when this artifact alone is not a working install (Wine needs its deps). */
     val incompleteAlone: Boolean = false,
+    /**
+     * True while the artifact EXISTS in the manifest but has no real pin yet - it is
+     * produced by a CI workflow (like the `build-rootfs-bundle` dispatch) that
+     * auto-commits the SHA-256/size the way `build-native` vendors libbox64.so.
+     * A placeholder is REFUSED by download/import (fail closed: a zero hash must
+     * never be treated as a pin), and the UI says which step unlocks it.
+     */
+    val placeholder: Boolean = false,
     val fileName: String = url.substringAfterLast('/'),
 ) {
     init {
@@ -46,6 +54,60 @@ data class Artifact(
  * nothing here is guessed.
  */
 object RuntimeManifest {
+
+    /**
+     * The guest paths the prebuilt bundle owns. They live here (not in the CI
+     * script alone) so app code and tests pin the same strings the bundle
+     * builder writes - `RuntimeTest` cross-pins them against
+     * `ci/rootfs-bundle/build.sh`.
+     */
+    object RootfsBundle {
+        /** Provenance record the bundle build writes inside the rootfs. */
+        const val MANIFEST_GUEST_PATH = "/opt/win11we/bundle-manifest.txt"
+
+        /** The wineboot-initialised prefix template `WinePrefixManager.create` copies. */
+        const val TEMPLATE_GUEST_PATH = "/opt/win11we/prefix-template"
+    }
+
+    /**
+     * The ONE-ARTIFACT install path: a prebuilt noble arm64 rootfs carrying the
+     * browser's GTK3/X11/font/CA stack, the Wine 9.0 payload (loader + libwine),
+     * Firefox ESR at `/opt/firefox-esr`, the warm fontconfig cache, and a
+     * wineboot-initialised prefix template at [RootfsBundle.TEMPLATE_GUEST_PATH].
+     *
+     * WHY: on-device `apt-get` inside proot is ptrace-slow (every guest syscall
+     * is intercepted), its progress is only visible as log lines, and the
+     * component path is a four-step assembly (rootfs + debs + provision +
+     * Firefox). The bundle replaces all of it with one pinned download + one
+     * in-app extraction. It is built by `.github/workflows/build-rootfs-bundle.yml`
+     * (`workflow_dispatch` only, native arm64 runner, chroot + apt) from the
+     * publisher-verified inputs pinned in `ci/rootfs-bundle/pins.env`; the
+     * Firefox tarball's SHA-512 is re-verified against Mozilla's own `SHA512SUMS`
+     * at build time. The workflow uploads the archive to this repo's GitHub
+     * Releases and AUTO-COMMITS the real sha256/size/URL here - until that first
+     * run, the row is a [Artifact.placeholder] and download refuses (fail closed,
+     * exactly like an unpinned native binary).
+     *
+     * Licensing (docs/THIRD_PARTY.md): Ubuntu packages redistribute under their
+     * own licences (copyright texts travel inside the image), Wine is LGPL-2.1+,
+     * and Firefox ESR is an UNMODIFIED official Mozilla build (MPL-2.0) - the
+     * bundle embeds its full provenance in [RootfsBundle.MANIFEST_GUEST_PATH].
+     */
+    val ROOTFS_BUNDLE = Artifact(
+        id = "rootfs-bundle",
+        label = "Desktop runtime bundle (noble arm64): GTK3/X11/fonts + Wine 9 + Firefox ESR - PREBUILT",
+        url = "https://github.com/komalsito/win11-emulator/releases/download/" +
+            "rootfs-bundle-v1/win11we-rootfs-bundle-noble-arm64-v1.tar.xz",
+        sha256 = "0".repeat(64), // placeholder until the first build-rootfs-bundle run auto-commits the real pin
+        sizeBytes = 0,
+        requiredFreeBytes = 3_200L * 1024 * 1024, // ~500 MB archive + ~1.4 GB unpacked + slack
+        description = "One download, one extraction, everything installed: the noble arm64 rootfs with the " +
+            "browser's GTK3/X11/font/CA stack, Wine 9 (loader + libwine), Firefox ESR at /opt/firefox-esr, " +
+            "a warm fontconfig cache and a wineboot-initialised prefix template. Built by the " +
+            "build-rootfs-bundle CI workflow from publisher-verified inputs; replaces the three component " +
+            "rows below and the on-device apt provisioning step.",
+        placeholder = true,
+    )
 
     /**
      * Ubuntu 24.04.5 (noble) base rootfs, arm64. Hash from Ubuntu's published SHA256SUMS
@@ -133,10 +195,30 @@ object RuntimeManifest {
         incompleteAlone = true,
     )
 
-    val ALL = listOf(ROOTFS, WINE64_DEB, WINE_ALL_DEB, FIREFOX_ESR)
+    val ALL = listOf(ROOTFS_BUNDLE, ROOTFS, WINE64_DEB, WINE_ALL_DEB, FIREFOX_ESR)
 
     fun byId(id: String): Artifact? = ALL.firstOrNull { it.id == id }
 
-    /** Total free space the full set insists on before any download starts. */
-    val requiredFreeBytes: Long get() = ALL.sumOf { it.requiredFreeBytes }
+    /**
+     * Total free space the "full set" insists on before any download starts.
+     * The bundle and the components are ALTERNATIVE install paths, not a sum:
+     * nobody needs both, so the requirement is the more expensive path, not
+     * both added together.
+     */
+    val requiredFreeBytes: Long
+        get() {
+            val components = ALL.filterNot { it.id == ROOTFS_BUNDLE.id }.sumOf { it.requiredFreeBytes }
+            return maxOf(ROOTFS_BUNDLE.requiredFreeBytes, components)
+        }
+
+    /**
+     * The honest refusal for a [Artifact.placeholder] row: nothing is downloadable
+     * until the producing CI workflow has run and auto-committed the pin.
+     */
+    fun placeholderRefusal(artifact: Artifact): String =
+        "\"${artifact.label}\" has no pin yet: it is produced by the build-rootfs-bundle CI workflow " +
+            "(GitHub ▸ Actions ▸ build-rootfs-bundle ▸ Run workflow), which uploads the archive to " +
+            "Releases and auto-commits its SHA-256 here - the same contract that vendored libbox64.so. " +
+            "Until then there is nothing to download and no hash to trust (fail closed). The component " +
+            "rows below are the working install path today."
 }

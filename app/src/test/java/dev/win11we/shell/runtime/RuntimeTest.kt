@@ -2,6 +2,8 @@ package dev.win11we.shell.runtime
 
 import dev.win11we.shell.runtime.download.RuntimeManifest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.fail
 import org.junit.Assert.assertNull
@@ -453,6 +455,91 @@ class ProotCommandTest {
                 deb.url.contains("9.0~repack-4build3"),
             )
         }
+    }
+
+    // --- the prebuilt runtime bundle: contract + CI cross-pins -------------------
+
+    /** Walks up from the test's working dir to the repo root (settings.gradle.kts). */
+    private fun repoRoot(): File? {
+        var dir: File? = File(".").canonicalFile
+        while (dir != null) {
+            if (File(dir, "settings.gradle.kts").isFile) return dir
+            dir = dir.parentFile
+        }
+        return null
+    }
+
+    @Test
+    fun `the bundle row is a fail-closed placeholder until its CI build pins it`() {
+        val bundle = RuntimeManifest.ROOTFS_BUNDLE
+        assertEquals("rootfs-bundle", bundle.id)
+        assertTrue(
+            "the bundle must be hosted on THIS repo's releases (the auto-pin workflow's target), got ${'$'}{bundle.url}",
+            bundle.url.startsWith("https://github.com/komalsito/win11-emulator/releases/download/rootfs-bundle-"),
+        )
+        assertTrue(bundle.fileName.endsWith(".tar.xz"))
+        assertFalse("the bundle IS a complete install", bundle.incompleteAlone)
+        if (bundle.placeholder) {
+            assertEquals("0".repeat(64), bundle.sha256)
+            assertEquals(0L, bundle.sizeBytes)
+        } else {
+            assertNotEquals("a real pin must replace the placeholder zeros", "0".repeat(64), bundle.sha256)
+            assertTrue("a real bundle is hundreds of MB", bundle.sizeBytes > 100_000_000L)
+        }
+        assertTrue(
+            "the bundle needs room for the archive AND the unpacked tree",
+            bundle.requiredFreeBytes >= 2L * 1024 * 1024 * 1024,
+        )
+        assertEquals("the recommended one-artifact path is listed first", bundle.id, RuntimeManifest.ALL.first().id)
+        assertEquals(bundle, RuntimeManifest.byId("rootfs-bundle"))
+    }
+
+    @Test
+    fun `the full-set free space is the more expensive install path, not the sum of both paths`() {
+        val components = RuntimeManifest.ALL
+            .filterNot { it.id == RuntimeManifest.ROOTFS_BUNDLE.id }
+            .sumOf { it.requiredFreeBytes }
+        assertEquals(
+            maxOf(RuntimeManifest.ROOTFS_BUNDLE.requiredFreeBytes, components),
+            RuntimeManifest.requiredFreeBytes,
+        )
+    }
+
+    @Test
+    fun `the bundle builder pins the same rootfs, guest paths and packages as the app`() {
+        // The bundle must be built from the SAME inputs the app pins - a drifting
+        // copy in the CI script is the release-mismatch bug class all over again.
+        val root = repoRoot()
+        assertNotNull("the repo root must be locatable from the test working dir", root)
+        val pins = File(root!!, "ci/rootfs-bundle/pins.env").readText()
+        assertTrue("the bundle base must be the pinned ubuntu-base", pins.contains(RuntimeManifest.ROOTFS.url))
+        assertTrue("...at the pinned hash", pins.contains(RuntimeManifest.ROOTFS.sha256))
+        assertTrue(pins.contains(RuntimeManifest.RootfsBundle.MANIFEST_GUEST_PATH))
+        assertTrue(pins.contains(RuntimeManifest.RootfsBundle.TEMPLATE_GUEST_PATH))
+        assertTrue(pins.contains("https://archive.mozilla.org/pub/firefox/releases"))
+
+        val packages = File(root, "ci/rootfs-bundle/packages.env").readLines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+        RootfsProvisioner.BROWSER_PACKAGES.forEach {
+            assertTrue("the bundle must install $it (the t64 lesson: one missing name fails everything)", packages.contains(it))
+        }
+        WineProvisioner.WINE_PACKAGES.forEach {
+            assertTrue("the bundle must install $it", packages.contains(it))
+        }
+
+        val script = File(root, "ci/rootfs-bundle/build.sh").readText()
+        assertTrue("Firefox integrity comes from Mozilla's own SHA512SUMS", script.contains("SHA512SUMS"))
+        assertTrue("the base rootfs is hash-verified, fail closed", script.contains("sha256sum -c"))
+        assertTrue("the firefox tarball is hash-verified too", script.contains("sha512sum -c"))
+        assertTrue("the bundle embeds its provenance manifest", script.contains("BUNDLE_MANIFEST_PATH"))
+        assertTrue("the promise check gates packing", script.contains("bundle promise verified"))
+
+        val workflow = File(root, ".github/workflows/build-rootfs-bundle.yml").readText()
+        assertTrue("dispatch-only, like build-native", workflow.contains("workflow_dispatch"))
+        assertTrue("it must never run on push", workflow.contains("on:\n  workflow_dispatch:"))
+        assertTrue("native arm64 - chroot, not qemu", workflow.contains("ubuntu-24.04-arm"))
+        assertTrue("the pin is auto-committed", workflow.contains("patch_pin.py"))
     }
 
     @Test

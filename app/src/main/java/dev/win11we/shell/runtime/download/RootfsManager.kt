@@ -8,6 +8,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.Snapshot
 import dev.win11we.shell.runtime.FirefoxSession
 import dev.win11we.shell.runtime.RuntimePaths
+import dev.win11we.shell.runtime.WinePayload
 import dev.win11we.shell.ui.terminal.LineKind
 import dev.win11we.shell.ui.terminal.LogBuffer
 import dev.win11we.shell.ui.terminal.TerminalLine
@@ -41,7 +42,8 @@ class RootfsManager(
     private val session: DownloadSession,
     private val log: LogBuffer,
     private val artifacts: List<Artifact> = RuntimeManifest.ALL,
-    private val extractor: (File, File) -> Boolean = { _, _ -> false },
+    /** Unpacks a verified archive into the rootfs dir; reports progress 0..1 as it goes. */
+    private val extractor: (File, File, (Float) -> Unit) -> Boolean = { _, _, _ -> false },
 ) {
     val states = mutableStateMapOf<String, ArtifactState>()
     val progress = mutableStateMapOf<String, Float>()
@@ -80,11 +82,20 @@ class RootfsManager(
 
     /**
      * Whether an artifact's install result is already on disk: the unpacked
-     * rootfs tree for ROOTFS, the unpacked Mozilla build for FIREFOX_ESR.
+     * rootfs tree for ROOTFS, the unpacked Mozilla build for FIREFOX_ESR, and
+     * for the prebuilt bundle the WHOLE promise of the bundle - rootfs unpacked,
+     * Firefox in place, the GTK3 stack, the Wine payload AND the bundle's own
+     * provenance manifest (a hand-assembled rootfs is not "the bundle installed",
+     * even when it happens to contain the same trees).
      */
     private fun installedCheck(artifact: Artifact): Boolean = when (artifact.id) {
         RuntimeManifest.ROOTFS.id -> rootfsReady
         RuntimeManifest.FIREFOX_ESR.id -> FirefoxSession.isInstalled(rootfsDir)
+        RuntimeManifest.ROOTFS_BUNDLE.id -> rootfsReady &&
+            FirefoxSession.isInstalled(rootfsDir) &&
+            FirefoxSession.guiLibrariesPresent(rootfsDir) &&
+            WinePayload.isProvisioned(rootfsDir) &&
+            File(rootfsDir, RuntimeManifest.RootfsBundle.MANIFEST_GUEST_PATH.removePrefix("/")).isFile
         else -> false
     }
 
@@ -156,6 +167,14 @@ class RootfsManager(
      */
     fun download(artifact: Artifact): DownloadResult {
         if (busy) return DownloadResult(DownloadOutcome.CANCELLED, "Another download is already running.")
+        if (artifact.placeholder) {
+            // Fail closed, and say which step unlocks it - a placeholder hash must
+            // never reach the transfer, and the refusal must not read like a bug.
+            val message = RuntimeManifest.placeholderRefusal(artifact)
+            Snapshot.withMutableSnapshot { messages[artifact.id] = message }
+            log.add(TerminalLine(LineKind.ERROR, "${artifact.id}: refused - $message"))
+            return DownloadResult(DownloadOutcome.NOT_PINNED, message)
+        }
         setState(artifact.id, ArtifactState.DOWNLOADING)
         Snapshot.withMutableSnapshot {
             busy = true
@@ -230,6 +249,14 @@ class RootfsManager(
      */
     fun import(artifact: Artifact, input: InputStream, sourceName: String): DownloadResult {
         if (busy) return DownloadResult(DownloadOutcome.CANCELLED, "Another download is already running.")
+        if (artifact.placeholder) {
+            // SAF imports are held to the pin - and a placeholder HAS no pin, so an
+            // import could never verify. Same honest refusal as download().
+            val message = RuntimeManifest.placeholderRefusal(artifact)
+            Snapshot.withMutableSnapshot { messages[artifact.id] = message }
+            log.add(TerminalLine(LineKind.ERROR, "${artifact.id}: import refused - $message"))
+            return DownloadResult(DownloadOutcome.NOT_PINNED, message)
+        }
         Snapshot.withMutableSnapshot { busy = true }
         runCatching { downloadDir.mkdirs() }
         setState(artifact.id, ArtifactState.VERIFYING)
@@ -290,12 +317,22 @@ class RootfsManager(
             return false
         }
         setState(artifact.id, ArtifactState.EXTRACTING)
-        val ok = runCatching { extractor(archive, rootfsDir) }.getOrDefault(false)
+        Snapshot.withMutableSnapshot { progress[artifact.id] = 0f }
+        val ok = runCatching {
+            extractor(archive, rootfsDir) { fraction ->
+                Snapshot.withMutableSnapshot { progress[artifact.id] = fraction.coerceIn(0f, 1f) }
+            }
+        }.getOrDefault(false)
         val ready = ok && installedCheck(artifact)
+        Snapshot.withMutableSnapshot { progress[artifact.id] = if (ready) 1f else progress[artifact.id] ?: 0f }
         setState(artifact.id, if (ready) ArtifactState.READY else ArtifactState.FAILED)
         val message = when {
             ready && artifact.id == RuntimeManifest.FIREFOX_ESR.id ->
                 "Installed to ${File(rootfsDir, "opt/firefox-esr").absolutePath}."
+            ready && artifact.id == RuntimeManifest.ROOTFS_BUNDLE.id ->
+                "Desktop runtime bundle installed at ${rootfsDir.absolutePath}: Firefox ESR, the GTK3/X11/font " +
+                    "stack and the Wine payload are in place - no apt provisioning needed. Container Manager ▸ " +
+                    "Initialize prefix now copies the bundle's prefix template (seconds, no wineboot run)."
             ready -> "Extracted to ${rootfsDir.absolutePath}."
             else ->
                 "Extraction did not produce a usable ${if (artifact.id == RuntimeManifest.ROOTFS.id) "rootfs" else artifact.label} install. " +
@@ -312,7 +349,11 @@ class RootfsManager(
     /** Removes the archive, its partial download and the artifact's unpacked tree. */
     fun remove(artifact: Artifact): Boolean {
         val removed = runCatching { session.remove(artifact, downloadDir) }.getOrDefault(false)
-        if (artifact.id == RuntimeManifest.ROOTFS.id && rootfsDir.isDirectory) {
+        // The bundle IS a whole rootfs: removing it removes the tree, exactly like
+        // the base rootfs row does.
+        if ((artifact.id == RuntimeManifest.ROOTFS.id || artifact.id == RuntimeManifest.ROOTFS_BUNDLE.id) &&
+            rootfsDir.isDirectory
+        ) {
             runCatching { rootfsDir.deleteRecursively() }
         }
         if (artifact.id == RuntimeManifest.FIREFOX_ESR.id) {

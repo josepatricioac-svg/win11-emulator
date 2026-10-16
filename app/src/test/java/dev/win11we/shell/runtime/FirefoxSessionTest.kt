@@ -220,7 +220,7 @@ class FirefoxSessionTest {
         }
     }
 
-    private fun manager(rootfs: File, downloads: File, extractor: (File, File) -> Boolean = { _, _ -> false }) =
+    private fun manager(rootfs: File, downloads: File, extractor: (File, File, (Float) -> Unit) -> Boolean = { _, _, _ -> false }) =
         RootfsManager(
             downloadDir = downloads,
             rootfsDir = rootfs,
@@ -247,7 +247,7 @@ class FirefoxSessionTest {
     fun `extracting firefox without an archive or with a wrong hash fails honestly`() {
         val rootfs = File(tmp.root, "rootfs")
         val downloads = tmp.newFolder("downloads")
-        val manager = manager(rootfs, downloads, extractor = { _, _ -> true })
+        val manager = manager(rootfs, downloads, extractor = { _, _, _ -> true })
         assertFalse(manager.extract(RuntimeManifest.FIREFOX_ESR))
         assertEquals(ArtifactState.NOT_DOWNLOADED, manager.stateOf(RuntimeManifest.FIREFOX_ESR.id))
 
@@ -272,7 +272,8 @@ class FirefoxSessionTest {
         assertEquals("firefox-153.5.0esr.tar.xz", artifact.fileName)
         assertTrue("needs the rootfs to be a working install", artifact.incompleteAlone)
         assertTrue(RuntimeManifest.ALL.contains(artifact))
-        assertEquals(4, RuntimeManifest.ALL.size)
+        // 5 = the prebuilt rootfs bundle row + the four component artifacts.
+        assertEquals(5, RuntimeManifest.ALL.size)
         assertNull(RuntimeManifest.byId("nope"))
     }
 
