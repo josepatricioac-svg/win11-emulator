@@ -57,11 +57,25 @@ done
 echo "== 3/7  apt: GUI stack + Wine (names pinned by packages.env, distro-resolved versions)"
 grep -v '^#' "$HERE/packages.env" | grep -v '^[[:space:]]*$' > "$WORK/packages.txt"
 sudo cp "$WORK/packages.txt" "$ROOT/tmp/packages.txt"
+# Doctor block: run #1 (38936771124) died here with apt's GPG temp-file error
+# ("Couldn't create temporary file /tmp/apt.conf.*"). If this ever fails again,
+# these lines name the cause in seconds instead of another guess cycle.
+sudo chroot "$ROOT" /bin/bash -c '
+    echo "chroot-diag: id=$(id)"
+    ls -ldn /tmp /var/tmp
+    touch /tmp/.probe && rm -f /tmp/.probe && echo "chroot-diag: /tmp writable"
+'
+sudo chmod 1777 "$ROOT/tmp" "$ROOT/var/tmp"
+# APT::Sandbox::User=root: the SAME fix the on-device RootfsProvisioner needs -
+# apt's dropped-privilege _apt fetch user is what chokes on the temp-file
+# plumbing for InRelease verification; no drop, no choke. Signature checking
+# is untouched (an unsigned repo still fails closed).
 sudo chroot "$ROOT" /bin/bash -c '
     set -e
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    xargs -a /tmp/packages.txt apt-get install -y --no-install-recommends
+    export DEBIAN_FRONTEND=noninteractive TMPDIR=/tmp
+    APT_OPTS="-o APT::Sandbox::User=root -o Dpkg::Options::=--force-confold"
+    apt-get $APT_OPTS update -qq
+    xargs -a /tmp/packages.txt apt-get $APT_OPTS install -y --no-install-recommends
     dpkg --configure -a
     echo "-- fc-cache: warm the fontconfig cache at BUILD time, not during the first paint"
     fc-cache -f
